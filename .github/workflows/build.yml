@@ -38,7 +38,7 @@ jobs:
             host: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ inputs.ref }}
           persist-credentials: false
@@ -92,7 +92,7 @@ jobs:
           tar -czf "dist/$archive" -C package mailtriage LICENSE README.md
           cd dist
           shasum -a 256 "$archive" > "$archive.sha256"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.1
         with:
           name: mailtriage-${{ matrix.platform }}
           path: dist/*
