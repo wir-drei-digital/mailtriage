@@ -1,0 +1,9 @@
+From: Operations <ops@example.com>
+To: Demo Recipient <work@example.invalid>
+Subject: Service incident resolved
+Date: Mon, 21 Sep 2026 11:00:00 +0000
+Message-ID: <example-urgent-fyi@example.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+
+The incident affected today's customer traffic. It is now resolved. No action is required from you.

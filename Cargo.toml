@@ -1,0 +1,29 @@
+[package]
+name = "mailtriage"
+version = "0.1.0"
+edition = "2021"
+description = "Local email classification and attention queries for humans and agents"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+ctrlc = { version = "3", features = ["termination"] }
+fs2 = "0.4"
+mail-parser = "0.11"
+html2text = "0.16"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "mailtriage"
+path = "src/main.rs"

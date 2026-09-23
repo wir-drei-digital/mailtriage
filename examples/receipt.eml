@@ -1,0 +1,9 @@
+From: Receipts <receipts@example.com>
+To: Demo Recipient <work@example.invalid>
+Subject: Your receipt
+Date: Mon, 21 Sep 2026 10:00:00 +0000
+Message-ID: <example-receipt@example.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+
+Your payment was received. This is a receipt for your records.

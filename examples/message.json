@@ -1,0 +1,7 @@
+{
+  "from": [{"email": "alex@example.com", "name": "Alex"}],
+  "to": [{"email": "work@example.invalid", "name": "Demo Recipient"}],
+  "subject": "Can you review the proposal?",
+  "sent_at": "2026-09-21T08:30:00Z",
+  "body": "Hi, could you review the proposal and send your feedback this week?"
+}

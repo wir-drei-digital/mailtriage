@@ -1,0 +1,6 @@
+/target/
+/dist/
+/.state/
+/.env
+*.sqlite*
+*.eml.private
