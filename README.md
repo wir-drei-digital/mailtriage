@@ -11,7 +11,7 @@ cargo build --release
 ./target/release/mailtriage --help
 ```
 
-The release binary is `target/release/mailtriage`. Rust's current stable toolchain and a local SQLite-compatible filesystem are required. The CI and release workflows are configured to build native binaries for Linux amd64, Linux arm64, and macOS arm64, then upload archives as workflow artifacts. These artifacts become available only after the workflows run successfully on GitHub; local verification does not prove those remote builds.
+The release binary is `target/release/mailtriage`. Rust's current stable toolchain and a local SQLite-compatible filesystem are required. CI tests and packages native binaries for Linux amd64, Linux arm64, and macOS arm64. Pushing a matching `vX.Y.Z` tag publishes these archives and SHA-256 checksums to [GitHub Releases](https://github.com/wir-drei-digital/mailtriage/releases) after all checks pass. See the [release guide](docs/releases.md) for publishing, prereleases, and download verification.
 
 This checkout also includes a locally verified macOS arm64 executable at
 `dist/mailtriage`. See [the verification receipt](docs/verification.md) for build

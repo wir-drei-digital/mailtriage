@@ -1,53 +1,122 @@
-name: Release binaries
+name: Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    tags: ['v*']
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing vX.Y.Z tag to release (must match Cargo.toml)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
-  binaries:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-24.04
-            platform: linux-amd64
-          - os: ubuntu-24.04-arm
-            platform: linux-arm64
-          - os: macos-15
-            platform: macos-arm64
-    runs-on: ${{ matrix.os }}
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.ref.outputs.tag }}
+      sha: ${{ steps.ref.outputs.sha }}
+      version: ${{ steps.ref.outputs.version }}
+      prerelease: ${{ steps.ref.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
-      - run: cargo build --release
-      - name: Smoke test binary
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate tag and resolve its commit
+        id: ref
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          tmp_dir="$(mktemp -d)"
-          cd "$tmp_dir"
-          "$GITHUB_WORKSPACE/target/release/mailtriage" init --json
-          "$GITHUB_WORKSPACE/target/release/mailtriage" classify --account work --input "$GITHUB_WORKSPACE/examples/reply-request.eml" --format rfc822 --json
-          "$GITHUB_WORKSPACE/target/release/mailtriage" list --account work --view all --json
-      - name: Package and checksum
+          python3 - <<'PY'
+          import os, re
+          tag = os.environ['RELEASE_TAG']
+          if not re.fullmatch(r'v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?', tag):
+              raise SystemExit('Expected a version tag such as v0.1.0 or v0.2.0-rc.1')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'tag={tag}\nversion={tag[1:]}\nprerelease={str("-" in tag).lower()}\n')
+          PY
+          sha="$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")"
+          git merge-base --is-ancestor "$sha" origin/main
+          printf 'sha=%s\n' "$sha" >> "$GITHUB_OUTPUT"
+      - name: Require the tag to match the package version
+        env:
+          RELEASE_SHA: ${{ steps.ref.outputs.sha }}
+          RELEASE_VERSION: ${{ steps.ref.outputs.version }}
         run: |
           set -euo pipefail
-          mkdir -p dist
-          cp target/release/mailtriage dist/mailtriage
+          git show "${RELEASE_SHA}:Cargo.toml" > /tmp/release-Cargo.toml
+          python3 - <<'PY'
+          import os, pathlib, tomllib
+          version = tomllib.loads(pathlib.Path('/tmp/release-Cargo.toml').read_text())['package']['version']
+          if version != os.environ['RELEASE_VERSION']:
+              raise SystemExit(f'Tag does not match package version {version}')
+          PY
+
+  binaries:
+    needs: prepare
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: ${{ needs.prepare.outputs.sha }}
+      expected_version: ${{ needs.prepare.outputs.version }}
+
+  publish:
+    needs: [prepare, binaries]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: mailtriage-*
+          merge-multiple: true
+          path: dist
+      - name: Check downloaded assets
+        run: |
+          set -euo pipefail
           cd dist
-          tar -czf "mailtriage-${{ matrix.platform }}.tar.gz" mailtriage
-          shasum -a 256 "mailtriage-${{ matrix.platform }}.tar.gz" > "mailtriage-${{ matrix.platform }}.tar.gz.sha256"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: mailtriage-${{ matrix.platform }}
-          path: |
-            dist/mailtriage-${{ matrix.platform }}.tar.gz
-            dist/mailtriage-${{ matrix.platform }}.tar.gz.sha256
+          archives=(*.tar.gz)
+          manifests=(*.tar.gz.sha256)
+          test "${#archives[@]}" -eq 3
+          test "${#manifests[@]}" -eq 3
+          cat "${manifests[@]}" > SHA256SUMS
+          sha256sum --check SHA256SUMS
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          assets=(dist/*.tar.gz dist/*.sha256 dist/SHA256SUMS)
+          if gh release view "$RELEASE_TAG" --json isDraft > /tmp/existing-release.json 2>/dev/null; then
+            jq -e '.isDraft == true' /tmp/existing-release.json > /dev/null || {
+              echo 'Release is already published; assets will not be overwritten.' >&2
+              exit 1
+            }
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+          else
+            extra=()
+            if [ "$PRERELEASE" = true ]; then extra+=(--prerelease); fi
+            gh release create "$RELEASE_TAG" "${assets[@]}" --verify-tag \
+              --target "$RELEASE_SHA" --title "mailtriage $RELEASE_TAG" \
+              --generate-notes --draft "${extra[@]}"
+          fi
+          if [ "$PRERELEASE" = true ]; then
+            gh release edit "$RELEASE_TAG" --draft=false --prerelease --latest=false
+          else
+            gh release edit "$RELEASE_TAG" --draft=false --latest
+          fi
+          gh release view "$RELEASE_TAG" --json url --jq '.url' >> "$GITHUB_STEP_SUMMARY"

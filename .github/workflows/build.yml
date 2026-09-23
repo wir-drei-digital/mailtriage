@@ -1,0 +1,100 @@
+name: Test and package
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Exact commit to build
+        required: true
+        type: string
+      expected_version:
+        description: Release version without the v prefix
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux-amd64
+            host: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            platform: linux-arm64
+            host: aarch64-unknown-linux-gnu
+          - os: macos-15
+            platform: macos-arm64
+            host: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.platform }}
+      - name: Check platform and version
+        id: version
+        env:
+          EXPECTED_HOST: ${{ matrix.host }}
+          EXPECTED_VERSION: ${{ inputs.expected_version }}
+        run: |
+          set -euo pipefail
+          actual_host="$(rustc -vV | sed -n 's/^host: //p')"
+          test "$actual_host" = "$EXPECTED_HOST"
+          python3 - <<'PY'
+          import os, pathlib, tomllib
+          version = tomllib.loads(pathlib.Path('Cargo.toml').read_text())['package']['version']
+          expected = os.environ['EXPECTED_VERSION']
+          if expected and version != expected:
+              raise SystemExit(f'Tag version {expected} differs from Cargo.toml {version}')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'version={version}\n')
+          PY
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - name: Smoke test release binary
+        run: |
+          set -euo pipefail
+          tmp_dir="$(mktemp -d)"
+          trap 'rm -rf "$tmp_dir"' EXIT
+          cd "$tmp_dir"
+          binary="$GITHUB_WORKSPACE/target/release/mailtriage"
+          "$binary" init --json
+          "$binary" classify --account work --input "$GITHUB_WORKSPACE/examples/reply-request.eml" --format rfc822 --json
+          "$binary" list --account work --view all --json
+      - name: Package binary and checksum
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist package
+          cp target/release/mailtriage LICENSE README.md package/
+          archive="mailtriage-v${VERSION}-${PLATFORM}.tar.gz"
+          tar -czf "dist/$archive" -C package mailtriage LICENSE README.md
+          cd dist
+          shasum -a 256 "$archive" > "$archive.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mailtriage-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14

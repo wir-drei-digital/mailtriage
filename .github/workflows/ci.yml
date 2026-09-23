@@ -2,56 +2,19 @@ name: CI
 
 on:
   push:
+    branches: ['**']
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
-      - run: cargo build --release
-      - name: Smoke test release binary
-        run: |
-          set -euo pipefail
-          tmp_dir="$(mktemp -d)"
-          cd "$tmp_dir"
-          "$GITHUB_WORKSPACE/target/release/mailtriage" init --json
-          "$GITHUB_WORKSPACE/target/release/mailtriage" classify --account work --input "$GITHUB_WORKSPACE/examples/reply-request.eml" --format rfc822 --json
-          "$GITHUB_WORKSPACE/target/release/mailtriage" list --account work --view all --json
-
-  release-binary:
-    needs: verify
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-24.04
-            target: linux-amd64
-          - os: ubuntu-24.04-arm
-            target: linux-arm64
-          - os: macos-15
-            target: macos-arm64
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release
-      - name: Package binary
-        run: |
-          mkdir -p dist
-          cp target/release/mailtriage dist/mailtriage
-          cd dist
-          tar -czf "mailtriage-${{ matrix.target }}.tar.gz" mailtriage
-      - uses: actions/upload-artifact@v4
-        with:
-          name: mailtriage-${{ matrix.target }}
-          path: dist/mailtriage-${{ matrix.target }}.tar.gz
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: ${{ github.sha }}
