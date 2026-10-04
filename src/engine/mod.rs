@@ -3,6 +3,7 @@
 //! another. No method can delete, expunge, unflag, change \Seen, or delete or
 //! rename folders. Writes are limited to creating and subscribing folders,
 //! UID MOVE and adding \Flagged.
+pub mod fake;
 pub mod himalaya;
 pub mod raw;
 

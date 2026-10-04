@@ -92,6 +92,12 @@ impl Service {
             engine_override: None,
         })
     }
+    /// Like `open`, but every account with an engine config uses `engine`.
+    pub fn open_with_engine(path: &Path, engine: Rc<dyn MailEngine>) -> Result<Self> {
+        let mut service = Self::open(path)?;
+        service.engine_override = Some(engine);
+        Ok(service)
+    }
     fn engine(&self, account: &AccountConfig) -> Result<Option<Rc<dyn MailEngine>>> {
         match (&self.engine_override, account.engine_config()) {
             (_, None) => Ok(None),

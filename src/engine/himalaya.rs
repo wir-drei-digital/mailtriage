@@ -788,7 +788,7 @@ fn read_bounded<R: Read>(
     }
 }
 
-fn parse_address(display: &str) -> Address {
+pub(crate) fn parse_address(display: &str) -> Address {
     let trimmed = display.trim();
     if let Some((name, rest)) = trimmed.rsplit_once('<') {
         if let Some(email) = rest.strip_suffix('>') {
