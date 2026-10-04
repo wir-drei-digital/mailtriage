@@ -77,7 +77,20 @@ fn folder_rules_apply_when_filing_is_on() {
     let a = c.accounts.get_mut("work").unwrap();
     a.filing.mode = FilingMode::Live;
     for bad in [
-        "", " News", "a/b", "a.b", "x*", "x%", "q\"", "b\\s", "Inbox", "inbox", "Grüße",
+        "",
+        " News",
+        "News ",
+        "a/b",
+        "a.b",
+        "x*",
+        "x%",
+        "q\"",
+        "b\\s",
+        "a&b",
+        "tab\there",
+        "Inbox",
+        "inbox",
+        "Grüße",
     ] {
         c.accounts.get_mut("work").unwrap().categories[0].folder = Some(bad.into());
         assert!(config::validate(&c).is_err(), "accepted {bad:?}");
@@ -88,8 +101,8 @@ fn folder_rules_apply_when_filing_is_on() {
     a.categories[1].folder = Some("INBOX".into());
     config::validate(&c).unwrap();
     let a = c.accounts.get_mut("work").unwrap();
-    a.categories[2].folder = Some("Bills & Receipts".into());
-    a.categories[3].folder = Some("bills & receipts".into());
+    a.categories[2].folder = Some("Bills and Receipts".into());
+    a.categories[3].folder = Some("bills and receipts".into());
     assert!(
         config::validate(&c).is_err(),
         "case-insensitive duplicate accepted"
@@ -102,6 +115,25 @@ fn folder_rules_apply_when_filing_is_on() {
         .filing
         .max_actions_per_pass = 0;
     assert!(config::validate(&c).is_err());
+}
+
+#[test]
+fn unsupported_schema_versions_are_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("c.json");
+    for version in [0, 3] {
+        let mut c = serde_json::to_value(config::default_config()).unwrap();
+        c["schema_version"] = json!(version);
+        fs::write(&path, c.to_string()).unwrap();
+        let err = config::load(&path).unwrap_err().to_string();
+        assert!(err.contains("schema_version"), "schema {version}: {err}");
+        let mut typed = config::default_config();
+        typed.schema_version = version;
+        assert!(
+            config::save(&path, &typed).is_err(),
+            "saved schema {version}"
+        );
+    }
 }
 
 #[test]

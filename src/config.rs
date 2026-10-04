@@ -100,7 +100,9 @@ pub fn default_config() -> AppConfig {
 }
 
 /// Moves the legacy `himalaya` block into `engine` and marks the config as schema 2.
+/// Refuses unknown schema versions so a newer file is never rewritten as schema 2.
 pub fn normalize(config: &mut AppConfig) -> Result<()> {
+    check_schema_version(config.schema_version)?;
     for (name, account) in config.accounts.iter_mut() {
         if let Some(h) = account.himalaya.take() {
             if account.engine.is_some() {
@@ -113,13 +115,15 @@ pub fn normalize(config: &mut AppConfig) -> Result<()> {
     Ok(())
 }
 
-pub fn validate(config: &AppConfig) -> Result<()> {
-    if !(1..=2).contains(&config.schema_version) {
-        bail!(
-            "unsupported config schema_version {}",
-            config.schema_version
-        );
+fn check_schema_version(version: u32) -> Result<()> {
+    if !(1..=2).contains(&version) {
+        bail!("unsupported config schema_version {version}");
     }
+    Ok(())
+}
+
+pub fn validate(config: &AppConfig) -> Result<()> {
+    check_schema_version(config.schema_version)?;
     if config.state_dir.as_os_str().is_empty() {
         bail!("state_dir cannot be empty");
     }
@@ -229,6 +233,7 @@ pub fn validate(config: &AppConfig) -> Result<()> {
 }
 
 /// A single printable-ASCII path segment, or the literal `INBOX` (stay in the source folder).
+/// `&` is refused: it is the modified UTF-7 shift character in IMAP mailbox names.
 fn valid_folder_name(folder: &str) -> bool {
     folder == "INBOX"
         || (!folder.is_empty()
@@ -236,7 +241,7 @@ fn valid_folder_name(folder: &str) -> bool {
             && folder.trim() == folder
             && !folder.eq_ignore_ascii_case("inbox")
             && folder.chars().all(|c| (' '..='~').contains(&c))
-            && !folder.contains(['/', '.', '*', '%', '"', '\\']))
+            && !folder.contains(['/', '.', '*', '%', '"', '\\', '&']))
 }
 
 fn valid_id(id: &str) -> bool {
