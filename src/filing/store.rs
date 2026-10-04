@@ -230,6 +230,37 @@ impl Store {
         )?)
     }
 
+    /// `queued`, minus messages that still need a fetch whose fetch locator
+    /// (the occurrence `locator` picks) is in `blocked`; those stay queued
+    /// without a lease or attempt.
+    pub fn queued_outside(
+        &self,
+        account: &str,
+        limit: usize,
+        blocked: &BTreeSet<String>,
+    ) -> Result<Vec<String>> {
+        if blocked.is_empty() {
+            return self.queued(account, limit);
+        }
+        let mut st = self.db.prepare("SELECT j.message_id FROM jobs j JOIN messages m ON m.id=j.message_id WHERE m.account=?1
+ AND ((j.state IN ('queued','retry') AND j.next_after<=?2) OR (j.state='leased' AND j.lease_until<=?2))
+ AND NOT (m.normalized IS NULL AND EXISTS(SELECT 1 FROM json_each(?3) b WHERE b.value=
+  (SELECT mailbox FROM occurrences o WHERE o.account=m.account AND o.message_id=m.id ORDER BY mailbox LIMIT 1)))
+ ORDER BY m.observed_at,j.message_id LIMIT ?4")?;
+        let rows = st
+            .query_map(
+                params![
+                    account,
+                    now(),
+                    serde_json::to_string(blocked)?,
+                    limit as i64
+                ],
+                |r| r.get(0),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     /// Folders named by any rescan-set row.
     pub fn rescan_folders(&self, account: &str) -> Result<BTreeSet<String>> {
         let mut st = self

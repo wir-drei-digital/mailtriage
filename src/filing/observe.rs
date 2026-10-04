@@ -61,6 +61,9 @@ pub struct FolderMap {
     pub would_create: Vec<String>,
     /// Live, MOVE supported, no alias conflict.
     pub writes_allowed: bool,
+    /// Folders a client-side alias resolves elsewhere: neither discovered nor
+    /// fetched from while the conflict lasts.
+    pub alias_conflicts: BTreeSet<String>,
 }
 
 impl FolderMap {
@@ -139,6 +142,7 @@ pub fn resolve_folders(
         summary.problems.push(format!("alias_conflict:{folder}"));
         map.writes_allowed = false;
     }
+    map.alias_conflicts = conflicts.clone();
     let folders = ctx.engine.list_folders()?;
     map.listed = folders.iter().map(|f| f.name.clone()).collect();
     map.caps = Some(caps);
@@ -286,16 +290,18 @@ fn resolve_category(
             rec.subscribed = f.subscribed;
             classify_listed(&mut rec, f, map, &mut events);
         }
+        // Never created (it would turn `special_use` by rule 3 next pass) and
+        // never `missing`: it stays `special_use` while absent.
+        None if denylisted(&w.native, prefix_of(map)) => {
+            rec.error = None;
+            rec.state = "special_use".into();
+        }
         // Rule 4: never recorded, or a create that failed earlier.
         None if prev
             .as_ref()
             .is_none_or(|p| p.state == "error" && p.origin.is_none()) =>
         {
-            if denylisted(&w.native, prefix_of(map)) {
-                // Created, it would turn `special_use` by rule 3 next pass.
-                rec.error = None;
-                rec.state = "special_use".into();
-            } else if ctx.mode == FilingMode::Live && map.writes_allowed {
+            if ctx.mode == FilingMode::Live && map.writes_allowed {
                 create(ctx, &mut rec, summary, &mut events)?;
             } else {
                 if ctx.mode == FilingMode::DryRun {

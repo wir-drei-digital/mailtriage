@@ -7,9 +7,13 @@
 //! `create NAME`, `subscribe NAME`, `move FOLDER 1,2 -> TARGET` and
 //! `flag FOLDER 1,2`. A call refused by `enforce_scope` is logged as
 //! `refused <call>`, has no effect, does not consume a fault and is not
-//! counted by `write_calls()`.
+//! counted by `write_calls()`. After `fail_with_config_changed` triggers,
+//! every call is logged as `config_changed <call>` and fails with
+//! `ConfigChanged`, also without effect or write count.
 use super::himalaya::parse_address;
-use super::{raw, CopyUid, EngineCapabilities, FolderInfo, MailEngine, WriteOutcome};
+use super::{
+    raw, ConfigChanged, CopyUid, EngineCapabilities, FolderInfo, MailEngine, WriteOutcome,
+};
 use crate::domain::{MailboxSnapshot, SourceEnvelope};
 use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
@@ -70,6 +74,11 @@ struct State {
     watch_scope: BTreeSet<String>,
     /// When false, `discover` omits transport metadata like a poor server.
     rich_discovery: bool,
+    /// Call-log prefix from which the configuration counts as changed.
+    config_changed_from: Option<String>,
+    config_changed: bool,
+    /// Folders `alias_conflicts` reports when asked about them.
+    alias_conflicts: BTreeSet<String>,
 }
 
 impl State {
@@ -83,6 +92,17 @@ impl State {
                 self.all_calls.push(format!("refused {call}"));
                 bail!("mailbox is not configured for this account");
             }
+        }
+        if self
+            .config_changed_from
+            .as_deref()
+            .is_some_and(|prefix| call.starts_with(prefix))
+        {
+            self.config_changed = true;
+        }
+        if self.config_changed {
+            self.all_calls.push(format!("config_changed {call}"));
+            return Err(ConfigChanged.into());
         }
         if let Some(op) = op {
             self.calls.push((op, call.clone()));
@@ -255,6 +275,9 @@ impl FakeEngine {
                 sources: None,
                 watch_scope: BTreeSet::new(),
                 rich_discovery: true,
+                config_changed_from: None,
+                config_changed: false,
+                alias_conflicts: BTreeSet::new(),
             })),
         }
     }
@@ -414,6 +437,19 @@ impl FakeEngine {
     /// `envelopes` always returns them.
     pub fn set_rich_discovery(&self, on: bool) {
         self.state().rich_discovery = on;
+    }
+
+    /// Mirrors the Himalaya engine after its TOML changed: from the first trait
+    /// call whose log line starts with `from_call` (e.g. `"list"`,
+    /// `"discover INBOX"`) on, every call fails with `ConfigChanged`.
+    pub fn fail_with_config_changed(&self, from_call: &str) {
+        self.state().config_changed_from = Some(from_call.to_owned());
+    }
+
+    /// Folders that a client-side alias resolves elsewhere; `alias_conflicts`
+    /// reports those it is asked about. Replaces the previous set.
+    pub fn set_alias_conflicts(&self, folders: &[&str]) {
+        self.state().alias_conflicts = folders.iter().map(|f| f.to_string()).collect();
     }
 
     /// Strict scope (mirrors the Himalaya engine): when set, every
@@ -632,7 +668,11 @@ impl MailEngine for FakeEngine {
     fn alias_conflicts(&self, folders: &[String]) -> Result<Vec<String>> {
         let mut s = self.state();
         s.enter(None, format!("alias_conflicts {}", folders.join(",")), &[])?;
-        Ok(Vec::new())
+        Ok(folders
+            .iter()
+            .filter(|f| s.alias_conflicts.contains(*f))
+            .cloned()
+            .collect())
     }
 }
 

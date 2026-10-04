@@ -258,6 +258,86 @@ fn denylisted_category_folder_is_never_created() {
     assert!(!h.fake.calls().contains(&"create Junk".to_string()));
     assert_eq!(folder_state(&h, "Junk").as_deref(), Some("special_use"));
     assert_eq!(out["filing"]["errors"], 0);
+    h.sync();
+    assert_eq!(
+        folder_state(&h, "Junk").as_deref(),
+        Some("special_use"),
+        "an absent denylisted folder never decays to missing"
+    );
+    assert!(!h.fake.calls().contains(&"create Junk".to_string()));
+    let kinds: Vec<String> = h
+        .service()
+        .store
+        .events("work", None, 100)
+        .unwrap()
+        .iter()
+        .filter(|e| e["folder"] == "Junk")
+        .map(|e| e["kind"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(kinds, vec!["folder_special_use".to_string()]);
+}
+
+#[test]
+fn mail_engine_configuration_change_aborts_the_pass_with_exit_5() {
+    use mailtriage::service::ServiceError;
+    for from_call in ["list", "discover INBOX"] {
+        let h = Harness::new(Live);
+        h.fake.deliver("INBOX", &mail("a", "Hello", "hello"));
+        h.fake.fail_with_config_changed(from_call);
+        let e = h.service().sync("work", 100).unwrap_err();
+        let code = e.downcast_ref::<ServiceError>().map(|s| s.code);
+        assert_eq!(code, Some(5), "{from_call}");
+        let state = h.service().store.filing_state("work").unwrap();
+        assert!(state.last_pass.is_none(), "{from_call}: no summary stored");
+        assert!(
+            !h.fake.calls().iter().any(|c| c.starts_with("fetch ")),
+            "{from_call}: the pass stopped before fetching"
+        );
+    }
+}
+
+#[test]
+fn alias_conflict_stops_fetching_from_that_folder() {
+    let h = Harness::new(Live);
+    h.fake.add_folder("Work", &[]);
+    h.edit(|c| {
+        if let Some(mailtriage::domain::EngineConfig::Himalaya(e)) =
+            &mut c.accounts.get_mut("work").unwrap().engine
+        {
+            e.mailboxes.push("Work".into());
+        }
+    });
+    h.fake.deliver("INBOX", &mail("first", "First", "first"));
+    h.fake.deliver("Work", &mail("second", "Second", "second"));
+    // Limit 1: both folders stage one message, only the older one is fetched.
+    let first = h.service().sync("work", 1).unwrap();
+    assert_eq!(
+        (first["discovered"].as_u64(), first["fetched"].as_u64()),
+        (Some(2), Some(1))
+    );
+    let fetched_from_work =
+        |h: &Harness| h.fake.calls().iter().any(|c| c.starts_with("fetch Work"));
+    assert!(!fetched_from_work(&h));
+    h.fake.set_alias_conflicts(&["Work"]);
+    let blocked = h.service().sync("work", 100).unwrap();
+    assert!(blocked["filing"]["problems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p == "alias_conflict:Work"));
+    assert!(
+        !fetched_from_work(&h),
+        "no fetch through a conflicting alias"
+    );
+    assert_eq!(blocked["fetched"], 0);
+    assert_eq!(blocked["pending"], 1, "the message stays queued");
+    h.fake.set_alias_conflicts(&[]);
+    let freed = h.service().sync("work", 100).unwrap();
+    assert!(fetched_from_work(&h));
+    assert_eq!(
+        freed["fetched"], 1,
+        "fetched without a burned attempt once the conflict is gone"
+    );
 }
 
 #[test]

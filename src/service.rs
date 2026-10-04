@@ -414,13 +414,12 @@ impl Service {
         };
         // 4. (Task 7 inserts intent recovery here.)
         // 5. Fetch and classify.
-        let sources = filing.map(|_| map.sources.as_slice());
         let done = self.fetch_and_classify(
             name,
             &account,
             &generation,
             engine.as_deref(),
-            sources,
+            filing.map(|_| &map),
             limit,
         )?;
         // 6. (Task 8 inserts arrival resolution and re-evaluation here.)
@@ -566,20 +565,23 @@ impl Service {
         self.store
             .reconcile_range_ids(scan.name, folder, epoch, cursor, end, &uids, end == through)
     }
-    /// Step 5: fetch and classify queued messages. With `sources` (filing on),
-    /// a message with an occurrence in a source folder gets its placement;
-    /// mail seen only in a category folder is placed by arrival resolution.
+    /// Step 5: fetch and classify queued messages. With `map` (filing on), a
+    /// message with an occurrence in a source folder gets its placement (mail
+    /// seen only in a category folder is placed by arrival resolution), and a
+    /// message whose fetch would read through a conflicting alias stays queued.
     fn fetch_and_classify(
         &mut self,
         name: &str,
         account: &AccountConfig,
         generation: &str,
         h: Option<&dyn MailEngine>,
-        sources: Option<&[String]>,
+        map: Option<&FolderMap>,
         limit: usize,
     ) -> Result<Processed> {
         let mut done = Processed::default();
-        for id in self.store.queued(name, limit)? {
+        let no_conflicts = BTreeSet::new();
+        let blocked = map.map_or(&no_conflicts, |m| &m.alias_conflicts);
+        for id in self.store.queued_outside(name, limit, blocked)? {
             let needed_fetch = self.required(name, &id)?.normalized.is_none();
             match self
                 .process_one(name, account, generation, &id, h)?
@@ -594,7 +596,7 @@ impl Service {
             if needed_fetch && row.normalized.is_some() {
                 done.fetched += 1;
             }
-            if let Some(sources) = sources {
+            if let Some(sources) = map.map(|m| m.sources.as_slice()) {
                 let occurrences = self.store.occurrences_of(name, &row.id)?;
                 if occurrences.iter().any(|(f, _, _)| sources.contains(f)) {
                     self.store.ensure_placement(name, &row.id, sources)?;
