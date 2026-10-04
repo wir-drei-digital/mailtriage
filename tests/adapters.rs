@@ -188,7 +188,7 @@ fn fake_himalaya(script: &str) -> (TempDir, Himalaya) {
 #[cfg(unix)]
 #[test]
 fn himalaya_uid_discovery_and_binary_raw_fetch() {
-    let script = "#!/bin/sh\ncase \" $* \" in *' --seen '*) exit 9 ;; esac\ncase \"$*\" in\n  *--version*) printf 'himalaya v2.1.0 +imap +smtp\\nbuild: macos aarch64\\n' ;;\n  *'imap status INBOX'*) printf '{\"uid_validity\":9,\"uid_next\":44}' ;;\n  *'imap fetch --mailbox INBOX --envelope 42:43'*) printf '{\"messages\":[{\"uid\":42,\"envelope\":{\"subject\":\"Hello\",\"from\":[\"A <a@example.test>\"],\"date\":\"Tue, 1 Sep 2026 10:00:00 +0000\"}}]}' ;;\n  *'message read --mailbox INBOX --raw 42'*) printf 'Subject: binary\\r\\n\\r\\n\\377\\000' ;;\n  *) exit 7 ;;\nesac\n";
+    let script = "#!/bin/sh\ncase \" $* \" in *' --seen '*) exit 9 ;; esac\ncase \"$*\" in\n  *--version*) printf 'himalaya v2.1.0 +imap +smtp\\nbuild: macos aarch64\\n' ;;\n  *'imap status INBOX'*) printf '{\"uid_validity\":9,\"uid_next\":44}' ;;\n  *'imap fetch --mailbox INBOX --envelope --flags --internal-date --size 42:43'*) printf '{\"messages\":[{\"uid\":42,\"envelope\":{\"subject\":\"Hello\",\"from\":[\"A <a@example.test>\"],\"date\":\"Tue, 1 Sep 2026 10:00:00 +0000\"}}]}' ;;\n  *'message read --mailbox INBOX --raw 42'*) printf 'Subject: binary\\r\\n\\r\\n\\377\\000' ;;\n  *) exit 7 ;;\nesac\n";
     let (_temp, adapter) = fake_himalaya(script);
     assert_eq!(adapter.version().unwrap(), "himalaya v2.1.0 +imap +smtp");
     assert_eq!(adapter.snapshot("INBOX").unwrap().uid_validity, 9);
@@ -217,13 +217,13 @@ fn himalaya_version_requires_pinned_release_and_imap_feature() {
 #[cfg(unix)]
 #[test]
 fn himalaya_discovery_allows_missing_sender_but_rejects_wrong_type() {
-    let script = "#!/bin/sh\ncase \"$*\" in\n *'imap status INBOX'*) printf '{\"uid_validity\":9,\"uid_next\":3}' ;;\n *'imap fetch --mailbox INBOX --envelope 1:2'*) printf '{\"messages\":[{\"uid\":1,\"envelope\":{\"subject\":\"No sender\"}},{\"uid\":2,\"envelope\":{\"subject\":\"Null sender\",\"from\":null}}]}' ;;\n *) exit 7 ;;\nesac\n";
+    let script = "#!/bin/sh\ncase \"$*\" in\n *'imap status INBOX'*) printf '{\"uid_validity\":9,\"uid_next\":3}' ;;\n *'imap fetch --mailbox INBOX --envelope --flags --internal-date --size 1:2'*) printf '{\"messages\":[{\"uid\":1,\"envelope\":{\"subject\":\"No sender\"}},{\"uid\":2,\"envelope\":{\"subject\":\"Null sender\",\"from\":null}}]}' ;;\n *) exit 7 ;;\nesac\n";
     let (_fixture, adapter) = fake_himalaya(script);
     let envelopes = adapter.discover("INBOX", 0, 2).unwrap();
     assert_eq!(envelopes.len(), 2);
     assert!(envelopes.iter().all(|e| e.from.is_empty()));
 
-    let script = "#!/bin/sh\ncase \"$*\" in\n *'imap status INBOX'*) printf '{\"uid_validity\":9,\"uid_next\":2}' ;;\n *'imap fetch --mailbox INBOX --envelope 1:1'*) printf '{\"messages\":[{\"uid\":1,\"envelope\":{\"from\":\"not an array\"}}]}' ;;\n *) exit 7 ;;\nesac\n";
+    let script = "#!/bin/sh\ncase \"$*\" in\n *'imap status INBOX'*) printf '{\"uid_validity\":9,\"uid_next\":2}' ;;\n *'imap fetch --mailbox INBOX --envelope --flags --internal-date --size 1:1'*) printf '{\"messages\":[{\"uid\":1,\"envelope\":{\"from\":\"not an array\"}}]}' ;;\n *) exit 7 ;;\nesac\n";
     let (_fixture, adapter) = fake_himalaya(script);
     assert!(adapter
         .discover("INBOX", 0, 1)
