@@ -727,9 +727,9 @@ Changes to existing commands:
 | Epoch race | Reverted with COPYUID, else folder paused and arrivals quarantined. |
 | Folder creation or subscription error | Folder `error`; category pauses; retried next pass. |
 | Alias conflict | That folder's discovery and fetch stop; filing writes stop. |
-| Himalaya config changed during a pass | Engine refuses further calls; pass ends with exit 5. |
+| Himalaya config changed during a pass | Engine refuses further calls; pass ends with exit 5. `watch` reports that pass as an error object and continues; its next pass opens the engine with the current configuration. |
 | Authentication, throttling, network | Pass partial (exit 4); `watch` continues on its interval. |
-| mailtriage config changed during a pass | Existing `require_unchanged` check before claiming writes. |
+| mailtriage config changed during a pass | Existing `require_unchanged` check before claiming writes (exit 5); `watch` skips that pass the same way. A changed account binding still stops `watch`. |
 
 Error text never includes message bodies, subjects or credentials.
 

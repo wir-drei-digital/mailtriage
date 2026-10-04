@@ -1145,3 +1145,46 @@ fn a_watch_that_started_above_a_move_never_declares_it_lost() {
     let s = h.service();
     assert_eq!(s.store.intent(intent).unwrap().unwrap().state, "sent");
 }
+
+/// Final review I1: how `watch` tells a pass to skip from one that stops it.
+/// A pass whose `mailtriage.json` or Himalaya TOML changed mid-pass fails as
+/// a configuration change, and the next pass (a fresh open, as `watch`
+/// does) continues; a changed account binding is not a configuration change.
+#[test]
+fn passes_after_a_configuration_change_mid_pass_continue() {
+    use mailtriage::service::{is_config_change, ServiceError};
+    let code = |e: &anyhow::Error| e.downcast_ref::<ServiceError>().map(|s| s.code);
+    let h = Harness::new(Live);
+    h.sync();
+    h.fake
+        .deliver("INBOX", &mail("n", "Weekly newsletter", "Our newsletter"));
+    // `mailtriage.json` changes after the pass opened it.
+    let mut s = h.service();
+    let bytes = std::fs::read(&h.path).unwrap();
+    std::fs::write(&h.path, [bytes.as_slice(), b"\n"].concat()).unwrap();
+    let e = s.sync("work", 100).unwrap_err();
+    assert!(is_config_change(&e), "{e}");
+    assert_eq!(code(&e), Some(5));
+    // ... and while a classification result is pending.
+    let mut s = h.service();
+    std::fs::write(&h.path, &bytes).unwrap();
+    let e = s
+        .classify("work", &mail("c", "Lunch", "Can you join us?"), "rfc822")
+        .unwrap_err();
+    assert!(is_config_change(&e), "{e}");
+    assert_eq!(code(&e), Some(5));
+    // The Himalaya TOML changes mid-pass.
+    h.fake.fail_with_config_changed("discover INBOX");
+    let e = h.service().sync("work", 100).unwrap_err();
+    assert!(is_config_change(&e), "{e}");
+    assert_eq!(code(&e), Some(5));
+    // The next pass opens the engine afresh and continues.
+    h.fake.reload_config();
+    h.sync();
+    assert_eq!(place(&h, "n")[0].0, "Newsletters");
+    // A changed account binding is no configuration change: `watch` stops.
+    h.fake.set_binding("another mailbox");
+    let e = h.service().sync("work", 100).unwrap_err();
+    assert!(!is_config_change(&e), "{e}");
+    assert_eq!(code(&e), Some(5));
+}

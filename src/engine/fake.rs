@@ -471,6 +471,14 @@ impl FakeEngine {
         self.state().config_changed_from = Some(from_call.to_owned());
     }
 
+    /// Mirrors a fresh engine open after the TOML changed: it reads the
+    /// current configuration, so calls succeed again.
+    pub fn reload_config(&self) {
+        let mut s = self.state();
+        s.config_changed_from = None;
+        s.config_changed = false;
+    }
+
     /// Folders that a client-side alias resolves elsewhere; `alias_conflicts`
     /// reports those it is asked about. Replaces the previous set.
     pub fn set_alias_conflicts(&self, folders: &[&str]) {

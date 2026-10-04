@@ -2,7 +2,8 @@ use clap::{ArgGroup, Args, Parser, Subcommand};
 use mailtriage::{
     config,
     domain::{Category, FilingMode},
-    service::{Backfill, ListOptions, RetryTarget, Service, ServiceError},
+    engine::ConfigChanged,
+    service::{is_config_change, Backfill, ListOptions, RetryTarget, Service, ServiceError},
 };
 use serde_json::{json, Value};
 use std::{
@@ -299,6 +300,12 @@ fn service_error(error: anyhow::Error) -> CliError {
             message: error.message.clone(),
         };
     }
+    if error.downcast_ref::<ConfigChanged>().is_some() {
+        return CliError {
+            code: 5,
+            message: "mail engine configuration changed during operation".into(),
+        };
+    }
     CliError::operational()
 }
 
@@ -572,25 +579,144 @@ fn watch(cli: &Cli, arg: &WatchArg) -> Result<Value, CliError> {
         flag.store(true, Ordering::SeqCst);
     })
     .map_err(|_| CliError::operational())?;
-    let mut passes = 0u64;
-    let mut partial_passes = 0u64;
-    while !stop.load(Ordering::SeqCst) {
-        let result = open(&cli.config)?
-            .sync(&arg.account, arg.limit)
-            .map_err(service_error)?;
-        if result.get("partial").and_then(Value::as_bool) == Some(true) {
-            partial_passes += 1;
+    let tally = watch_loop(
+        || stop.load(Ordering::SeqCst),
+        arg.interval_seconds,
+        cli.json,
+        || Service::open(&cli.config)?.sync(&arg.account, arg.limit),
+    )?;
+    let partial = tally.partial_passes > 0 || tally.skipped_passes > 0;
+    Ok(
+        json!({"schema_version":1,"watch":{"account":arg.account,"passes":tally.passes,"partial_passes":tally.partial_passes,"skipped_passes":tally.skipped_passes,"stopped":true},"partial":partial}),
+    )
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct WatchTally {
+    passes: u64,
+    partial_passes: u64,
+    /// Passes skipped because a configuration changed mid-pass.
+    skipped_passes: u64,
+}
+
+/// Runs `run_pass` (a fresh open and one sync) until `stopped`, printing
+/// each pass and waiting `interval_seconds` between passes. A pass that
+/// failed because `mailtriage.json` or the mail engine's configuration
+/// changed mid-pass is skipped: its error object is printed and the next
+/// pass reads the current configuration. Any other error, a changed account
+/// binding included, ends the loop.
+fn watch_loop(
+    stopped: impl Fn() -> bool,
+    interval_seconds: u64,
+    json_mode: bool,
+    mut run_pass: impl FnMut() -> anyhow::Result<Value>,
+) -> Result<WatchTally, CliError> {
+    let mut tally = WatchTally::default();
+    while !stopped() {
+        match run_pass() {
+            Ok(result) => {
+                if result.get("partial").and_then(Value::as_bool) == Some(true) {
+                    tally.partial_passes += 1;
+                }
+                print_value(&result, json_mode).map_err(|_| CliError::operational())?;
+            }
+            Err(error) if is_config_change(&error) => {
+                tally.skipped_passes += 1;
+                print_error(&service_error(error), json_mode);
+            }
+            Err(error) => return Err(service_error(error)),
         }
-        passes += 1;
-        print_value(&result, cli.json).map_err(|_| CliError::operational())?;
-        for _ in 0..arg.interval_seconds.saturating_mul(5) {
-            if stop.load(Ordering::SeqCst) {
+        tally.passes += 1;
+        for _ in 0..interval_seconds.saturating_mul(5) {
+            if stopped() {
                 break;
             }
             thread::sleep(Duration::from_millis(200));
         }
     }
-    Ok(
-        json!({"schema_version":1,"watch":{"account":arg.account,"passes":passes,"partial_passes":partial_passes,"stopped":true},"partial":partial_passes>0}),
-    )
+    Ok(tally)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mailtriage::service::ErrorKind;
+    use std::cell::Cell;
+
+    fn service_err(code: i32, kind: ErrorKind) -> anyhow::Error {
+        ServiceError {
+            code,
+            message: "m".into(),
+            kind,
+        }
+        .into()
+    }
+
+    /// `watch_loop` over scripted passes, stopping once they are used up.
+    fn run(passes: Vec<anyhow::Result<Value>>) -> (Result<WatchTally, CliError>, usize) {
+        let count = passes.len();
+        let left = Cell::new(count);
+        let mut passes = passes.into_iter();
+        let result = watch_loop(
+            || left.get() == 0,
+            0,
+            true,
+            || {
+                left.set(left.get() - 1);
+                passes.next().unwrap()
+            },
+        );
+        (result, count - left.get())
+    }
+
+    /// Final review I1: a pass whose `mailtriage.json` or Himalaya TOML
+    /// changed mid-pass is skipped and `watch` continues.
+    #[test]
+    fn watch_skips_a_pass_whose_configuration_changed() {
+        let ok = || Ok(json!({"partial": false}));
+        let (result, ran) = run(vec![
+            Err(service_err(5, ErrorKind::ConfigChanged)),
+            Err(mailtriage::engine::ConfigChanged.into()),
+            ok(),
+        ]);
+        assert_eq!(ran, 3);
+        let tally = result.unwrap_or_else(|e| panic!("stopped: {} {}", e.code, e.message));
+        assert_eq!(
+            tally,
+            WatchTally {
+                passes: 3,
+                partial_passes: 0,
+                skipped_passes: 2,
+            }
+        );
+    }
+
+    /// Any other error, a changed account binding included, stops `watch`.
+    #[test]
+    fn watch_stops_on_other_errors() {
+        for error in [
+            service_err(5, ErrorKind::Other),
+            service_err(2, ErrorKind::Other),
+            anyhow::anyhow!("operational"),
+        ] {
+            let (result, ran) = run(vec![
+                Ok(json!({"partial": false})),
+                Err(error),
+                Ok(json!({})),
+            ]);
+            assert_eq!(ran, 2);
+            assert!(result.is_err());
+        }
+        let (result, _) = run(vec![Err(service_err(5, ErrorKind::Other))]);
+        let e = result.err().unwrap();
+        assert_eq!((e.code, e.message.as_str()), (5, "m"));
+    }
+
+    /// The error object of a pass the mail engine refused because its
+    /// configuration changed carries the conflict code.
+    #[test]
+    fn an_engine_configuration_change_is_a_conflict() {
+        let e = service_error(mailtriage::engine::ConfigChanged.into());
+        assert_eq!(e.code, 5);
+    }
 }

@@ -26,10 +26,22 @@ use std::{
     rc::Rc,
 };
 
+/// What a `ServiceError` is about, for callers that react to a class of
+/// error rather than to its message text.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ErrorKind {
+    #[default]
+    Other,
+    /// `mailtriage.json` or the mail engine's configuration (the Himalaya
+    /// TOML) changed while the command ran; a rerun reads the current one.
+    ConfigChanged,
+}
+
 #[derive(Debug)]
 pub struct ServiceError {
     pub code: i32,
     pub message: String,
+    pub kind: ErrorKind,
 }
 impl fmt::Display for ServiceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -41,8 +53,29 @@ pub(crate) fn err(code: i32, message: impl Into<String>) -> anyhow::Error {
     ServiceError {
         code,
         message: message.into(),
+        kind: ErrorKind::Other,
     }
     .into()
+}
+/// A configuration change while the command ran: a conflict (exit 5).
+fn config_err(message: impl Into<String>) -> anyhow::Error {
+    ServiceError {
+        code: 5,
+        message: message.into(),
+        kind: ErrorKind::ConfigChanged,
+    }
+    .into()
+}
+
+/// Whether `error` means `mailtriage.json` or the mail engine's configuration
+/// changed while the command ran. Rerunning with the current configuration
+/// is the remedy, so `watch` skips such a pass and continues; a changed
+/// account binding is not such an error.
+pub fn is_config_change(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<ServiceError>()
+        .is_some_and(|e| e.kind == ErrorKind::ConfigChanged)
+        || filing::is_config_changed(error)
 }
 
 #[derive(Debug, Clone)]
@@ -213,8 +246,7 @@ impl Service {
     }
     fn require_unchanged(&self) -> Result<()> {
         if !self.unchanged()? {
-            return Err(err(
-                5,
+            return Err(config_err(
                 "configuration changed during command; retry with current configuration",
             ));
         }
@@ -374,8 +406,7 @@ impl Service {
                         "configuration changed during classification; retry required",
                         self.config.policy.max_attempts,
                     )?;
-                    return Err(err(
-                        5,
+                    return Err(config_err(
                         "configuration changed during classification; result was not published",
                     ));
                 }
@@ -1525,7 +1556,7 @@ fn check_binding(
 }
 
 fn config_changed() -> anyhow::Error {
-    err(5, "mail engine configuration changed during operation")
+    config_err("mail engine configuration changed during operation")
 }
 
 fn abort_on_config_change(e: anyhow::Error) -> anyhow::Error {
