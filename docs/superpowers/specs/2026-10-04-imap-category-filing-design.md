@@ -531,7 +531,9 @@ verified in, so it may have acted on other messages.
   during a revert falls through to the next case.
 - **Detected move race without COPYUID, failed revert, or suspected race.** F
   gets `pause_reason = epoch_race` (`epoch_race_suspected` when no session
-  outcome was captured). Every arrival in T at `uid >= target_uid_next` in
+  outcome was captured). Every arrival in T at `uid >= target_uid_next` and
+  below T's `UIDNEXT` observed right after the race (recorded with the race;
+  the window never grows and does not depend on the pause) in
   `target_epoch` that no intent explains is resolved `quarantined`, and
   placements created from those arrivals get `blocked_reason = quarantined`.
   Quarantine is written in step 5, before arrival resolution in step 7, so it
@@ -569,7 +571,7 @@ quarantined or explained by a revert, and whose message has no open intent:
 
 | Arrival | Home UID still present (`envelopes` on `home_folder`/`home_epoch`/`home_uid`) | Result |
 | --- | --- | --- |
-| Category C's folder | no | `user_move`: client move into category C |
+| Category C's folder | no | `user_move`: client move into category C; if C already is the message's effective category, only the location is updated (event `relocated`, no override) |
 | A source folder | no | `user_pin`: client move into a source folder |
 | Any watched folder | yes | `extra`: occurrence recorded, no change |
 | Category C's folder, message had no placement | n/a | `new`: placement with home here, `filed_by = user`, client-correction override to C, never moved automatically |
@@ -613,8 +615,9 @@ message is never touched and keeps `done_inferred = 0`):
 - it is still absent from every watched, retired, paused or missing folder;
 - every watched folder's checkpoint is complete in an epoch unchanged since
   `absent_since`, and no rescan is in progress;
-- no `pending` or `unresolved` arrival and no quarantined, unreverted arrival
-  exists in the account (an unidentified occurrence could be this message);
+- no `pending` or `unresolved` arrival exists in the account (an unidentified
+  occurrence could be this message); quarantined arrivals have established
+  identity and do not block, because their own placements are blocked;
 - no folder has a `pause_reason`;
 - it has no open intent.
 
