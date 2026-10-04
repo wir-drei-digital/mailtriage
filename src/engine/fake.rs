@@ -68,6 +68,8 @@ struct State {
     /// Configured sources once `enforce_scope` was called.
     sources: Option<BTreeSet<String>>,
     watch_scope: BTreeSet<String>,
+    /// When false, `discover` omits transport metadata like a poor server.
+    rich_discovery: bool,
 }
 
 impl State {
@@ -252,6 +254,7 @@ impl FakeEngine {
                 all_calls: Vec::new(),
                 sources: None,
                 watch_scope: BTreeSet::new(),
+                rich_discovery: true,
             })),
         }
     }
@@ -407,6 +410,12 @@ impl FakeEngine {
             .is_some_and(|f| f.subscribed)
     }
 
+    /// `false`: `discover` omits Message-ID, internal date, size and flags;
+    /// `envelopes` always returns them.
+    pub fn set_rich_discovery(&self, on: bool) {
+        self.state().rich_discovery = on;
+    }
+
     /// Strict scope (mirrors the Himalaya engine): when set, every
     /// folder-specific trait call on a folder outside `sources` ∪ the last
     /// `set_watch_scope` list returns Err without effect.
@@ -444,11 +453,25 @@ impl MailEngine for FakeEngine {
             format!("discover {folder} {after}..{through}"),
             &[folder],
         )?;
+        let rich = s.rich_discovery;
         Ok(s.get(folder)?
             .msgs
             .iter()
             .filter(|m| m.uid > after && m.uid <= through)
             .map(envelope)
+            .map(|e| {
+                if rich {
+                    e
+                } else {
+                    SourceEnvelope {
+                        message_id: None,
+                        internal_date: None,
+                        size: None,
+                        flags: Vec::new(),
+                        ..e
+                    }
+                }
+            })
             .collect())
     }
 

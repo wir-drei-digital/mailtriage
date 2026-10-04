@@ -604,3 +604,85 @@ fn enabling_restarts_bootstrap_and_arrivals_resolve() {
         ("resolved", Some("new"), Some(NOW))
     );
 }
+
+#[test]
+fn scan_error_placeholder_is_a_first_watch_not_an_epoch_reset() {
+    let (_d, mut s) = store();
+    s.ensure_account("work", "id", "g1").unwrap();
+    s.scan_error("work", "News").unwrap();
+    assert_eq!(
+        s.checkpoint_start_at("work", "News", &snap(3, 8), 7)
+            .unwrap(),
+        7,
+        "the placeholder starts at the tip"
+    );
+    let scans = s.coverage("work").unwrap()["scans"].clone();
+    assert_eq!(
+        (
+            scans[0]["uid_validity"].as_u64(),
+            scans[0]["last_uid"].as_u64(),
+            scans[0]["error"].is_null()
+        ),
+        (Some(3), Some(7), true)
+    );
+    s.scan_error("work", "News").unwrap();
+    assert_eq!(
+        s.checkpoint_start_at("work", "News", &snap(3, 9), 8)
+            .unwrap(),
+        7,
+        "a failed scan keeps a real checkpoint"
+    );
+    assert_eq!(
+        s.checkpoint_start_at("work", "Empty", &snap(5, 1), 0)
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        s.checkpoint_start_at("work", "Empty", &snap(5, 4), 3)
+            .unwrap(),
+        0,
+        "a real checkpoint at UID 0 is not a placeholder"
+    );
+}
+
+#[test]
+fn hydrate_never_nulls_known_transport_metadata() {
+    let (_d, mut s) = store();
+    s.ensure_account("work", "id", "g1").unwrap();
+    s.checkpoint("work", "INBOX", &snap(5, 2)).unwrap();
+    s.stage("work", "INBOX", 5, 1, &[env(1, "a")], "g1", true)
+        .unwrap();
+    let id = id_at(&s, 1);
+    let sparse = SourceEnvelope {
+        uid: 1,
+        subject: "s".into(),
+        message_id: Some("  ".into()),
+        flags: vec!["\\Flagged".into()],
+        ..Default::default()
+    };
+    s.hydrate("work", &id, &sparse).unwrap();
+    let meta = s.message_meta("work", &id).unwrap().unwrap();
+    assert_eq!(
+        (
+            meta.rfc_message_id.as_deref(),
+            meta.size,
+            meta.internal_date.as_deref(),
+            meta.flags
+        ),
+        (
+            Some("<a@t>"),
+            Some(100),
+            Some("2026-10-04T10:00:00+00:00"),
+            vec!["\\Flagged".to_string()]
+        )
+    );
+    let envelope = s.record("work", &id).unwrap().unwrap().envelope;
+    assert_eq!(
+        (
+            envelope["message_id"].as_str(),
+            envelope["size"].as_u64(),
+            envelope["internal_date"].as_str()
+        ),
+        (Some("<a@t>"), Some(100), Some("2026-10-04T10:00:00+00:00"))
+    );
+}

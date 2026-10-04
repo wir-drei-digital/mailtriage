@@ -168,6 +168,15 @@ pub struct MessageMeta {
     pub source_managed: bool,
 }
 
+/// Placements of one home folder awaiting hydration, in that folder's checkpoint epoch.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct HydrationBatch {
+    pub folder: String,
+    pub epoch: u64,
+    /// (home UID, message id), lowest UID first.
+    pub members: Vec<(u64, String)>,
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct RescanFilter {
     pub below_uid: u64,

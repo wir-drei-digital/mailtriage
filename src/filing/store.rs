@@ -1,13 +1,15 @@
 //! Filing persistence (schema v3): the store API every filing step uses.
 use super::{
-    open_states_sql, planner::Action, rfc_message_id, Arrival, FilingStateRow, FolderRecord,
-    Intent, IntentPatch, LocationState, MessageMeta, NewIntent, Placement, Revert, StageOptions,
+    mode_str, open_states_sql, planner::Action, rfc_message_id, Arrival, FilingStateRow,
+    FolderRecord, HydrationBatch, Intent, IntentPatch, LocationState, MessageMeta, NewIntent,
+    Placement, Revert, StageOptions,
 };
 use crate::domain::{FilingMode, MailboxSnapshot, SourceEnvelope};
 use crate::store::{bump, envelope_of, merge_envelope, now, Store};
 use anyhow::{bail, Result};
-use rusqlite::{params, OptionalExtension, Row};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 use uuid::Uuid;
 
 const PLACEMENT_COLUMNS: &str = "account,message_id,source_folder,home_folder,home_epoch,home_uid,location_state,absent_since,desired_target,pinned,eligible_once,desired_rev,filed_at,filed_by,flag_attempted_at,flagged_at,done_inferred,blocked_reason";
@@ -137,48 +139,106 @@ impl Store {
         sources: &[String],
     ) -> Result<bool> {
         let tx = self.db.transaction()?;
-        let eligible: bool = tx
-            .query_row(
-                "SELECT fingerprint IS NOT NULL AND NOT EXISTS(SELECT 1 FROM placements WHERE message_id=messages.id)
-         FROM messages WHERE account=? AND id=?",
-                params![account, id],
-                |r| r.get(0),
-            )
-            .optional()?
-            .unwrap_or(false);
-        if !eligible {
-            return Ok(false);
+        let created = insert_placement(&tx, account, id, sources)?;
+        if created {
+            bump(&tx)?;
+            tx.commit()?;
         }
-        let mut occ: Vec<(String, u64, u64)> = {
-            let mut st = tx.prepare("SELECT mailbox, epoch, uid FROM occurrences WHERE account=? AND message_id=? ORDER BY mailbox, uid")?;
+        Ok(created)
+    }
+
+    /// Bootstrap (spec "Identity and placements"): `ensure_placement` for every
+    /// source-managed message with a fingerprint and an occurrence, in one
+    /// transaction. Returns how many placements it created.
+    pub fn bootstrap_placements(&mut self, account: &str, sources: &[String]) -> Result<usize> {
+        let tx = self.db.transaction()?;
+        let ids: Vec<String> = {
+            let mut st = tx.prepare("SELECT id FROM messages m WHERE account=? AND source_managed=1 AND fingerprint IS NOT NULL
+ AND NOT EXISTS(SELECT 1 FROM placements p WHERE p.message_id=m.id)
+ AND EXISTS(SELECT 1 FROM occurrences o WHERE o.message_id=m.id) ORDER BY observed_at, id")?;
             let rows = st
-                .query_map(params![account, id], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-                })?
+                .query_map([account], |r| r.get(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             rows
         };
-        if occ.is_empty() {
-            return Ok(false);
+        let mut created = 0;
+        for id in &ids {
+            if insert_placement(&tx, account, id, sources)? {
+                created += 1;
+            }
         }
-        let rank = |f: &str| sources.iter().position(|s| s == f).unwrap_or(usize::MAX);
-        occ.sort_by(|a, b| {
-            rank(&a.0)
-                .cmp(&rank(&b.0))
-                .then(a.0.cmp(&b.0))
-                .then(a.2.cmp(&b.2))
-        });
-        let home = &occ[0];
-        let source = if rank(&home.0) != usize::MAX {
-            home.0.clone()
-        } else {
-            sources.first().cloned().unwrap_or_else(|| "INBOX".into())
-        };
-        tx.execute("INSERT INTO placements(account, message_id, source_folder, home_folder, home_epoch, home_uid) VALUES(?,?,?,?,?,?)",
-            params![account, id, source, home.0, home.1, home.2])?;
-        bump(&tx)?;
+        if created > 0 {
+            bump(&tx)?;
+        }
         tx.commit()?;
-        Ok(true)
+        Ok(created)
+    }
+
+    /// Placements awaiting hydration (message `size IS NULL`) whose known home
+    /// occurrence is in its folder's checkpoint epoch, at most `per_folder`
+    /// per home folder, lowest UIDs first.
+    pub fn unhydrated_homes(
+        &self,
+        account: &str,
+        per_folder: usize,
+    ) -> Result<Vec<HydrationBatch>> {
+        let mut st = self.db.prepare("SELECT p.home_folder,p.home_epoch,p.home_uid,p.message_id FROM placements p
+ JOIN messages m ON m.id=p.message_id
+ JOIN checkpoints c ON c.account=p.account AND c.mailbox=p.home_folder AND c.epoch=p.home_epoch
+ WHERE p.account=? AND m.size IS NULL AND p.location_state='known'
+ AND EXISTS(SELECT 1 FROM occurrences o WHERE o.account=p.account AND o.mailbox=p.home_folder AND o.epoch=p.home_epoch AND o.uid=p.home_uid AND o.message_id=p.message_id)
+ ORDER BY p.home_folder, p.home_uid")?;
+        let rows = st
+            .query_map([account], |r| {
+                Ok((r.get::<_, String>(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut out: Vec<HydrationBatch> = Vec::new();
+        for (folder, epoch, uid, id) in rows {
+            match out.last_mut() {
+                Some(batch) if batch.folder == folder => {
+                    if batch.members.len() < per_folder {
+                        batch.members.push((uid, id));
+                    }
+                }
+                _ => out.push(HydrationBatch {
+                    folder,
+                    epoch,
+                    members: vec![(uid, id)],
+                }),
+            }
+        }
+        Ok(out)
+    }
+
+    /// Whether the rescan of `folder` in `epoch` finished (spec "Folders"): its
+    /// checkpoint reached `below_uid - 1` in that epoch and no message occurring
+    /// in it still waits for content with a non-terminal job.
+    pub fn rescan_finished(
+        &self,
+        account: &str,
+        folder: &str,
+        epoch: u64,
+        below_uid: u64,
+    ) -> Result<bool> {
+        Ok(self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM checkpoints WHERE account=?1 AND mailbox=?2 AND epoch=?3 AND last_uid>=?4)
+ AND NOT EXISTS(SELECT 1 FROM occurrences o JOIN messages m ON m.id=o.message_id JOIN jobs j ON j.message_id=m.id
+  WHERE o.account=?1 AND o.mailbox=?2 AND m.normalized IS NULL AND j.state<>'terminal')",
+            params![account, folder, epoch, below_uid.saturating_sub(1)],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Folders named by any rescan-set row.
+    pub fn rescan_folders(&self, account: &str) -> Result<BTreeSet<String>> {
+        let mut st = self
+            .db
+            .prepare("SELECT DISTINCT folder FROM rescan_sets WHERE account=?")?;
+        let rows = st
+            .query_map([account], |r| r.get(0))?
+            .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+        Ok(rows)
     }
 
     /// Writes every field of an existing placement; with `Some(rev)` only when
@@ -334,7 +394,8 @@ impl Store {
     }
 
     /// First watch of a folder starts at `start_uid`; an existing checkpoint
-    /// behaves exactly like `checkpoint`.
+    /// behaves exactly like `checkpoint`. The epoch-0/UID-0 row `scan_error`
+    /// leaves behind for a folder never scanned counts as no checkpoint.
     pub fn checkpoint_start_at(
         &mut self,
         account: &str,
@@ -344,7 +405,9 @@ impl Store {
     ) -> Result<u64> {
         let tx = self.db.transaction()?;
         let created = tx.execute(
-            "INSERT OR IGNORE INTO checkpoints(account,mailbox,epoch,last_uid,complete) VALUES(?,?,?,?,0)",
+            "INSERT INTO checkpoints(account,mailbox,epoch,last_uid,complete) VALUES(?,?,?,?,0)
+ ON CONFLICT(account,mailbox) DO UPDATE SET epoch=excluded.epoch,last_uid=excluded.last_uid,complete=0,error=NULL
+ WHERE checkpoints.epoch=0 AND checkpoints.last_uid=0",
             params![account, mailbox, snapshot.uid_validity, start_uid],
         )?;
         if created == 0 {
@@ -715,20 +778,25 @@ impl Store {
 
     /// Stores freshly fetched transport metadata: the three columns, and
     /// `message_id`, `internal_date`, `size`, `flags` merged into the envelope.
+    /// A field the envelope lacks (a blank Message-ID counts as lacking) keeps
+    /// the stored value.
     pub fn hydrate(&mut self, account: &str, id: &str, env: &SourceEnvelope) -> Result<()> {
         let tx = self.db.transaction()?;
         let Some(mut envelope) = envelope_of(&tx, account, id)? else {
             bail!("unknown message");
         };
-        merge_envelope(
-            &mut envelope,
-            &serde_json::to_value(env)?,
-            &["message_id", "internal_date", "size", "flags"],
-        );
+        let rfc = rfc_message_id(env);
+        let fresh = serde_json::to_value(env)?;
+        let keys: Vec<&str> = ["message_id", "internal_date", "size", "flags"]
+            .into_iter()
+            .filter(|k| fresh.get(*k).is_some_and(|v| !v.is_null()))
+            .filter(|k| *k != "message_id" || rfc.is_some())
+            .collect();
+        merge_envelope(&mut envelope, &fresh, &keys);
         tx.execute(
-            "UPDATE messages SET rfc_message_id=?,size=?,internal_date=?,envelope=? WHERE account=? AND id=?",
+            "UPDATE messages SET rfc_message_id=COALESCE(?,rfc_message_id),size=COALESCE(?,size),internal_date=COALESCE(?,internal_date),envelope=? WHERE account=? AND id=?",
             params![
-                rfc_message_id(env),
+                rfc,
                 env.size,
                 env.internal_date,
                 envelope.to_string(),
@@ -799,12 +867,48 @@ impl Store {
     }
 }
 
-fn mode_str(mode: FilingMode) -> &'static str {
-    match mode {
-        FilingMode::Off => "off",
-        FilingMode::DryRun => "dry_run",
-        FilingMode::Live => "live",
+/// `ensure_placement` inside a caller's transaction; does not bump the revision.
+fn insert_placement(tx: &Connection, account: &str, id: &str, sources: &[String]) -> Result<bool> {
+    let eligible: bool = tx
+        .query_row(
+            "SELECT fingerprint IS NOT NULL AND NOT EXISTS(SELECT 1 FROM placements WHERE message_id=messages.id)
+         FROM messages WHERE account=? AND id=?",
+            params![account, id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if !eligible {
+        return Ok(false);
     }
+    let mut occ: Vec<(String, u64, u64)> = {
+        let mut st = tx.prepare("SELECT mailbox, epoch, uid FROM occurrences WHERE account=? AND message_id=? ORDER BY mailbox, uid")?;
+        let rows = st
+            .query_map(params![account, id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    if occ.is_empty() {
+        return Ok(false);
+    }
+    let rank = |f: &str| sources.iter().position(|s| s == f).unwrap_or(usize::MAX);
+    occ.sort_by(|a, b| {
+        rank(&a.0)
+            .cmp(&rank(&b.0))
+            .then(a.0.cmp(&b.0))
+            .then(a.2.cmp(&b.2))
+    });
+    let home = &occ[0];
+    let source = if rank(&home.0) != usize::MAX {
+        home.0.clone()
+    } else {
+        sources.first().cloned().unwrap_or_else(|| "INBOX".into())
+    };
+    tx.execute("INSERT INTO placements(account, message_id, source_folder, home_folder, home_epoch, home_uid) VALUES(?,?,?,?,?,?)",
+        params![account, id, source, home.0, home.1, home.2])?;
+    Ok(true)
 }
 
 fn parse_mode(s: &str) -> Result<FilingMode> {

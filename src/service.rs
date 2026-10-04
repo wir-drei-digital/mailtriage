@@ -2,6 +2,11 @@ use crate::{
     config,
     domain::*,
     engine::{self, himalaya::source_binding, MailEngine},
+    filing::{
+        self,
+        observe::{self, FolderMap, WatchRole, WatchSpec},
+        FilingSummary, Intent, PassContext, StageOptions,
+    },
     normalize, policy, provider,
     store::{now, Record, Store},
 };
@@ -154,17 +159,32 @@ impl Service {
             .map_err(|_| err(5, "an account worker is already running"))?;
         Ok(f)
     }
+    fn stored_identity(&self, name: &str) -> Result<String> {
+        Ok(self
+            .store
+            .db
+            .query_row("SELECT identity FROM accounts WHERE name=?", [name], |r| {
+                r.get(0)
+            })?)
+    }
     fn verify_source_binding(&self, name: &str, account: &AccountConfig) -> Result<()> {
-        let expected: String =
-            self.store
-                .db
-                .query_row("SELECT identity FROM accounts WHERE name=?", [name], |r| {
-                    r.get(0)
-                })?;
-        if binding_identity(account, self.engine_override.as_deref())? != expected {
-            return Err(err(5, "Himalaya mailbox identity changed during operation"));
-        }
-        Ok(())
+        check_binding(
+            account,
+            self.engine_override.as_deref(),
+            &self.stored_identity(name)?,
+        )
+    }
+    /// `verify_source_binding` built from owned clones, so a filing step can
+    /// call it while the store is mutably borrowed.
+    fn binding_verifier(
+        &self,
+        name: &str,
+        account: &AccountConfig,
+    ) -> Result<impl Fn() -> Result<()>> {
+        let expected = self.stored_identity(name)?;
+        let account = account.clone();
+        let engine = self.engine_override.clone();
+        Ok(move || check_binding(&account, engine.as_deref(), &expected))
     }
     fn unchanged(&self) -> Result<bool> {
         Ok(hash(&fs::read(&self.path)?) == self.config_bytes_hash)
@@ -334,109 +354,254 @@ impl Service {
             }
         }
     }
+    /// One pass in the spec's "Sync pass order"; the steps Tasks 7 and 8 add
+    /// are marked where they belong.
     pub fn sync(&mut self, name: &str, limit: usize) -> Result<Value> {
         if !(1..=1000).contains(&limit) {
             return Err(err(2, "sync limit must be 1..=1000"));
         }
         let _lock = self.lock(name)?;
         let (account, generation) = self.ensure(name)?;
-        let engine_config = account.engine_config();
-        let h = self.engine(&account)?;
-        let mut discovered = 0;
-        let mut scan_errors = 0;
-        if let (Some(h), Some(cfg)) = (&h, &engine_config) {
-            h.version()?;
-            for mailbox in cfg.mailboxes() {
-                let attempt = (|| -> Result<usize> {
-                    let snapshot = h.snapshot(mailbox)?;
-                    let last = self.store.checkpoint(name, mailbox, &snapshot)?;
-                    let max_uid = snapshot.uid_next.saturating_sub(1);
-                    if last > max_uid {
-                        return Err(anyhow!("UIDNEXT regressed without epoch reset"));
-                    }
-                    let through = max_uid.min(last.saturating_add(limit as u64));
-                    let envelopes = if through > last {
-                        h.discover(mailbox, last, through)?
-                    } else {
-                        vec![]
-                    };
-                    let after = h.snapshot(mailbox)?;
-                    if after.uid_validity != snapshot.uid_validity
-                        || after.uid_next < snapshot.uid_next
-                    {
-                        return Err(anyhow!("epoch changed while discovering"));
-                    }
-                    if envelopes.iter().any(|e| e.uid <= last || e.uid > through) {
-                        return Err(anyhow!("out of range source UID"));
-                    }
-                    self.require_unchanged()?;
-                    self.verify_source_binding(name, &account)?;
-                    let n = self.store.stage(
-                        name,
-                        mailbox,
-                        snapshot.uid_validity,
-                        through,
-                        &envelopes,
-                        &generation,
-                        through == max_uid,
-                    )?;
-                    let cursor = self
-                        .store
-                        .reconcile_cursor(name, mailbox, snapshot.uid_validity)?
-                        .min(through);
-                    let end = through.min(cursor.saturating_add(limit as u64));
-                    if end > cursor {
-                        let present = h.discover(mailbox, cursor, end)?;
-                        let latest = h.snapshot(mailbox)?;
-                        if latest.uid_validity != snapshot.uid_validity
-                            || latest.uid_next < snapshot.uid_next
-                        {
-                            return Err(anyhow!("epoch changed during reconciliation"));
-                        }
-                        self.store.reconcile_range(
-                            name,
-                            mailbox,
-                            snapshot.uid_validity,
-                            cursor,
-                            end,
-                            &present.iter().map(|e| e.uid).collect::<Vec<_>>(),
-                            end == through,
-                        )?;
-                    }
-                    Ok(n)
-                })();
-                match attempt {
-                    Ok(n) => discovered += n,
-                    Err(_) => {
-                        scan_errors += 1;
-                        self.store.scan_error(name, mailbox)?;
-                    }
+        // 1. Engine check and filing mode.
+        let engine = self.engine(&account)?;
+        let mode = if engine.is_some() {
+            account.filing.mode
+        } else {
+            FilingMode::Off
+        };
+        let now = now();
+        self.store.sync_filing_mode(name, mode, &now)?;
+        if let Some(h) = &engine {
+            h.version().map_err(abort_on_config_change)?;
+        }
+        let verify_binding = self.binding_verifier(name, &account)?;
+        // `Some` only with filing on.
+        let ctx = engine
+            .as_deref()
+            .filter(|_| mode != FilingMode::Off)
+            .map(|h| PassContext {
+                account: name,
+                cfg: &account,
+                engine: h,
+                mode,
+                generation: &generation,
+                now: now.clone(),
+                max_attempts: self.config.policy.max_attempts,
+                verify_binding: &verify_binding,
+            });
+        let filing = ctx.as_ref();
+        let mut summary = FilingSummary {
+            mode: filing::mode_str(mode).into(),
+            ..Default::default()
+        };
+        // 2. Folder resolution.
+        let map = resolve_or_sources(&mut self.store, filing, &account, &mut summary)?;
+        // 3–4. Discovery and reconciliation of every watched folder.
+        let mut removed = Vec::new(); // Task 8 re-evaluates these messages' placements.
+        let (discovered, scan_errors) = match engine.as_deref() {
+            Some(h) => {
+                let scan = Scan {
+                    name,
+                    account: &account,
+                    generation: &generation,
+                    engine: h,
+                    mode,
+                    limit: limit as u64,
+                };
+                self.discover_watched(&scan, &map, &mut removed)?
+            }
+            None => (0, 0),
+        };
+        // 4. (Task 7 inserts intent recovery here.)
+        // 5. Fetch and classify.
+        let sources = filing.map(|_| map.sources.as_slice());
+        let done = self.fetch_and_classify(
+            name,
+            &account,
+            &generation,
+            engine.as_deref(),
+            sources,
+            limit,
+        )?;
+        // 6. (Task 8 inserts arrival resolution and re-evaluation here.)
+        // 7. Rescan completion, then bootstrap and hydration.
+        if let Some(ctx) = filing {
+            observe_placements(&mut self.store, ctx, &map, &mut summary)?;
+        }
+        // 8. (Task 7 inserts plan and apply here; Task 8 inserts done inference after it.)
+        // 9. Summary.
+        self.sync_response(
+            name,
+            discovered,
+            scan_errors,
+            &done,
+            filing.map(|_| &summary),
+        )
+    }
+    /// The sync JSON; with filing on it gains `filing`, is stored as the last
+    /// pass, and any filing error makes it partial.
+    fn sync_response(
+        &mut self,
+        name: &str,
+        discovered: usize,
+        scan_errors: usize,
+        done: &Processed,
+        summary: Option<&FilingSummary>,
+    ) -> Result<Value> {
+        let coverage = self.coverage(name)?;
+        let mut out = json!({"schema_version":1,"account":name,"discovered":discovered,"fetched":done.fetched,"classified":done.classified,"cached":done.cached,"pending":coverage["pending_jobs"],"failed":done.failed,"scan_errors":scan_errors,"partial":done.failed+scan_errors>0,"coverage":coverage});
+        if let Some(summary) = summary {
+            let filing_json = serde_json::to_value(summary)?;
+            self.store.set_last_pass(name, &filing_json)?;
+            out["filing"] = filing_json;
+            if summary.errors > 0 {
+                out["partial"] = json!(true);
+            }
+        }
+        Ok(out)
+    }
+    /// Steps 3–4 over every watched folder. A failing folder is a scan error;
+    /// a mail engine configuration change aborts the pass.
+    fn discover_watched(
+        &mut self,
+        scan: &Scan,
+        map: &FolderMap,
+        removed: &mut Vec<String>,
+    ) -> Result<(usize, usize)> {
+        let intents = self.store.intents(scan.name, false)?;
+        let (mut discovered, mut scan_errors) = (0, 0);
+        for spec in &map.watch {
+            match self.discover_folder(scan, spec, &intents, removed) {
+                Ok(n) => discovered += n,
+                Err(e) if filing::is_config_changed(&e) => return Err(config_changed()),
+                Err(_) => {
+                    scan_errors += 1;
+                    self.store.scan_error(scan.name, &spec.folder)?;
                 }
             }
         }
-        let ids = self.store.queued(name, limit)?;
-        let mut classified = 0;
-        let mut fetched = 0;
-        let mut cached = 0;
-        let mut failed = 0;
-        for id in ids {
+        Ok((discovered, scan_errors))
+    }
+    /// Discovers new UIDs of one watched folder and reconciles a window of it.
+    /// A category or retired folder watched for the first time starts at its
+    /// tip, so pre-existing content is never ingested.
+    fn discover_folder(
+        &mut self,
+        scan: &Scan,
+        spec: &WatchSpec,
+        intents: &[Intent],
+        removed: &mut Vec<String>,
+    ) -> Result<usize> {
+        let (name, h, folder) = (scan.name, scan.engine, spec.folder.as_str());
+        let snapshot = h.snapshot(folder)?;
+        let max_uid = snapshot.uid_next.saturating_sub(1);
+        let last = match spec.role {
+            WatchRole::Source => self.store.checkpoint(name, folder, &snapshot)?,
+            WatchRole::Category | WatchRole::Retired => self
+                .store
+                .checkpoint_start_at(name, folder, &snapshot, max_uid)?,
+        };
+        if last > max_uid {
+            return Err(anyhow!("UIDNEXT regressed without epoch reset"));
+        }
+        let through = max_uid.min(last.saturating_add(scan.limit));
+        let envelopes = if through > last {
+            h.discover(folder, last, through)?
+        } else {
+            vec![]
+        };
+        let after = h.snapshot(folder)?;
+        if after.uid_validity != snapshot.uid_validity || after.uid_next < snapshot.uid_next {
+            return Err(anyhow!("epoch changed while discovering"));
+        }
+        if envelopes.iter().any(|e| e.uid <= last || e.uid > through) {
+            return Err(anyhow!("out of range source UID"));
+        }
+        self.require_unchanged()?;
+        self.verify_source_binding(name, scan.account)?;
+        let known_targets = observe::known_targets(intents, folder, snapshot.uid_validity);
+        let rescan = observe::rescan_filter(&self.store, name, spec, snapshot.uid_validity)?;
+        let opts = StageOptions {
+            record_arrivals: scan.mode != FilingMode::Off,
+            known_targets: &known_targets,
+            rescan_filter: rescan.as_ref(),
+        };
+        let n = self.store.stage_with(
+            name,
+            folder,
+            snapshot.uid_validity,
+            through,
+            &envelopes,
+            scan.generation,
+            through == max_uid,
+            &opts,
+        )?;
+        removed.extend(self.reconcile_folder(scan, folder, &snapshot, through)?);
+        Ok(n)
+    }
+    /// The next bounded reconciliation window of one folder; returns the
+    /// messages whose occurrence disappeared.
+    fn reconcile_folder(
+        &mut self,
+        scan: &Scan,
+        folder: &str,
+        snapshot: &MailboxSnapshot,
+        through: u64,
+    ) -> Result<Vec<String>> {
+        let epoch = snapshot.uid_validity;
+        let cursor = self
+            .store
+            .reconcile_cursor(scan.name, folder, epoch)?
+            .min(through);
+        let end = through.min(cursor.saturating_add(scan.limit));
+        if end <= cursor {
+            return Ok(vec![]);
+        }
+        let present = scan.engine.discover(folder, cursor, end)?;
+        let latest = scan.engine.snapshot(folder)?;
+        if latest.uid_validity != epoch || latest.uid_next < snapshot.uid_next {
+            return Err(anyhow!("epoch changed during reconciliation"));
+        }
+        let uids: Vec<u64> = present.iter().map(|e| e.uid).collect();
+        self.store
+            .reconcile_range_ids(scan.name, folder, epoch, cursor, end, &uids, end == through)
+    }
+    /// Step 5: fetch and classify queued messages. With `sources` (filing on),
+    /// a message with an occurrence in a source folder gets its placement;
+    /// mail seen only in a category folder is placed by arrival resolution.
+    fn fetch_and_classify(
+        &mut self,
+        name: &str,
+        account: &AccountConfig,
+        generation: &str,
+        h: Option<&dyn MailEngine>,
+        sources: Option<&[String]>,
+        limit: usize,
+    ) -> Result<Processed> {
+        let mut done = Processed::default();
+        for id in self.store.queued(name, limit)? {
             let needed_fetch = self.required(name, &id)?.normalized.is_none();
             match self
-                .process_one(name, &account, &generation, &id, h.as_deref())?
+                .process_one(name, account, generation, &id, h)?
                 .as_str()
             {
-                "classified" => classified += 1,
-                "failed" => failed += 1,
-                _ => cached += 1,
+                "classified" => done.classified += 1,
+                "failed" => done.failed += 1,
+                _ => done.cached += 1,
             }
-            if needed_fetch && self.required(name, &id)?.normalized.is_some() {
-                fetched += 1;
+            // The canonical row: a merge redirects `id` to the existing message.
+            let row = self.required(name, &id)?;
+            if needed_fetch && row.normalized.is_some() {
+                done.fetched += 1;
+            }
+            if let Some(sources) = sources {
+                let occurrences = self.store.occurrences_of(name, &row.id)?;
+                if occurrences.iter().any(|(f, _, _)| sources.contains(f)) {
+                    self.store.ensure_placement(name, &row.id, sources)?;
+                }
             }
         }
-        let coverage = self.coverage(name)?;
-        Ok(
-            json!({"schema_version":1,"account":name,"discovered":discovered,"fetched":fetched,"classified":classified,"cached":cached,"pending":coverage["pending_jobs"],"failed":failed,"scan_errors":scan_errors,"partial":failed+scan_errors>0,"coverage":self.coverage(name)?}),
-        )
+        Ok(done)
     }
     fn required(&self, name: &str, id: &str) -> Result<Record> {
         self.store
@@ -817,6 +982,95 @@ fn generation(config: &AppConfig, account: &AccountConfig) -> Result<String> {
 }
 fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+fn check_binding(
+    account: &AccountConfig,
+    engine: Option<&dyn MailEngine>,
+    expected: &str,
+) -> Result<()> {
+    if binding_identity(account, engine)? != expected {
+        return Err(err(5, "Himalaya mailbox identity changed during operation"));
+    }
+    Ok(())
+}
+
+fn config_changed() -> anyhow::Error {
+    err(5, "mail engine configuration changed during operation")
+}
+
+fn abort_on_config_change(e: anyhow::Error) -> anyhow::Error {
+    if filing::is_config_changed(&e) {
+        config_changed()
+    } else {
+        e
+    }
+}
+
+/// A failed filing step counts as an error with a code-only problem; a mail
+/// engine configuration change aborts the pass instead.
+fn step_failed(e: anyhow::Error, code: &str, summary: &mut FilingSummary) -> Result<()> {
+    if filing::is_config_changed(&e) {
+        return Err(config_changed());
+    }
+    summary.errors += 1;
+    summary.problems.push(code.into());
+    Ok(())
+}
+
+/// Step 2: the folder map. With filing off, or when resolution fails, only
+/// the sources are watched.
+fn resolve_or_sources(
+    store: &mut Store,
+    filing: Option<&PassContext>,
+    account: &AccountConfig,
+    summary: &mut FilingSummary,
+) -> Result<FolderMap> {
+    let Some(ctx) = filing else {
+        return Ok(FolderMap::sources_only(account));
+    };
+    match observe::resolve_folders(store, ctx, summary) {
+        Ok(map) => Ok(map),
+        Err(e) => {
+            step_failed(e, "folder_resolution_failed", summary)?;
+            Ok(FolderMap::sources_only(account))
+        }
+    }
+}
+
+/// Step 7: rescan completion, then bootstrap and hydration.
+fn observe_placements(
+    store: &mut Store,
+    ctx: &PassContext,
+    map: &FolderMap,
+    summary: &mut FilingSummary,
+) -> Result<()> {
+    if let Err(e) = observe::update_rescan_completion(store, ctx, map) {
+        step_failed(e, "rescan_completion_failed", summary)?;
+    }
+    if let Err(e) = observe::bootstrap_and_hydrate(store, ctx, map, summary) {
+        step_failed(e, "bootstrap_failed", summary)?;
+    }
+    Ok(())
+}
+
+/// Discovery inputs shared by every watched folder of one pass.
+struct Scan<'a> {
+    name: &'a str,
+    account: &'a AccountConfig,
+    generation: &'a str,
+    engine: &'a dyn MailEngine,
+    mode: FilingMode,
+    limit: u64,
+}
+
+/// Step 5 counters of a sync response.
+#[derive(Default)]
+struct Processed {
+    classified: usize,
+    fetched: usize,
+    cached: usize,
+    failed: usize,
 }
 
 fn binding_identity(account: &AccountConfig, engine: Option<&dyn MailEngine>) -> Result<String> {
