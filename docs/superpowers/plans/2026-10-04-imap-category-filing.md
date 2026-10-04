@@ -1156,6 +1156,9 @@ impl FakeEngine {
     pub fn locate(&self, message_id: &str) -> Vec<(String, u64)>;        // all (folder, uid) holding it
     pub fn epoch(&self, folder: &str) -> u64;
     pub fn subscribed(&self, folder: &str) -> bool;
+    /// Strict scope (mirrors the Himalaya engine): when set, every folder-specific trait call on a
+    /// folder outside `sources` ∪ the last `set_watch_scope` list returns Err without effect.
+    pub fn enforce_scope(&self, sources: &[&str]);
 }
 impl Default for FakeEngine { fn default() -> Self { Self::new() } }
 impl MailEngine for FakeEngine { /* all methods */ }
@@ -1181,7 +1184,8 @@ pub fn mail(message_id: &str, subject: &str, body: &str) -> Vec<u8>;
 - `engine: EngineConfig::Himalaya { binary: "himalaya", config: <dir>/h.toml (written with "[accounts.work]\nimap.server='imaps://fake.test'\n"), account: "work", mailboxes: ["INBOX"], expected_version: "2.1.0", timeout_seconds: 5, max_output_bytes: 1_000_000 }`;
 - `filing.mode = mode`;
 - every category's `folder` set explicitly to its name, except `correspondence`, which is set to `"INBOX"` so tests cover both kinds of target;
-- `review_mode` left at its default `true`, to prove review mode does not block filing.
+- `review_mode` left at its default `true`, to prove review mode does not block filing;
+- `fake.enforce_scope(&["INBOX"])`, so a filing pass that forgets `set_watch_scope` fails in tests exactly as it would against Himalaya.
 
 `mail(id, subject, body)` returns `format!("Message-ID: <{id}@test>\r\nFrom: Alex <alex@example.com>\r\nTo: work@example.com\r\nSubject: {subject}\r\nContent-Type: text/plain\r\n\r\n{body}\r\n")`.
 
