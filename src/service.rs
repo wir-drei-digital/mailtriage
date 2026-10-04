@@ -460,10 +460,16 @@ impl Service {
         if let Err(e) = arrivals::resolve_arrivals(&mut self.store, ctx, map, summary) {
             step_failed(e, "arrivals_failed", summary)?;
         }
-        reevaluate_step(&mut self.store, ctx, map, removed, summary)?;
+        // Also homes whose occurrence vanished in a pass that then aborted.
+        let mut lost = removed.to_vec();
+        lost.extend(self.store.orphaned_homes(ctx.account)?);
+        reevaluate_step(&mut self.store, ctx, map, &lost, summary)?;
         observe_placements(&mut self.store, ctx, map, summary)?;
         let dropped = self.plan_and_apply(ctx, map, summary)?;
         reevaluate_step(&mut self.store, ctx, map, &dropped, summary)?;
+        if let Err(e) = filing::done::reopen_reappeared(&mut self.store, ctx) {
+            step_failed(e, "reopen_failed", summary)?;
+        }
         if let Err(e) = filing::done::infer_done(&mut self.store, ctx, map, summary) {
             step_failed(e, "done_inference_failed", summary)?;
         }
@@ -937,7 +943,7 @@ impl Service {
             &row.id,
             &expected,
             &overrides,
-            placement.as_ref(),
+            placement.as_ref().map(|(read, changed)| (read, changed)),
         )? {
             return Err(err(5, "message corrections changed concurrently; retry"));
         }
@@ -965,7 +971,7 @@ impl Service {
         row: &Record,
         overrides: &Value,
         touched: bool,
-    ) -> Result<Option<Placement>> {
+    ) -> Result<Option<(Placement, Placement)>> {
         if !touched
             || account.filing.mode == FilingMode::Off
             || self.store.placement(name, &row.id)?.is_none()
@@ -983,9 +989,9 @@ impl Service {
             })
             .map(str::to_owned);
         let t = Transition::CategoryChanged { effective_category };
-        let (_, placement) =
+        let planned =
             transitions::plan_transition(&self.store, name, &row.id, &t, &sources_of(account))?;
-        Ok(Some(placement))
+        Ok(Some(planned))
     }
     /// `filing pin`: pins the message in its source folder (spec "Placement
     /// transitions"), resolving an ambiguous location first.
@@ -1004,8 +1010,8 @@ impl Service {
     pub fn review(&mut self, name: &str, id: &str, done: bool) -> Result<Value> {
         let (_, generation) = self.ensure(name)?;
         let row = self.required(name, id)?;
+        // Sets the review state and `done_inferred = 0` in one transaction.
         self.store.review(name, &row.id, done)?;
-        self.store.clear_done_inferred(name, &row.id)?;
         if !done && row.generation != generation {
             self.store
                 .requeue(name, std::slice::from_ref(&row.id), &generation)?;

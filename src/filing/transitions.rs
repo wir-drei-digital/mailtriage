@@ -35,11 +35,11 @@ pub fn apply_transition(
 ) -> Result<Placement> {
     for _ in 0..5 {
         let (old, new) = plan_transition(store, account, message_id, &t, sources)?;
-        let mut writes = vec![FilingWrite::Placement {
+        let mut writes = vec![FilingWrite::PlacementFrom {
             placement: &new,
-            expected_rev: old.desired_rev,
+            read: &old,
         }];
-        if let Some((kind, detail)) = transition_event(&t, &old) {
+        if let Some((kind, detail)) = transition_event(&t, &old, &new) {
             writes.push(FilingWrite::Event {
                 message_id: Some(message_id),
                 folder: new.home_folder.as_deref(),
@@ -119,12 +119,23 @@ fn open_move(store: &Store, account: &str, message_id: &str) -> Result<bool> {
         .any(|i| i.message_id == message_id && i.kind == "move"))
 }
 
-fn transition_event(t: &Transition, old: &Placement) -> Option<(&'static str, Value)> {
+fn transition_event(
+    t: &Transition,
+    old: &Placement,
+    new: &Placement,
+) -> Option<(&'static str, Value)> {
     match t {
         Transition::CategoryChanged { .. } => None,
         Transition::Pin => Some(("pinned", json!({"via": "command"}))),
         Transition::Unpin => Some(("unpinned", json!({"via": "command"}))),
-        Transition::Retry => Some(("released", json!({"cleared": old.blocked_reason}))),
+        Transition::Retry => {
+            // Only the block this retry actually lifted.
+            let cleared = old
+                .blocked_reason
+                .as_ref()
+                .filter(|_| new.blocked_reason.is_none());
+            Some(("released", json!({"cleared": cleared})))
+        }
     }
 }
 

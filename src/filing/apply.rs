@@ -5,8 +5,8 @@
 use super::observe::FolderMap;
 use super::planner::{Action, Locator, Plan};
 use super::{
-    is_config_changed, rfc_message_id, FilingSummary, FilingWrite, IntentPatch, PassContext,
-    Placement, Revert,
+    is_config_changed, rfc_message_id, FilingSummary, FilingWrite, Intent, IntentPatch,
+    PassContext, Placement, Revert,
 };
 use crate::domain::{FilingMode, SourceEnvelope};
 use crate::engine::WriteOutcome;
@@ -92,15 +92,20 @@ fn group(plan: &Plan, key: impl Fn(&Action) -> Option<BatchKey>) -> Vec<(BatchKe
 /// only while the revision the planner saw is still current.
 fn clear_requests(store: &mut Store, ctx: &PassContext, plan: &Plan) -> Result<()> {
     for (id, rev) in &plan.cleared_requests {
-        let Some(mut p) = store.placement(ctx.account, id)? else {
+        let Some(read) = store.placement(ctx.account, id)? else {
             continue;
         };
-        if p.desired_rev != *rev {
+        if read.desired_rev != *rev {
             continue;
         }
+        let mut p = read.clone();
         p.desired_target = None;
         p.desired_rev += 1;
-        store.save_placement(&p, Some(*rev))?;
+        let write = FilingWrite::PlacementFrom {
+            placement: &p,
+            read: &read,
+        };
+        store.commit_filing(ctx.account, &[write], &ctx.now)?;
     }
     Ok(())
 }
@@ -147,9 +152,9 @@ pub(crate) fn commit(
 }
 
 /// Re-reads the message's placement, lets `f` change it and commits it
-/// together with `extra` in one transaction while its `desired_rev` is
-/// unchanged, re-reading after a concurrent change. `f` may bump
-/// `desired_rev` itself.
+/// together with `extra` in one transaction while its `desired_rev` (and,
+/// when `f` changed it, its `blocked_reason`) is unchanged, re-reading after
+/// a concurrent change. `f` may bump `desired_rev` itself.
 pub(crate) fn commit_with_placement(
     store: &mut Store,
     ctx: &PassContext,
@@ -158,14 +163,14 @@ pub(crate) fn commit_with_placement(
     extra: &[FilingWrite<'_>],
 ) -> Result<()> {
     for _ in 0..5 {
-        let Some(mut p) = store.placement(ctx.account, message_id)? else {
+        let Some(read) = store.placement(ctx.account, message_id)? else {
             bail!("message has no placement");
         };
-        let expected_rev = p.desired_rev;
+        let mut p = read.clone();
         f(&mut p);
-        let mut writes = vec![FilingWrite::Placement {
+        let mut writes = vec![FilingWrite::PlacementFrom {
             placement: &p,
-            expected_rev,
+            read: &read,
         }];
         writes.extend(extra.iter().cloned());
         if store.commit_filing(ctx.account, &writes, &ctx.now)? {
@@ -562,6 +567,18 @@ fn move_raced(
     outcome: &WriteOutcome,
     summary: &mut FilingSummary,
 ) -> Result<()> {
+    // The quarantine window closes at T's UIDNEXT right after the race; a
+    // failed snapshot leaves it to the next recovery observation.
+    let race_until = race_bound(ctx, target, claimed, store)?;
+    let raced = |id: i64, error: &'static str| FilingWrite::Intent {
+        id,
+        state: "awaiting_rescan",
+        patch: IntentPatch {
+            error: Some(error.into()),
+            race_until_uid: race_until,
+            ..Default::default()
+        },
+    };
     let copyuid = outcome.copyuid.as_ref().filter(|c| !c.pairs.is_empty());
     if let (Some(copyuid), Some(session)) = (copyuid, outcome.session_epoch) {
         let at = now();
@@ -585,11 +602,7 @@ fn move_raced(
             })
             .collect();
         let mut writes: Vec<FilingWrite<'_>> = reverts.iter().map(FilingWrite::NewRevert).collect();
-        writes.extend(
-            claimed
-                .iter()
-                .map(|(id, _)| close(*id, "awaiting_rescan", Some("epoch_race"))),
-        );
+        writes.extend(claimed.iter().map(|(id, _)| raced(*id, "epoch_race")));
         commit(store, ctx, &writes)?;
         return dispatch_reverts(store, ctx, summary);
     }
@@ -606,13 +619,46 @@ fn move_raced(
     }
     let mut writes = vec![FilingWrite::Pause { folder, reason }];
     for (id, message_id) in &messages {
-        writes.push(close(*id, "awaiting_rescan", Some(reason)));
+        writes.push(raced(*id, reason));
         let detail = json!({"intent_id": id, "kind": "move", "error": reason});
         writes.push(event(Some(message_id), Some(folder), "epoch_race", detail));
     }
     commit(store, ctx, &writes)?;
     race_problem(folder, summary);
     Ok(())
+}
+
+/// T's `UIDNEXT` right after a race, when T is still in the claimed
+/// intents' target epoch (an epoch change means nothing more can arrive in
+/// it); `None` when the snapshot fails.
+fn race_bound(
+    ctx: &PassContext,
+    target: &str,
+    claimed: &[(i64, u64)],
+    store: &Store,
+) -> Result<Option<u64>> {
+    let Some(intent) = claimed
+        .first()
+        .map(|c| store.intent(c.0))
+        .transpose()?
+        .flatten()
+    else {
+        return Ok(None);
+    };
+    Ok(race_until_uid(ctx, target, &intent))
+}
+
+/// T's `UIDNEXT` now for a raced move intent: the end of its quarantine
+/// window. When T left `target_epoch`, nothing more can arrive in that
+/// epoch, so the window ends at `target_uid_next`. `None` when the
+/// snapshot fails (the window stays open-ended until it is recorded).
+pub(crate) fn race_until_uid(ctx: &PassContext, target: &str, intent: &Intent) -> Option<u64> {
+    let snapshot = ctx.engine.snapshot(target).ok()?;
+    if Some(snapshot.uid_validity) == intent.target_epoch {
+        Some(snapshot.uid_next)
+    } else {
+        Some(intent.target_uid_next.unwrap_or(0))
+    }
 }
 
 /// Dispatches every `pending` revert (spec "Epoch race"): the destination

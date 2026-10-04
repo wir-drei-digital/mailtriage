@@ -15,7 +15,7 @@ use uuid::Uuid;
 const PLACEMENT_COLUMNS: &str = "account,message_id,source_folder,home_folder,home_epoch,home_uid,location_state,absent_since,desired_target,pinned,eligible_once,desired_rev,filed_at,filed_by,flag_attempted_at,flagged_at,done_inferred,blocked_reason";
 const FOLDER_COLUMNS: &str = "account,native,configured,category_id,origin,state,role_verified,confirmed,subscribed,pause_reason,epoch,watch_from_uid,rescan_epoch,rescan_below_uid,rescan_complete,checked_at,error";
 const ARRIVAL_COLUMNS: &str = "id,account,folder,epoch,uid,message_id,rfc_message_id,state,kind,intent_id,created_at,resolved_at";
-const INTENT_COLUMNS: &str = "id,account,message_id,kind,folder,epoch,uid,target,target_epoch,target_uid_next,target_uid,desired_rev,consumes_eligible,batch,state,attempts,next_after,dispatched_at,created_at,updated_at,error";
+const INTENT_COLUMNS: &str = "id,account,message_id,kind,folder,epoch,uid,target,target_epoch,target_uid_next,target_uid,desired_rev,consumes_eligible,batch,state,attempts,next_after,dispatched_at,created_at,updated_at,error,race_until_uid";
 const REVERT_COLUMNS: &str = "id,account,parent_intent,folder,folder_epoch,uid,target,target_epoch,state,target_uid,created_at,updated_at,error";
 
 impl Store {
@@ -272,11 +272,12 @@ impl Store {
         Ok(rows)
     }
 
-    /// Writes every field of an existing placement; with `Some(rev)` only when
-    /// the stored `desired_rev` still equals `rev`. Returns whether it wrote.
+    /// Writes every field of an existing placement but `done_inferred`; with
+    /// `Some(rev)` only when the stored `desired_rev` still equals `rev`.
+    /// Returns whether it wrote.
     pub fn save_placement(&mut self, p: &Placement, expected_rev: Option<i64>) -> Result<bool> {
         let tx = self.db.transaction()?;
-        let wrote = write_placement(&tx, p, expected_rev)?;
+        let wrote = write_placement(&tx, p, expected_rev, BlockWrite::Given)?;
         if wrote {
             bump(&tx)?;
         }
@@ -308,16 +309,17 @@ impl Store {
     }
 
     /// One transaction: compare-and-swap overrides, then write the placement
-    /// (desired_rev bumped by the caller). The placement is written only while
-    /// its stored `desired_rev` is `placement.desired_rev - 1`. Returns
-    /// `false`, writing nothing, when either comparison fails.
+    /// given as `(read, changed)` (desired_rev bumped by the caller) as
+    /// `FilingWrite::PlacementFrom`: only while the stored `desired_rev` still
+    /// is `read`'s, with `blocked_reason` compared and set against `read`.
+    /// Returns `false`, writing nothing, when a comparison fails.
     pub fn correct_with_placement(
         &mut self,
         account: &str,
         id: &str,
         expected: &Value,
         overrides: &Value,
-        placement: Option<&Placement>,
+        placement: Option<(&Placement, &Placement)>,
     ) -> Result<bool> {
         self.correct_with_writes(account, id, expected, overrides, placement, &[], &now())
     }
@@ -331,7 +333,7 @@ impl Store {
         id: &str,
         expected: &Value,
         overrides: &Value,
-        placement: Option<&Placement>,
+        placement: Option<(&Placement, &Placement)>,
         extra: &[FilingWrite<'_>],
         now: &str,
     ) -> Result<bool> {
@@ -345,8 +347,13 @@ impl Store {
         if changed != 1 {
             return Ok(false);
         }
-        if let Some(p) = placement {
-            if !write_placement(&tx, p, Some(p.desired_rev - 1))? {
+        if let Some((read, placement)) = placement {
+            if !apply_write(
+                &tx,
+                account,
+                &FilingWrite::PlacementFrom { placement, read },
+                now,
+            )? {
                 return Ok(false);
             }
         }
@@ -380,24 +387,76 @@ impl Store {
         Ok(changed)
     }
 
-    /// Reopens a message whose Done was inferred (`review_state = open`,
-    /// `done_inferred = 0`). Returns whether it changed.
+    /// Reopens a message whose Done was inferred and that is still done
+    /// (`review_state = open`, `done_inferred = 0`, event `reopened`).
+    /// Returns whether it changed. Transitions use
+    /// `FilingWrite::ReopenInferred` to do this in their own transaction.
     pub fn reopen_inferred(&mut self, account: &str, id: &str) -> Result<bool> {
         let tx = self.db.transaction()?;
-        let changed = tx.execute(
-            "UPDATE messages SET review_state='open' WHERE account=?1 AND id=?2 AND review_state='done'
- AND EXISTS(SELECT 1 FROM placements WHERE account=?1 AND message_id=?2 AND done_inferred=1)",
-            params![account, id],
-        )? == 1;
+        let changed = reopen_inferred_in(&tx, account, id, None, &now())?;
         if changed {
-            tx.execute(
-                "UPDATE placements SET done_inferred=0 WHERE account=? AND message_id=?",
-                params![account, id],
-            )?;
             bump(&tx)?;
         }
         tx.commit()?;
         Ok(changed)
+    }
+
+    /// Known placements whose Done was inferred but which are still done (a
+    /// reopen interrupted by a crash).
+    pub fn known_but_inferred_done(&self, account: &str) -> Result<Vec<String>> {
+        let mut st = self.db.prepare("SELECT p.message_id FROM placements p JOIN messages m ON m.id=p.message_id
+ WHERE p.account=? AND p.location_state='known' AND p.done_inferred=1 AND m.review_state='done' ORDER BY p.message_id")?;
+        let rows = st
+            .query_map([account], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Known placements whose home occurrence row is gone while the home
+    /// folder's checkpoint is still in the home's epoch (a re-evaluation
+    /// trigger lost to an aborted pass).
+    pub fn orphaned_homes(&self, account: &str) -> Result<Vec<String>> {
+        let mut st = self.db.prepare("SELECT p.message_id FROM placements p
+ JOIN checkpoints c ON c.account=p.account AND c.mailbox=p.home_folder AND c.epoch=p.home_epoch
+ WHERE p.account=? AND p.location_state='known' AND NOT EXISTS(SELECT 1 FROM occurrences o
+  WHERE o.account=p.account AND o.mailbox=p.home_folder AND o.epoch=p.home_epoch AND o.uid=p.home_uid AND o.message_id=p.message_id)
+ ORDER BY p.message_id")?;
+        let rows = st
+            .query_map([account], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Creates the placement of `id` as `ensure_placement` does (blocked with
+    /// `block` when it creates it) and applies `writes`, in one transaction.
+    /// Returns whether it created the placement.
+    pub(crate) fn place_with(
+        &mut self,
+        account: &str,
+        id: &str,
+        sources: &[String],
+        block: Option<&str>,
+        writes: &[FilingWrite<'_>],
+        now: &str,
+    ) -> Result<bool> {
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let created = insert_placement(&tx, account, id, sources)?;
+        if created && block.is_some() {
+            tx.execute(
+                "UPDATE placements SET blocked_reason=? WHERE account=? AND message_id=?",
+                params![block, account, id],
+            )?;
+        }
+        for w in writes {
+            if !apply_write(&tx, account, w, now)? {
+                return Ok(false);
+            }
+        }
+        bump(&tx)?;
+        tx.commit()?;
+        Ok(created)
     }
 
     /// `done` / `reopen` commands: an explicit review state is never inferred.
@@ -499,32 +558,31 @@ impl Store {
     }
 
     /// Whether an arrival could still hide an unidentified occurrence (spec
-    /// "Done inference"): one `pending` or `unresolved`, or one resolved
-    /// `quarantined` whose occurrence is still recorded.
+    /// "Done inference"): a `pending` or `unresolved` one. Quarantined
+    /// arrivals have established identity and do not count.
     pub fn arrivals_unsettled(&self, account: &str) -> Result<bool> {
         Ok(self.db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM arrivals a WHERE a.account=?1 AND (a.state IN ('pending','unresolved')
- OR (a.state='resolved' AND a.kind='quarantined' AND EXISTS(SELECT 1 FROM occurrences o
-  WHERE o.account=a.account AND o.mailbox=a.folder AND o.epoch=a.epoch AND o.uid=a.uid))))",
+            "SELECT EXISTS(SELECT 1 FROM arrivals WHERE account=? AND state IN ('pending','unresolved'))",
             [account],
             |r| r.get(0),
         )?)
     }
 
-    /// `filing retry --folder`: clears the safety pause (event `released`) and
-    /// schedules a rescan of the folder in its current epoch, from its watch
-    /// floor, in one transaction. Returns whether a pause was cleared.
+    /// `filing retry --folder`: clears the safety pause (event `released`) and,
+    /// unless a reset rescan of the folder is still running (which keeps its
+    /// bound and progress), schedules a rescan of it in its current epoch,
+    /// bounded by the checkpoint's next UID and starting at its watch floor,
+    /// in one transaction. Returns whether a pause was cleared.
     pub fn release_pause(&mut self, account: &str, native: &str, now: &str) -> Result<bool> {
         let tx = self.db.transaction()?;
-        let reason: Option<String> = tx
+        let row: Option<(Option<String>, bool)> = tx
             .query_row(
-                "SELECT pause_reason FROM folders WHERE account=? AND native=?",
+                "SELECT pause_reason,rescan_complete FROM folders WHERE account=? AND native=?",
                 params![account, native],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
-            .optional()?
-            .flatten();
-        let Some(reason) = reason else {
+            .optional()?;
+        let Some((Some(reason), rescan_complete)) = row else {
             return Ok(false);
         };
         tx.execute(
@@ -538,7 +596,8 @@ impl Store {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        if let Some((epoch, last_uid)) = checkpoint {
+        // A running reset rescan keeps its own bound and progress.
+        if let Some((epoch, last_uid)) = checkpoint.filter(|_| rescan_complete) {
             tx.execute(
                 "UPDATE folders SET rescan_epoch=?3,rescan_below_uid=?4,rescan_complete=0 WHERE account=?1 AND native=?2",
                 params![account, native, epoch, last_uid + 1],
@@ -563,8 +622,8 @@ impl Store {
         Ok(true)
     }
 
-    /// `filing retry --arrival`: an `unresolved` (or `dismissed`) arrival goes
-    /// back to `pending`, its message's fetch is requeued, and a merge-conflict
+    /// `filing retry --arrival`: an `unresolved` arrival goes back to
+    /// `pending` (a `dismissed` one stays dismissed), its message's fetch is requeued, and a merge-conflict
     /// block recorded for this arrival is lifted, in one transaction. Returns
     /// whether the arrival was eligible.
     pub fn reopen_arrival(
@@ -577,7 +636,7 @@ impl Store {
         let tx = self.db.transaction()?;
         let message: Option<String> = tx
             .query_row(
-                "SELECT message_id FROM arrivals WHERE account=? AND id=? AND state IN ('unresolved','dismissed')",
+                "SELECT message_id FROM arrivals WHERE account=? AND id=? AND state='unresolved'",
                 params![account, arrival_id],
                 |r| r.get(0),
             )
@@ -878,7 +937,7 @@ impl Store {
             return Ok(false);
         }
         tx.execute(
-            "UPDATE filing_intents SET state='in_flight',epoch=?2,uid=?3,target_epoch=?4,target_uid_next=?5,target_uid=NULL,attempts=?6,next_after=?7,dispatched_at=?8,updated_at=?8,error=NULL WHERE id=?1",
+            "UPDATE filing_intents SET state='in_flight',epoch=?2,uid=?3,target_epoch=?4,target_uid_next=?5,target_uid=NULL,attempts=?6,next_after=?7,dispatched_at=?8,updated_at=?8,error=NULL,race_until_uid=NULL WHERE id=?1",
             params![
                 intent.id,
                 intent.epoch,
@@ -1308,7 +1367,17 @@ fn apply_write(tx: &Connection, account: &str, w: &FilingWrite<'_>, now: &str) -
         FilingWrite::Placement {
             placement,
             expected_rev,
-        } => return write_placement(tx, placement, Some(*expected_rev)),
+        } => return write_placement(tx, placement, Some(*expected_rev), BlockWrite::Given),
+        FilingWrite::PlacementFrom { placement, read } => {
+            let block = BlockWrite::Changed(read.blocked_reason.as_deref());
+            return write_placement(tx, placement, Some(read.desired_rev), block);
+        }
+        FilingWrite::ReopenInferred {
+            message_id,
+            generation,
+        } => {
+            reopen_inferred_in(tx, account, message_id, Some(generation), now)?;
+        }
         FilingWrite::Intent { id, state, patch } => write_intent(tx, *id, state, patch, now)?,
         FilingWrite::Pause { folder, reason } => {
             let n = tx.execute(
@@ -1342,10 +1411,35 @@ fn apply_write(tx: &Connection, account: &str, w: &FilingWrite<'_>, now: &str) -
     Ok(true)
 }
 
-/// `save_placement` inside a caller's transaction; does not bump the revision.
-fn write_placement(tx: &Connection, p: &Placement, expected_rev: Option<i64>) -> Result<bool> {
+/// How a placement write treats `blocked_reason`.
+#[derive(Debug, Clone, Copy)]
+enum BlockWrite<'a> {
+    /// Written as given (an explicit full-row write).
+    Given,
+    /// Written only when it differs from the value the caller read, and then
+    /// only while the stored value still is that one.
+    Changed(Option<&'a str>),
+}
+
+/// `save_placement` inside a caller's transaction; does not bump the
+/// revision. `done_inferred` is never written here: only done inference,
+/// reopening and explicit review change it.
+fn write_placement(
+    tx: &Connection,
+    p: &Placement,
+    expected_rev: Option<i64>,
+    block: BlockWrite<'_>,
+) -> Result<bool> {
+    let (write_block, read_block) = match block {
+        BlockWrite::Given => (true, None),
+        BlockWrite::Changed(read) => {
+            let changed = p.blocked_reason.as_deref() != read;
+            (changed, changed.then_some(read))
+        }
+    };
     let n = tx.execute(
-        "UPDATE placements SET source_folder=?3,home_folder=?4,home_epoch=?5,home_uid=?6,location_state=?7,absent_since=?8,desired_target=?9,pinned=?10,eligible_once=?11,desired_rev=?12,filed_at=?13,filed_by=?14,flag_attempted_at=?15,flagged_at=?16,done_inferred=?17,blocked_reason=?18 WHERE account=?1 AND message_id=?2 AND (?19 IS NULL OR desired_rev=?19)",
+        "UPDATE placements SET source_folder=?3,home_folder=?4,home_epoch=?5,home_uid=?6,location_state=?7,absent_since=?8,desired_target=?9,pinned=?10,eligible_once=?11,desired_rev=?12,filed_at=?13,filed_by=?14,flag_attempted_at=?15,flagged_at=?16,blocked_reason=CASE WHEN ?17 THEN ?18 ELSE blocked_reason END
+ WHERE account=?1 AND message_id=?2 AND (?19 IS NULL OR desired_rev=?19) AND (?20=0 OR blocked_reason IS ?21)",
         params![
             p.account,
             p.message_id,
@@ -1363,12 +1457,50 @@ fn write_placement(tx: &Connection, p: &Placement, expected_rev: Option<i64>) ->
             p.filed_by,
             p.flag_attempted_at,
             p.flagged_at,
-            p.done_inferred,
+            write_block,
             p.blocked_reason,
-            expected_rev
+            expected_rev,
+            read_block.is_some(),
+            read_block.flatten()
         ],
     )?;
     Ok(n == 1)
+}
+
+/// Reopens a message whose Done was inferred and that is still done:
+/// `review_state = open`, `done_inferred = 0`, event `reopened`; with a
+/// `generation`, a message classified under another one is requeued (as an
+/// explicit reopen does). Returns whether it reopened.
+fn reopen_inferred_in(
+    tx: &Connection,
+    account: &str,
+    id: &str,
+    generation: Option<&str>,
+    now: &str,
+) -> Result<bool> {
+    let reopened = tx.execute(
+        "UPDATE messages SET review_state='open' WHERE account=?1 AND id=?2 AND review_state='done'
+ AND EXISTS(SELECT 1 FROM placements WHERE account=?1 AND message_id=?2 AND done_inferred=1)",
+        params![account, id],
+    )? == 1;
+    if !reopened {
+        return Ok(false);
+    }
+    tx.execute(
+        "UPDATE placements SET done_inferred=0 WHERE account=? AND message_id=?",
+        params![account, id],
+    )?;
+    insert_event(tx, account, Some(id), None, "reopened", &json!({}), now)?;
+    if let Some(generation) = generation {
+        let stale = tx.execute(
+            "UPDATE messages SET status='pending',error=NULL,generation=?3 WHERE account=?1 AND id=?2 AND generation<>?3",
+            params![account, id, generation],
+        )? == 1;
+        if stale {
+            tx.execute("INSERT INTO jobs(message_id,state,next_after,generation) VALUES(?1,'queued',?2,?3) ON CONFLICT(message_id) DO UPDATE SET state='queued',attempts=0,next_after=excluded.next_after,lease_until=NULL,generation=excluded.generation",params![id,now,generation])?;
+        }
+    }
+    Ok(true)
 }
 
 fn write_intent(
@@ -1379,7 +1511,7 @@ fn write_intent(
     now: &str,
 ) -> Result<()> {
     let n = db.execute(
-        "UPDATE filing_intents SET state=?2,updated_at=?3,target_uid=COALESCE(?4,target_uid),attempts=COALESCE(?5,attempts),next_after=COALESCE(?6,next_after),dispatched_at=COALESCE(?7,dispatched_at),error=COALESCE(?8,error) WHERE id=?1",
+        "UPDATE filing_intents SET state=?2,updated_at=?3,target_uid=COALESCE(?4,target_uid),attempts=COALESCE(?5,attempts),next_after=COALESCE(?6,next_after),dispatched_at=COALESCE(?7,dispatched_at),error=COALESCE(?8,error),race_until_uid=COALESCE(?9,race_until_uid) WHERE id=?1",
         params![
             id,
             state,
@@ -1388,7 +1520,8 @@ fn write_intent(
             patch.attempts,
             patch.next_after,
             patch.dispatched_at,
-            patch.error
+            patch.error,
+            patch.race_until_uid
         ],
     )?;
     if n == 0 {
@@ -1652,6 +1785,7 @@ fn row_intent(r: &Row<'_>) -> rusqlite::Result<Intent> {
         created_at: r.get(18)?,
         updated_at: r.get(19)?,
         error: r.get(20)?,
+        race_until_uid: r.get(21)?,
     })
 }
 

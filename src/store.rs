@@ -30,7 +30,7 @@ impl Store {
         db.busy_timeout(StdDuration::from_secs(5))?;
         db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;")?;
         let version: u32 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 3 {
+        if version > 4 {
             bail!("database schema is newer than this binary");
         }
         if version == 0 {
@@ -100,6 +100,13 @@ CREATE TABLE filing_events(id INTEGER PRIMARY KEY, account TEXT NOT NULL, messag
  at TEXT NOT NULL, kind TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '{}');
 CREATE INDEX event_account ON filing_events(account, id);
 PRAGMA user_version=3; COMMIT;")?;
+        }
+        if version < 4 {
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+ALTER TABLE filing_intents ADD COLUMN race_until_uid INTEGER;
+PRAGMA user_version=4; COMMIT;",
+            )?;
         }
         Ok(Self { db })
     }
@@ -226,11 +233,16 @@ PRAGMA user_version=3; COMMIT;")?;
         tx.commit()?;
         Ok(changed == 1)
     }
+    /// An explicit review state; it is never inferred (`done_inferred = 0`).
     pub fn review(&mut self, account: &str, id: &str, done: bool) -> Result<()> {
         let tx = self.db.transaction()?;
         tx.execute(
             "UPDATE messages SET review_state=? WHERE account=? AND id=?",
             params![if done { "done" } else { "open" }, account, id],
+        )?;
+        tx.execute(
+            "UPDATE placements SET done_inferred=0 WHERE account=? AND message_id=?",
+            params![account, id],
         )?;
         bump(&tx)?;
         tx.commit()?;

@@ -115,32 +115,31 @@ impl Facts {
         })
     }
 
-    /// Spec "Epoch race": an arrival in a raced move's target, in its target
-    /// epoch at `uid >= target_uid_next`, that no intent's COPYUID explains.
-    /// The window stays open while the raced source is paused (until the
-    /// user releases it).
+    /// Spec "Epoch race": an arrival inside a raced move's frozen quarantine
+    /// window that no intent's COPYUID explains. The window does not depend
+    /// on the source's pause, so releasing it never turns a raced arrival
+    /// into a correction.
     fn quarantined(&self, a: &Arrival) -> bool {
         if a.intent_id.is_some() {
             return false;
         }
-        let targets = |i: &Intent| {
-            i.target.as_deref() == Some(a.folder.as_str()) && i.target_epoch == Some(a.epoch)
-        };
-        let explained = self
-            .moves
-            .iter()
-            .any(|i| targets(i) && i.target_uid == Some(a.uid));
-        let raced = |i: &Intent| {
-            i.error
-                .as_deref()
-                .is_some_and(|e| e.starts_with("epoch_race"))
-                && self
-                    .folders
-                    .get(&i.folder)
-                    .is_some_and(|r| r.pause_reason.is_some())
-                && i.target_uid_next.is_some_and(|n| a.uid >= n)
-        };
-        !explained && self.moves.iter().any(|i| targets(i) && raced(i))
+        let explained = self.moves.iter().any(|i| {
+            i.target.as_deref() == Some(a.folder.as_str())
+                && i.target_epoch == Some(a.epoch)
+                && i.target_uid == Some(a.uid)
+        });
+        !explained
+            && self
+                .moves
+                .iter()
+                .any(|i| in_race_window(i, &a.folder, a.epoch, a.uid))
+    }
+
+    /// A reset rescan of the folder is still running.
+    fn rescanning(&self, folder: &str) -> bool {
+        self.folders
+            .get(folder)
+            .is_some_and(|r| !r.rescan_complete && r.rescan_epoch.is_some())
     }
 
     /// Below the reset-time `UIDNEXT` of the folder's latest rescan epoch.
@@ -149,6 +148,21 @@ impl Facts {
             r.rescan_epoch == Some(at.1) && r.rescan_below_uid.is_some_and(|below| at.2 < below)
         })
     }
+}
+
+/// Spec "Epoch race": whether a locator lies in a raced move's quarantine
+/// window: the move's target in its target epoch, at
+/// `target_uid_next <= uid < race_until_uid` (T's `UIDNEXT` recorded right
+/// after the race; open-ended until it is recorded).
+pub(crate) fn in_race_window(i: &Intent, folder: &str, epoch: u64, uid: u64) -> bool {
+    i.kind == "move"
+        && i.error
+            .as_deref()
+            .is_some_and(|e| e.starts_with("epoch_race"))
+        && i.target.as_deref() == Some(folder)
+        && i.target_epoch == Some(epoch)
+        && i.target_uid_next.is_some_and(|n| uid >= n)
+        && i.race_until_uid.is_none_or(|end| uid < end)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,13 +238,9 @@ impl HomeChecks {
         uids: &[u64],
     ) -> Result<Vec<Home>> {
         if !map.watch.iter().any(|w| w.folder == folder) {
-            // Occurrences in an unwatched folder are frozen: present while LIST reports it.
-            let home = if map.listed.contains(folder) {
-                Home::Present
-            } else {
-                Home::Absent
-            };
-            return Ok(vec![home; uids.len()]);
+            // Occurrences in an unwatched (retired, missing, conflicting)
+            // folder are frozen and count as present.
+            return Ok(vec![Home::Present; uids.len()]);
         }
         if !self.verified {
             (ctx.verify_binding)()?;
@@ -369,19 +379,22 @@ fn resolve_one(
         return quarantine(store, ctx, map, a, &at, summary);
     }
     let placement = store.placement(ctx.account, &a.message_id)?;
-    if a.intent_id.is_some() || placement.as_ref().and_then(home_of).as_ref() == Some(&at) {
-        // A placement homed here and never filed was created for this
-        // arrival (at fetch, or before an interrupted resolution): new mail.
-        if a.intent_id.is_none() && placement.as_ref().is_some_and(|p| p.filed_by.is_none()) {
-            return new_arrival(store, ctx, map, a, &at, summary);
-        }
-        return resolve(store, ctx, a, "own_move");
-    }
+    // Before the unfiled-at-home shortcut, so a rescan arrival is never
+    // taken for new mail; placing and resolving are one transaction.
     if facts.in_rescan(&at) {
+        let resolved = arrival_writes(Some((a.id, "rescan")));
         if placement.is_none() {
-            store.ensure_placement(ctx.account, &a.message_id, &map.sources)?;
+            store.place_with(
+                ctx.account,
+                &a.message_id,
+                &map.sources,
+                None,
+                &resolved,
+                &ctx.now,
+            )?;
+        } else {
+            commit(store, ctx, &resolved)?;
         }
-        resolve(store, ctx, a, "rescan")?;
         return reevaluate_one(
             store,
             ctx,
@@ -392,6 +405,14 @@ fn resolve_one(
             true,
             summary,
         );
+    }
+    if a.intent_id.is_some() || placement.as_ref().and_then(home_of).as_ref() == Some(&at) {
+        // A placement homed here and never filed was created for this
+        // arrival (at fetch, or before an interrupted resolution): new mail.
+        if a.intent_id.is_none() && placement.as_ref().is_some_and(|p| p.filed_by.is_none()) {
+            return new_arrival(store, ctx, map, a, &at, summary);
+        }
+        return resolve(store, ctx, a, "own_move");
     }
     let occurring = store.occurrence_at(ctx.account, &a.folder, a.epoch, a.uid)?;
     if occurring.as_deref() != Some(a.message_id.as_str()) {
@@ -462,16 +483,22 @@ fn quarantine(
     at: &Loc,
     summary: &mut FilingSummary,
 ) -> Result<()> {
-    let created = store.ensure_placement(ctx.account, &a.message_id, &map.sources)?;
-    let homed_here = store
-        .placement(ctx.account, &a.message_id)?
-        .is_some_and(|p| home_of(&p).as_ref() == Some(at));
     let writes = arrival_writes(Some((a.id, "quarantined")));
-    if created || homed_here {
+    let block = Some("quarantined");
+    let created = store.place_with(
+        ctx.account,
+        &a.message_id,
+        &map.sources,
+        block,
+        &writes,
+        &ctx.now,
+    )?;
+    let unblocked_here = store
+        .placement(ctx.account, &a.message_id)?
+        .is_some_and(|p| home_of(&p).as_ref() == Some(at) && p.blocked_reason.is_none());
+    if !created && unblocked_here {
         let block = |p: &mut Placement| p.blocked_reason = Some("quarantined".into());
-        commit_with_placement(store, ctx, &a.message_id, block, &writes)?;
-    } else {
-        commit(store, ctx, &writes)?;
+        commit_with_placement(store, ctx, &a.message_id, block, &[])?;
     }
     summary.quarantined += 1;
     Ok(())
@@ -516,16 +543,25 @@ fn placed_arrival(
     at: &Loc,
     summary: &mut FilingSummary,
 ) -> Result<()> {
-    let refound = match home_of(p) {
-        Some((folder, epoch, _)) => store
+    let home = home_of(p).filter(|_| p.location_state == LocationState::Known);
+    if let Some((folder, epoch, _)) = &home {
+        if a.folder == *folder && a.epoch > *epoch {
+            // Re-found in its home folder's newer epoch: location only.
+            relocate(store, ctx, &a.message_id, at, None, Some((a.id, "rescan")))?;
+            homes.assume_present(at);
+            return Ok(());
+        }
+        let refound = store
             .occurrences_of(ctx.account, &p.message_id)?
             .iter()
-            .any(|(f, e, _)| *f == folder && *e != epoch),
-        None => false,
-    };
-    match (p.location_state, home_of(p)) {
+            .any(|(f, e, _)| f == folder && e != epoch);
+        if refound {
+            // Its own home folder arrival re-establishes the home.
+            return resolve(store, ctx, a, "extra");
+        }
+    }
+    match (p.location_state, home) {
         (LocationState::Ambiguous, _) => return resolve(store, ctx, a, "extra"),
-        (LocationState::Known, Some(_)) if refound => return resolve(store, ctx, a, "extra"),
         (LocationState::Known, Some(home)) => match homes.get(ctx, map, &home, summary)? {
             Home::Present => return resolve(store, ctx, a, "extra"),
             Home::Unknown => return Ok(()),
@@ -534,6 +570,16 @@ fn placed_arrival(
         _ => {}
     }
     match kind_of(map, &a.folder) {
+        Kind::Category(c) if effective_category(store, ctx, &a.message_id)? == Some(c.clone()) => {
+            relocate(
+                store,
+                ctx,
+                &a.message_id,
+                at,
+                Some("relocated"),
+                Some((a.id, "user_move")),
+            )?
+        }
         Kind::Category(c) => client_move(
             store,
             ctx,
@@ -557,11 +603,20 @@ fn placed_arrival(
     Ok(())
 }
 
-/// Spec "Placement transitions", client move into category C: override
+/// The message's effective category (model decision with overrides).
+fn effective_category(store: &Store, ctx: &PassContext, id: &str) -> Result<Option<String>> {
+    let record = store
+        .record(ctx.account, id)?
+        .ok_or_else(|| anyhow!("unknown message"))?;
+    Ok(effective(&record, ctx.generation).category_id)
+}
+
+/// Spec "Placement transitions", client move into category C (not already
+/// the effective category; that move only relocates): override
 /// `category_id = C` unless the override already is C; home here,
 /// `filed_by = user`, unpinned, the explicit request cleared, a new
 /// revision, event `client_correction`. The override compare-and-swap, the
-/// placement, the arrival and the event are one transaction.
+/// placement, the arrival, the event and a reopen are one transaction.
 fn client_move(
     store: &mut Store,
     ctx: &PassContext,
@@ -575,10 +630,10 @@ fn client_move(
         let record = store
             .record(ctx.account, id)?
             .ok_or_else(|| anyhow!("unknown message"))?;
-        let Some(mut p) = store.placement(ctx.account, id)? else {
+        let Some(read) = store.placement(ctx.account, id)? else {
             bail!("message has no placement");
         };
-        let inferred = p.done_inferred;
+        let mut p = read.clone();
         let previous = effective(&record, ctx.generation).category_id;
         let mut overrides = record.overrides.clone();
         if let Some(o) = overrides.as_object_mut() {
@@ -594,18 +649,19 @@ fn client_move(
         let mut writes = arrival_writes(arrival);
         let detail = json!({"category_id": category, "previous": previous});
         writes.push(event(Some(id), Some(&at.0), "client_correction", detail));
+        writes.push(reopen_write(ctx, id));
         let expected = &record.overrides;
         if store.correct_with_writes(
             ctx.account,
             id,
             expected,
             &overrides,
-            Some(&p),
+            Some((&read, &p)),
             &writes,
             &ctx.now,
         )? {
             summary.client_corrections += 1;
-            return reopen(store, ctx, id, inferred);
+            return Ok(());
         }
     }
     bail!("placement kept changing concurrently")
@@ -628,9 +684,8 @@ fn pin_here(
         "pinned",
         json!({"via": "client"}),
     ));
-    let mut inferred = false;
+    writes.push(reopen_write(ctx, id));
     let pin = |p: &mut Placement| {
-        inferred = p.done_inferred;
         set_home(p, at);
         p.pinned = true;
         p.desired_target = None;
@@ -638,10 +693,11 @@ fn pin_here(
     };
     commit_with_placement(store, ctx, id, pin, &writes)?;
     summary.pinned += 1;
-    reopen(store, ctx, id, inferred)
+    Ok(())
 }
 
-/// A location-only update: home here, `known`, with an optional event.
+/// A location-only update: home here, `known`, with an optional event; a
+/// message whose Done was inferred is reopened in the same transaction.
 fn relocate(
     store: &mut Store,
     ctx: &PassContext,
@@ -654,28 +710,19 @@ fn relocate(
     if let Some(kind) = event_kind {
         writes.push(event(Some(id), Some(&at.0), kind, json!({})));
     }
-    let mut inferred = false;
-    let relocate = |p: &mut Placement| {
-        inferred = p.done_inferred;
-        set_home(p, at);
-    };
-    commit_with_placement(store, ctx, id, relocate, &writes)?;
-    reopen(store, ctx, id, inferred)
+    writes.push(reopen_write(ctx, id));
+    let relocate = |p: &mut Placement| set_home(p, at);
+    commit_with_placement(store, ctx, id, relocate, &writes)
 }
 
-/// A message whose Done was inferred reappeared: it is reopened (event
-/// `reopened`) and requeued when its classification is stale.
-fn reopen(store: &mut Store, ctx: &PassContext, id: &str, inferred: bool) -> Result<()> {
-    if !inferred || !store.reopen_inferred(ctx.account, id)? {
-        return Ok(());
+/// The message reappeared: if its Done was inferred it is reopened (event
+/// `reopened`, requeued when its classification is stale) in the
+/// transition's own transaction.
+fn reopen_write<'a>(ctx: &'a PassContext, id: &'a str) -> FilingWrite<'a> {
+    FilingWrite::ReopenInferred {
+        message_id: id,
+        generation: ctx.generation,
     }
-    store.record_event(ctx.account, Some(id), None, "reopened", json!({}), &ctx.now)?;
-    if let Some(r) = store.record(ctx.account, id)? {
-        if r.generation != ctx.generation {
-            store.requeue(ctx.account, std::slice::from_ref(&r.id), ctx.generation)?;
-        }
-    }
-    Ok(())
 }
 
 /// Spec "Placement re-evaluation" for messages whose home occurrence may have
@@ -790,6 +837,14 @@ fn reevaluate_one(
     {
         return relocate(store, ctx, id, h, None, None);
     }
+    // While the home folder's reset rescan runs, the home may still be found
+    // there; its completion re-evaluates what it did not find.
+    if p.home_folder
+        .as_deref()
+        .is_some_and(|f| facts.rescanning(f))
+    {
+        return Ok(());
+    }
     let watched: BTreeSet<&str> = map.watch.iter().map(|w| w.folder.as_str()).collect();
     let survivors: Vec<&Loc> = occurrences
         .iter()
@@ -866,15 +921,15 @@ fn set_ambiguous(store: &mut Store, ctx: &PassContext, p: &Placement, n: usize) 
     }
     let id = p.message_id.as_str();
     let detail = json!({"occurrences": n});
-    let writes = [event(Some(id), None, "location_ambiguous", detail)];
-    let mut inferred = false;
+    let writes = [
+        event(Some(id), None, "location_ambiguous", detail),
+        reopen_write(ctx, id),
+    ];
     let ambiguous = |p: &mut Placement| {
-        inferred = p.done_inferred;
         p.location_state = LocationState::Ambiguous;
         p.absent_since = None;
     };
-    commit_with_placement(store, ctx, id, ambiguous, &writes)?;
-    reopen(store, ctx, id, inferred)
+    commit_with_placement(store, ctx, id, ambiguous, &writes)
 }
 
 /// Spec "Epoch reset of any watched folder": once a folder's rescan is
@@ -941,18 +996,14 @@ pub fn merge_conflict(
             Some(id) => store.placement(account, id)?,
             None => None,
         };
-        let blocked = placement
-            .filter(|p| p.blocked_reason.is_none())
-            .map(|mut p| {
-                p.blocked_reason = Some("merge_conflict".into());
-                p
-            });
+        let read = placement.filter(|p| p.blocked_reason.is_none());
+        let blocked = read.clone().map(|mut p| {
+            p.blocked_reason = Some("merge_conflict".into());
+            p
+        });
         let mut writes = Vec::new();
-        if let Some(p) = &blocked {
-            writes.push(FilingWrite::Placement {
-                placement: p,
-                expected_rev: p.desired_rev,
-            });
+        if let (Some(read), Some(p)) = (&read, &blocked) {
+            writes.push(FilingWrite::PlacementFrom { placement: p, read });
         }
         for a in &arrivals {
             writes.push(FilingWrite::Arrival {

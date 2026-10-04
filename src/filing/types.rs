@@ -120,6 +120,10 @@ pub struct Intent {
     pub created_at: String,
     pub updated_at: String,
     pub error: Option<String>,
+    /// For a raced move: T's `UIDNEXT` observed right after the race; the
+    /// quarantine window is `target_uid_next <= uid < race_until_uid` in
+    /// `target_epoch` (open-ended until it is recorded).
+    pub race_until_uid: Option<u64>,
 }
 pub const OPEN_INTENT_STATES: [&str; 4] = ["in_flight", "sent", "uncertain", "awaiting_rescan"];
 
@@ -220,16 +224,34 @@ pub struct IntentPatch {
     pub next_after: Option<String>,
     pub dispatched_at: Option<String>,
     pub error: Option<String>,
+    pub race_until_uid: Option<u64>,
 }
 
 /// One write of an atomic filing commit (`Store::commit_filing`).
 #[derive(Debug, Clone)]
 pub enum FilingWrite<'a> {
-    /// Every field of an existing placement, only while its stored
-    /// `desired_rev` equals `expected_rev` (else the whole commit is refused).
+    /// Every field of an existing placement but `done_inferred`, only while
+    /// its stored `desired_rev` equals `expected_rev` (else the whole commit
+    /// is refused).
     Placement {
         placement: &'a Placement,
         expected_rev: i64,
+    },
+    /// A placement changed from `read`: refused unless the stored
+    /// `desired_rev` still is `read.desired_rev`; `blocked_reason` is written
+    /// only when it differs from `read`, and then only while the stored value
+    /// still is `read`'s, so a concurrent block is never cleared by an
+    /// unrelated change. `done_inferred` is never written.
+    PlacementFrom {
+        placement: &'a Placement,
+        read: &'a Placement,
+    },
+    /// Reopens the message if its Done was inferred and it is still done
+    /// (`review_state = open`, `done_inferred = 0`, event `reopened`,
+    /// requeued under `generation` when its own generation differs).
+    ReopenInferred {
+        message_id: &'a str,
+        generation: &'a str,
     },
     /// An intent's state; patch fields that are `Some` overwrite.
     Intent {

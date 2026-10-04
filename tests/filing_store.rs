@@ -41,8 +41,8 @@ const NOW: &str = "2026-10-04T12:00:00+00:00";
 fn migration_reaches_v3_and_is_idempotent() {
     let d = tempfile::tempdir().unwrap();
     let p = d.path().join("db");
-    assert_eq!(Store::open(&p).unwrap().schema_version().unwrap(), 3);
-    assert_eq!(Store::open(&p).unwrap().schema_version().unwrap(), 3);
+    assert_eq!(Store::open(&p).unwrap().schema_version().unwrap(), 4);
+    assert_eq!(Store::open(&p).unwrap().schema_version().unwrap(), 4);
 }
 
 #[test]
@@ -362,7 +362,7 @@ fn newer_schema_is_rejected() {
     drop(Store::open(&p).unwrap());
     rusqlite::Connection::open(&p)
         .unwrap()
-        .pragma_update(None, "user_version", 4)
+        .pragma_update(None, "user_version", 5)
         .unwrap();
     assert!(Store::open(&p).is_err());
 }

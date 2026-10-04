@@ -2,7 +2,7 @@
 //! left every watched folder is marked done once nothing could still hide
 //! it. An explicit review state is never touched.
 use super::observe::FolderMap;
-use super::{FilingSummary, LocationState, PassContext, Placement};
+use super::{FilingSummary, FilingWrite, LocationState, PassContext, Placement};
 use crate::store::Store;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -72,10 +72,24 @@ pub fn infer_done(
     Ok(())
 }
 
+/// Each pass: a known placement whose Done was inferred but which is still
+/// done (its reopen was interrupted) is reopened, event `reopened`.
+pub fn reopen_reappeared(store: &mut Store, ctx: &PassContext) -> Result<()> {
+    for id in store.known_but_inferred_done(ctx.account)? {
+        let reopen = FilingWrite::ReopenInferred {
+            message_id: &id,
+            generation: ctx.generation,
+        };
+        store.commit_filing(ctx.account, &[reopen], &ctx.now)?;
+    }
+    Ok(())
+}
+
 /// Every watched folder's checkpoint complete with no rescan in progress (a
 /// reset rescan looks for every absent message, so a complete one in the
 /// current epoch would have found it), no arrival that could hide an
-/// unidentified occurrence, and no folder paused.
+/// unidentified occurrence (pending or unresolved; quarantined ones have
+/// established identity), and no folder paused.
 fn settled(store: &Store, ctx: &PassContext, map: &FolderMap) -> Result<bool> {
     let folders = store.folder_records(ctx.account)?;
     if folders.iter().any(|r| r.pause_reason.is_some()) {

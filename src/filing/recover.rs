@@ -4,8 +4,10 @@
 //! established (COPYUID or fingerprint) in the folder's current epoch.
 use super::apply::{
     close, commit, commit_with_placement, dispatch_moves, dispatch_reverts, event, flag_applied,
-    flag_raced, has_flagged, matches_meta, paused, race_problem, revert_failed, write_failed,
+    flag_raced, has_flagged, matches_meta, paused, race_problem, race_until_uid, revert_failed,
+    write_failed,
 };
+use super::arrivals::in_race_window;
 use super::observe::FolderMap;
 use super::planner::{CategoryFolder, Locator};
 use super::{FilingSummary, FilingWrite, Intent, IntentPatch, LocationState, PassContext};
@@ -26,6 +28,7 @@ pub fn recover(
     if ctx.mode == FilingMode::Off {
         return Ok(());
     }
+    record_race_bounds(store, ctx)?;
     for listed in store.intents(ctx.account, true)? {
         let Some(intent) = store.intent(listed.id)? else {
             continue;
@@ -46,6 +49,30 @@ pub fn recover(
     }
     if writes_allowed(ctx, map) {
         dispatch_reverts(store, ctx, summary)?;
+    }
+    Ok(())
+}
+
+/// A raced move whose target `UIDNEXT` could not be observed right after the
+/// race gets it now, before any arrival in its target is resolved.
+fn record_race_bounds(store: &mut Store, ctx: &PassContext) -> Result<()> {
+    for intent in store.intents(ctx.account, false)? {
+        let raced = intent.kind == "move"
+            && intent.race_until_uid.is_none()
+            && intent
+                .error
+                .as_deref()
+                .is_some_and(|e| e.starts_with("epoch_race"));
+        let Some(target) = intent.target.as_deref().filter(|_| raced) else {
+            continue;
+        };
+        if let Some(until) = race_until_uid(ctx, target, &intent) {
+            let patch = IntentPatch {
+                race_until_uid: Some(until),
+                ..Default::default()
+            };
+            store.update_intent(intent.id, &intent.state, patch, &ctx.now)?;
+        }
     }
     Ok(())
 }
@@ -409,6 +436,10 @@ fn suspect_race(
 ) -> Result<()> {
     let reason = "epoch_race_suspected";
     let detail = json!({"intent_id": intent.id, "kind": "move", "error": reason});
+    let race_until = intent
+        .target
+        .as_deref()
+        .and_then(|t| race_until_uid(ctx, t, intent));
     commit(
         store,
         ctx,
@@ -417,7 +448,15 @@ fn suspect_race(
                 folder: &intent.folder,
                 reason,
             },
-            close(intent.id, "awaiting_rescan", Some(reason)),
+            FilingWrite::Intent {
+                id: intent.id,
+                state: "awaiting_rescan",
+                patch: IntentPatch {
+                    error: Some(reason.into()),
+                    race_until_uid: race_until,
+                    ..Default::default()
+                },
+            },
             event(
                 Some(&intent.message_id),
                 Some(&intent.folder),
@@ -515,6 +554,11 @@ fn retry_or_supersede(
     if map.caps.is_none() {
         return Ok(());
     }
+    // A retry rewrites the target bounds that define a race's quarantine
+    // window, so it waits until every arrival in that window is settled.
+    if race_window_unsettled(store, ctx, intent)? {
+        return Ok(());
+    }
     if !still_a_target(map, &target) {
         return store.update_intent(intent.id, "superseded", IntentPatch::default(), &ctx.now);
     }
@@ -559,6 +603,24 @@ fn retry_or_supersede(
         &[(intent.id, from.uid)],
         summary,
     )
+}
+
+/// A `pending` or `unresolved` arrival inside the intent's quarantine window.
+fn race_window_unsettled(store: &Store, ctx: &PassContext, intent: &Intent) -> Result<bool> {
+    let (Some(target), Some(epoch), Some(from)) = (
+        intent.target.as_deref(),
+        intent.target_epoch,
+        intent.target_uid_next,
+    ) else {
+        return Ok(false);
+    };
+    Ok(store
+        .arrivals_at(ctx.account, target, epoch, from)?
+        .iter()
+        .any(|a| {
+            matches!(a.state.as_str(), "pending" | "unresolved")
+                && in_race_window(intent, &a.folder, a.epoch, a.uid)
+        }))
 }
 
 /// A retry only files into a folder that is still a source or the folder of
