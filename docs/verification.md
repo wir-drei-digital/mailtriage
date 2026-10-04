@@ -36,8 +36,13 @@ release was published. No Valea application code was changed.
 
 ## Live gates
 
-1. Supply the OpenRouter key, change a test config from `fake` to `openrouter`,
-   and classify synthetic mail through the documented Decisions endpoint.
+1. In a test config, set `provider` to `kind` `openrouter`, model
+   `typesafe/jev-1.13`, endpoint `https://openrouter.ai/api/alpha/decisions`
+   and `api_key_env` `OPENROUTER_API_KEY`. Export the key in that variable
+   ([README step 4](../README.md#4-provide-the-openrouter-api-key)); mailtriage
+   does not read a `.env` file. Check that `doctor --json` reports
+   `provider.key_present: true`, then `classify` a synthetic message such as
+   `examples/reply-request.eml` and check that `outcome` is `classified`.
 2. Evaluate urgency/action recall and category quality on approved labeled mail
    before disabling review mode. Current thresholds are configurable starting
    values, not measured accuracy claims.
@@ -62,15 +67,17 @@ separator `.` (`tests/e2e/dovecot-prefix.conf`). The test enables `live` filing
 and checks: filing into category folders with read state preserved and
 `\Flagged` added, a client move as a category correction, a client move back
 to `INBOX` as a pin, a client delete as done, and an `INBOX` UIDVALIDITY reset
-that keeps the pinned message known and open. To run it locally (Docker,
-Python 3 and Himalaya v2.1.0 required):
+that keeps the pinned message known and open. To run it locally, you need
+Docker with a running daemon, Python 3, Cargo and a Himalaya v2.1.0 binary.
+Pass the binary in `MT_E2E_HIMALAYA`, the layout (`flat` or `prefix`) and a
+free local port:
 
 ```sh
 MT_E2E_HIMALAYA="$(command -v himalaya)" bash tests/e2e/run.sh flat 31143
 MT_E2E_HIMALAYA="$(command -v himalaya)" bash tests/e2e/run.sh prefix 31144
 ```
 
-`cargo test` ignores this test; run with `--ignored` but without the
+`cargo test` ignores this test. When it runs with `--ignored` but without the
 `MT_E2E_*` variables, it prints a notice and skips.
 
 ## Live provider check (required before `live` on a real mailbox)
@@ -78,7 +85,8 @@ MT_E2E_HIMALAYA="$(command -v himalaya)" bash tests/e2e/run.sh prefix 31144
 The Dovecot end-to-end job covers the protocol contract, not provider
 behaviour. Before setting `filing.mode` to `live` on a real mailbox, run this
 check for that provider with a throwaway test account configured in Himalaya
-(see the [filing design](superpowers/specs/2026-10-04-imap-category-filing-design.md#live-provider-check)).
+([README step 2](../README.md#2-set-up-himalaya); procedure in the
+[filing design](superpowers/specs/2026-10-04-imap-category-filing-design.md#live-provider-check)).
 No credentials, message bodies or real addresses go into this file: record
 redacted output, or where the evidence is kept. `Result` is `pass`, `fail` or
 `differs` (with a note). Until a provider has a recorded go, use `dry_run`,
