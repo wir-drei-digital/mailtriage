@@ -3,9 +3,10 @@ use crate::{
     domain::*,
     engine::{self, himalaya::source_binding, MailEngine},
     filing::{
-        self,
+        self, arrivals,
         observe::{self, FolderMap, WatchRole, WatchSpec},
-        FilingSummary, Intent, PassContext, StageOptions,
+        transitions::{self, Transition},
+        FilingSummary, Intent, LocationState, PassContext, Placement, StageOptions,
     },
     normalize, policy, provider,
     store::{now, Record, Store},
@@ -283,6 +284,13 @@ impl Service {
                             "duplicate message with conflicting local state requires review",
                             self.config.policy.max_attempts,
                         )?;
+                        arrivals::merge_conflict(
+                            &mut self.store,
+                            name,
+                            id,
+                            &msg.raw_sha256,
+                            &now(),
+                        )?;
                         return Ok("failed".into());
                     }
                 },
@@ -394,8 +402,9 @@ impl Service {
         };
         // 2. Folder resolution.
         let map = resolve_or_sources(&mut self.store, filing, &account, &mut summary)?;
-        // 3–4. Discovery and reconciliation of every watched folder.
-        let mut removed = Vec::new(); // Task 8 re-evaluates: reconciliation removals, write drops.
+        // 3–4. Discovery and reconciliation of every watched folder; the
+        // messages whose occurrence reconciliation removed are re-evaluated.
+        let mut removed = Vec::new();
         let (discovered, scan_errors) = match engine.as_deref() {
             Some(h) => {
                 let scan = Scan {
@@ -410,11 +419,11 @@ impl Service {
             }
             None => (0, 0),
         };
-        // 4. Intent recovery, before any arrival inference.
+        // 5. Intent recovery, before any arrival inference.
         if let Some(ctx) = filing {
             self.recover_intents(ctx, &map, &mut summary)?;
         }
-        // 5. Fetch and classify.
+        // 6. Fetch and classify.
         let done = self.fetch_and_classify(
             name,
             &account,
@@ -423,14 +432,12 @@ impl Service {
             filing.map(|_| &map),
             limit,
         )?;
-        // 6. (Task 8 inserts arrival resolution and re-evaluation here.)
-        // 7. Rescan completion, then bootstrap and hydration; 8. plan and apply.
-        // (Task 8 inserts done inference after step 8.)
+        // 7–10. Arrivals and re-evaluation, bootstrap and hydration, plan and
+        // apply, done inference.
         if let Some(ctx) = filing {
-            observe_placements(&mut self.store, ctx, &map, &mut summary)?;
-            removed.extend(self.plan_and_apply(ctx, &map, &mut summary)?);
+            self.locate_and_file(ctx, &map, &removed, &mut summary)?;
         }
-        // 9. Summary.
+        // 11. Summary.
         self.sync_response(
             name,
             discovered,
@@ -439,7 +446,30 @@ impl Service {
             filing.map(|_| &summary),
         )
     }
-    /// Step 4: intent recovery. Before it may write (retries, reverts) the
+    /// Steps 7–10 with filing on: arrival resolution, then re-evaluation of
+    /// what reconciliation removed; rescan completion (re-evaluating rescan
+    /// members not found), bootstrap and hydration; plan and apply, then
+    /// re-evaluation of what batch verification dropped; done inference last.
+    fn locate_and_file(
+        &mut self,
+        ctx: &PassContext,
+        map: &FolderMap,
+        removed: &[String],
+        summary: &mut FilingSummary,
+    ) -> Result<()> {
+        if let Err(e) = arrivals::resolve_arrivals(&mut self.store, ctx, map, summary) {
+            step_failed(e, "arrivals_failed", summary)?;
+        }
+        reevaluate_step(&mut self.store, ctx, map, removed, summary)?;
+        observe_placements(&mut self.store, ctx, map, summary)?;
+        let dropped = self.plan_and_apply(ctx, map, summary)?;
+        reevaluate_step(&mut self.store, ctx, map, &dropped, summary)?;
+        if let Err(e) = filing::done::infer_done(&mut self.store, ctx, map, summary) {
+            step_failed(e, "done_inference_failed", summary)?;
+        }
+        Ok(())
+    }
+    /// Step 5: intent recovery. Before it may write (retries, reverts) the
     /// configuration must be unchanged.
     fn recover_intents(
         &mut self,
@@ -455,7 +485,7 @@ impl Service {
         }
         Ok(())
     }
-    /// Step 8: the pure planner over the stored state (a preview in
+    /// Step 9: the pure planner over the stored state (a preview in
     /// `dry_run`); in `live`, with the configuration unchanged, its actions are
     /// claimed and applied. Returns the messages batch verification dropped.
     fn plan_and_apply(
@@ -585,7 +615,8 @@ impl Service {
         Ok(n)
     }
     /// The next bounded reconciliation window of one folder; returns the
-    /// messages whose occurrence disappeared.
+    /// messages whose occurrence disappeared. A folder still in the epoch it
+    /// was first watched in is reconciled from its watch point only.
     fn reconcile_folder(
         &mut self,
         scan: &Scan,
@@ -594,9 +625,11 @@ impl Service {
         through: u64,
     ) -> Result<Vec<String>> {
         let epoch = snapshot.uid_validity;
+        let floor = self.store.watch_floor(scan.name, folder, epoch)?;
         let cursor = self
             .store
             .reconcile_cursor(scan.name, folder, epoch)?
+            .max(floor)
             .min(through);
         let end = through.min(cursor.saturating_add(scan.limit));
         if end <= cursor {
@@ -693,9 +726,47 @@ impl Service {
             .as_ref()
             .and_then(|id| account.categories.iter().find(|cat| &cat.id == id))
             .map(|cat| cat.name.clone());
+        let placement = self.placement_item(row, &account)?;
         Ok(
-            json!({"id":row.id,"account":row.account,"from":row.envelope.get("from").cloned().unwrap_or(json!([])),"subject":row.envelope.get("subject").cloned().unwrap_or(json!("")),"sent_at":row.envelope.get("sent_at").cloned().unwrap_or(Value::Null),"received_at":Value::Null,"first_observed_at":row.observed_at,"classification":{"state":c.state,"urgency":c.urgency,"category_id":c.category_id,"category_name":category_name,"action_required":c.action_required,"taxonomy_revision":c.taxonomy_revision,"model":c.model,"classified_at":c.classified_at,"reasons":c.reasons},"overrides":row.overrides,"review_state":row.review_state,"attention":!reasons.is_empty(),"attention_reasons":reasons,"error":row.error,"source_present":source_present}),
+            json!({"id":row.id,"account":row.account,"from":row.envelope.get("from").cloned().unwrap_or(json!([])),"subject":row.envelope.get("subject").cloned().unwrap_or(json!("")),"sent_at":row.envelope.get("sent_at").cloned().unwrap_or(Value::Null),"received_at":Value::Null,"first_observed_at":row.observed_at,"classification":{"state":c.state,"urgency":c.urgency,"category_id":c.category_id,"category_name":category_name,"action_required":c.action_required,"taxonomy_revision":c.taxonomy_revision,"model":c.model,"classified_at":c.classified_at,"reasons":c.reasons},"overrides":row.overrides,"review_state":row.review_state,"attention":!reasons.is_empty(),"attention_reasons":reasons,"error":row.error,"source_present":source_present,"placement":placement}),
         )
+    }
+    /// The `placement` object of an item (spec "Commands"); null without a
+    /// placement. `folder` is the home while the location is known;
+    /// `pending_action` is `move:<native>` while an explicit request resolves
+    /// to a folder other than the home.
+    fn placement_item(&self, row: &Record, account: &AccountConfig) -> Result<Value> {
+        let Some(p) = self.store.placement(&row.account, &row.id)? else {
+            return Ok(Value::Null);
+        };
+        let has_flag = row
+            .envelope
+            .get("flags")
+            .and_then(Value::as_array)
+            .is_some_and(|f| {
+                f.iter()
+                    .filter_map(Value::as_str)
+                    .any(|f| f.eq_ignore_ascii_case("\\Flagged"))
+            });
+        let folder = p
+            .home_folder
+            .clone()
+            .filter(|_| p.location_state == LocationState::Known);
+        let pending_action = match p.desired_target.as_deref() {
+            Some(target) => transitions::desired_folder(&self.store, account, &p, target)?
+                .filter(|f| p.home_folder.as_ref() != Some(f))
+                .map(|f| format!("move:{f}")),
+            None => None,
+        };
+        Ok(json!({
+            "folder": folder,
+            "location_state": p.location_state.as_str(),
+            "filed_by": p.filed_by,
+            "pinned": p.pinned,
+            "flagged": p.flagged_at.is_some() || has_flag,
+            "blocked_reason": p.blocked_reason,
+            "pending_action": pending_action,
+        }))
     }
     fn coverage(&self, name: &str) -> Result<Value> {
         let mut coverage = self.store.coverage(name)?;
@@ -817,14 +888,7 @@ impl Service {
         patch: Value,
         clear: Option<&str>,
     ) -> Result<Value> {
-        let config_lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(self.path.with_extension("lock"))?;
-        FileExt::try_lock_shared(&config_lock)
-            .map_err(|_| err(5, "configuration is being edited"))?;
+        let _config_lock = self.shared_config_lock()?;
         self.require_unchanged()?;
         let (account, _) = self.ensure(name)?;
         let row = self.required(name, id)?;
@@ -835,7 +899,7 @@ impl Service {
             return Err(err(2, "supply a correction or field to clear"));
         }
         let expected = row.overrides.clone();
-        let mut overrides = row.overrides;
+        let mut overrides = row.overrides.clone();
         for (key, value) in map {
             match key.as_str() {
                 "urgency" => {
@@ -866,18 +930,82 @@ impl Service {
             }
             overrides.as_object_mut().unwrap().remove(key);
         }
-        if !self
-            .store
-            .update_overrides(name, &row.id, &expected, &overrides)?
-        {
+        let touched = map.contains_key("category_id") || clear == Some("category_id");
+        let placement = self.category_transition(name, &account, &row, &overrides, touched)?;
+        if !self.store.correct_with_placement(
+            name,
+            &row.id,
+            &expected,
+            &overrides,
+            placement.as_ref(),
+        )? {
             return Err(err(5, "message corrections changed concurrently; retry"));
         }
+        self.read(name, &row.id)
+    }
+    /// The shared configuration lock commands that may race a pass hold.
+    fn shared_config_lock(&self) -> Result<File> {
+        let config_lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(self.path.with_extension("lock"))?;
+        FileExt::try_lock_shared(&config_lock)
+            .map_err(|_| err(5, "configuration is being edited"))?;
+        Ok(config_lock)
+    }
+    /// With filing on, a correction that sets or clears `category_id` is a
+    /// placement transition (spec "Placement transitions"), persisted with
+    /// the overrides in one transaction. `None` keeps today's path.
+    fn category_transition(
+        &self,
+        name: &str,
+        account: &AccountConfig,
+        row: &Record,
+        overrides: &Value,
+        touched: bool,
+    ) -> Result<Option<Placement>> {
+        if !touched
+            || account.filing.mode == FilingMode::Off
+            || self.store.placement(name, &row.id)?.is_none()
+        {
+            return Ok(None);
+        }
+        let effective_category = overrides
+            .get("category_id")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                row.classification
+                    .as_ref()
+                    .and_then(|c| c.get("category_id"))
+                    .and_then(Value::as_str)
+            })
+            .map(str::to_owned);
+        let t = Transition::CategoryChanged { effective_category };
+        let (_, placement) =
+            transitions::plan_transition(&self.store, name, &row.id, &t, &sources_of(account))?;
+        Ok(Some(placement))
+    }
+    /// `filing pin`: pins the message in its source folder (spec "Placement
+    /// transitions"), resolving an ambiguous location first.
+    pub fn filing_pin(&mut self, name: &str, id: &str) -> Result<Value> {
+        self.placement_command(name, id, Transition::Pin)
+    }
+    fn placement_command(&mut self, name: &str, id: &str, t: Transition) -> Result<Value> {
+        let _config_lock = self.shared_config_lock()?;
+        self.require_unchanged()?;
+        let (account, _) = self.ensure(name)?;
+        let row = self.required(name, id)?;
+        let sources = sources_of(&account);
+        transitions::apply_transition(&mut self.store, name, &row.id, t, &sources, &now())?;
         self.read(name, &row.id)
     }
     pub fn review(&mut self, name: &str, id: &str, done: bool) -> Result<Value> {
         let (_, generation) = self.ensure(name)?;
         let row = self.required(name, id)?;
         self.store.review(name, &row.id, done)?;
+        self.store.clear_done_inferred(name, &row.id)?;
         if !done && row.generation != generation {
             self.store
                 .requeue(name, std::slice::from_ref(&row.id), &generation)?;
@@ -1086,7 +1214,22 @@ fn resolve_or_sources(
     }
 }
 
-/// Step 7: rescan completion, then bootstrap and hydration.
+/// Placement re-evaluation of `ids` (spec "Placement re-evaluation").
+fn reevaluate_step(
+    store: &mut Store,
+    ctx: &PassContext,
+    map: &FolderMap,
+    ids: &[String],
+    summary: &mut FilingSummary,
+) -> Result<()> {
+    if let Err(e) = arrivals::reevaluate(store, ctx, map, ids, summary) {
+        step_failed(e, "reevaluation_failed", summary)?;
+    }
+    Ok(())
+}
+
+/// Rescan completion (with the re-evaluation of rescan members not found),
+/// then step 8, bootstrap and hydration.
 fn observe_placements(
     store: &mut Store,
     ctx: &PassContext,
@@ -1096,10 +1239,21 @@ fn observe_placements(
     if let Err(e) = observe::update_rescan_completion(store, ctx, map) {
         step_failed(e, "rescan_completion_failed", summary)?;
     }
+    if let Err(e) = arrivals::complete_rescans(store, ctx, map, summary) {
+        step_failed(e, "rescan_completion_failed", summary)?;
+    }
     if let Err(e) = observe::bootstrap_and_hydrate(store, ctx, map, summary) {
         step_failed(e, "bootstrap_failed", summary)?;
     }
     Ok(())
+}
+
+/// The configured source folders of an account.
+fn sources_of(account: &AccountConfig) -> Vec<String> {
+    account
+        .engine_config()
+        .map(|e| e.mailboxes().to_vec())
+        .unwrap_or_default()
 }
 
 /// Discovery inputs shared by every watched folder of one pass.

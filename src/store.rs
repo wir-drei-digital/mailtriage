@@ -530,6 +530,9 @@ fn capture_rescan_set(
         "INSERT OR IGNORE INTO rescan_sets SELECT account,home_folder,?3,message_id FROM placements WHERE account=?1 AND home_folder=?2",
         &intents,
         "INSERT OR IGNORE INTO rescan_sets SELECT account,folder,?3,message_id FROM arrivals WHERE account=?1 AND folder=?2 AND state='pending'",
+        // An absent message may have come back here unseen; done inference
+        // relies on the rescan finding it (spec "Done inference").
+        "INSERT OR IGNORE INTO rescan_sets SELECT account,?2,?3,message_id FROM placements WHERE account=?1 AND location_state='absent'",
     ] {
         tx.execute(sql, params![account, mailbox, new])?;
     }
@@ -538,7 +541,7 @@ fn capture_rescan_set(
         params![account, mailbox, now()],
     )?;
     tx.execute(
-        "UPDATE folders SET rescan_epoch=?3,rescan_below_uid=?4,rescan_complete=0,epoch=?3 WHERE account=?1 AND native=?2",
+        "UPDATE folders SET rescan_epoch=?3,rescan_below_uid=?4,rescan_complete=0,epoch=?3,watch_from_uid=NULL WHERE account=?1 AND native=?2",
         params![account, mailbox, new, snapshot.uid_next],
     )?;
     Ok(())

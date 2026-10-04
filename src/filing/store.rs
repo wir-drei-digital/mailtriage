@@ -298,53 +298,321 @@ impl Store {
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         for w in writes {
-            match w {
-                FilingWrite::Placement {
-                    placement,
-                    expected_rev,
-                } => {
-                    if !write_placement(&tx, placement, Some(*expected_rev))? {
-                        return Ok(false);
-                    }
-                }
-                FilingWrite::Intent { id, state, patch } => {
-                    write_intent(&tx, *id, state, patch, now)?
-                }
-                FilingWrite::Pause { folder, reason } => {
-                    let n = tx.execute(
-                        "UPDATE folders SET pause_reason=COALESCE(pause_reason,?3) WHERE account=?1 AND native=?2",
-                        params![account, folder, reason],
-                    )?;
-                    if n == 0 {
-                        bail!("no folder record to pause");
-                    }
-                }
-                FilingWrite::NewRevert(r) => {
-                    insert_revert_row(&tx, r)?;
-                }
-                FilingWrite::Revert {
-                    id,
-                    state,
-                    target_uid,
-                    error,
-                } => write_revert(&tx, *id, state, *target_uid, *error, now)?,
-                FilingWrite::Arrival { id, state, kind } => {
-                    write_arrival(&tx, *id, state, *kind, now)?
-                }
-                FilingWrite::RemoveOccurrence { folder, epoch, uid } => {
-                    delete_occurrence(&tx, account, folder, *epoch, *uid)?;
-                }
-                FilingWrite::Event {
-                    message_id,
-                    folder,
-                    kind,
-                    detail,
-                } => insert_event(&tx, account, *message_id, *folder, kind, detail, now)?,
+            if !apply_write(&tx, account, w, now)? {
+                return Ok(false);
             }
         }
         bump(&tx)?;
         tx.commit()?;
         Ok(true)
+    }
+
+    /// One transaction: compare-and-swap overrides, then write the placement
+    /// (desired_rev bumped by the caller). The placement is written only while
+    /// its stored `desired_rev` is `placement.desired_rev - 1`. Returns
+    /// `false`, writing nothing, when either comparison fails.
+    pub fn correct_with_placement(
+        &mut self,
+        account: &str,
+        id: &str,
+        expected: &Value,
+        overrides: &Value,
+        placement: Option<&Placement>,
+    ) -> Result<bool> {
+        self.correct_with_writes(account, id, expected, overrides, placement, &[], &now())
+    }
+
+    /// `correct_with_placement` plus `extra` filing writes (arrival
+    /// resolution, events) in the same transaction.
+    #[allow(clippy::too_many_arguments)] // One atomic correction.
+    pub(crate) fn correct_with_writes(
+        &mut self,
+        account: &str,
+        id: &str,
+        expected: &Value,
+        overrides: &Value,
+        placement: Option<&Placement>,
+        extra: &[FilingWrite<'_>],
+        now: &str,
+    ) -> Result<bool> {
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            "UPDATE messages SET overrides=? WHERE account=? AND id=? AND overrides=?",
+            params![overrides.to_string(), account, id, expected.to_string()],
+        )?;
+        if changed != 1 {
+            return Ok(false);
+        }
+        if let Some(p) = placement {
+            if !write_placement(&tx, p, Some(p.desired_rev - 1))? {
+                return Ok(false);
+            }
+        }
+        for w in extra {
+            if !apply_write(&tx, account, w, now)? {
+                return Ok(false);
+            }
+        }
+        bump(&tx)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Done inference (spec "Done inference"): `review_state` becomes `done`
+    /// only while it is `open`, and then `done_inferred = 1`, in one
+    /// transaction. Returns whether it changed.
+    pub fn infer_done_row(&mut self, account: &str, id: &str) -> Result<bool> {
+        let tx = self.db.transaction()?;
+        let changed = tx.execute(
+            "UPDATE messages SET review_state='done' WHERE account=? AND id=? AND review_state='open'",
+            params![account, id],
+        )? == 1;
+        if changed {
+            tx.execute(
+                "UPDATE placements SET done_inferred=1 WHERE account=? AND message_id=?",
+                params![account, id],
+            )?;
+            bump(&tx)?;
+        }
+        tx.commit()?;
+        Ok(changed)
+    }
+
+    /// Reopens a message whose Done was inferred (`review_state = open`,
+    /// `done_inferred = 0`). Returns whether it changed.
+    pub fn reopen_inferred(&mut self, account: &str, id: &str) -> Result<bool> {
+        let tx = self.db.transaction()?;
+        let changed = tx.execute(
+            "UPDATE messages SET review_state='open' WHERE account=?1 AND id=?2 AND review_state='done'
+ AND EXISTS(SELECT 1 FROM placements WHERE account=?1 AND message_id=?2 AND done_inferred=1)",
+            params![account, id],
+        )? == 1;
+        if changed {
+            tx.execute(
+                "UPDATE placements SET done_inferred=0 WHERE account=? AND message_id=?",
+                params![account, id],
+            )?;
+            bump(&tx)?;
+        }
+        tx.commit()?;
+        Ok(changed)
+    }
+
+    /// `done` / `reopen` commands: an explicit review state is never inferred.
+    pub fn clear_done_inferred(&mut self, account: &str, id: &str) -> Result<()> {
+        self.db.execute(
+            "UPDATE placements SET done_inferred=0 WHERE account=? AND message_id=? AND done_inferred<>0",
+            params![account, id],
+        )?;
+        Ok(())
+    }
+
+    /// The message holding a full raw-content fingerprint, if any.
+    pub fn canonical_for_fingerprint(
+        &self,
+        account: &str,
+        fingerprint: &str,
+    ) -> Result<Option<String>> {
+        Ok(self
+            .db
+            .query_row(
+                "SELECT id FROM messages WHERE account=? AND fingerprint=?",
+                params![account, fingerprint],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// The fetch job state of a message (`queued`, `retry`, `leased`, `complete`, `terminal`).
+    pub fn job_state(&self, id: &str) -> Result<Option<String>> {
+        Ok(self
+            .db
+            .query_row("SELECT state FROM jobs WHERE message_id=?", [id], |r| {
+                r.get(0)
+            })
+            .optional()?)
+    }
+
+    pub fn arrival(&self, account: &str, id: i64) -> Result<Option<Arrival>> {
+        Ok(self
+            .db
+            .query_row(
+                &format!("SELECT {ARRIVAL_COLUMNS} FROM arrivals WHERE account=? AND id=?"),
+                params![account, id],
+                row_arrival,
+            )
+            .optional()?)
+    }
+
+    /// The arrival recorded for one locator, if any.
+    pub fn arrival_at(
+        &self,
+        account: &str,
+        folder: &str,
+        epoch: u64,
+        uid: u64,
+    ) -> Result<Option<Arrival>> {
+        Ok(self
+            .db
+            .query_row(
+                &format!("SELECT {ARRIVAL_COLUMNS} FROM arrivals WHERE account=? AND folder=? AND epoch=? AND uid=?"),
+                params![account, folder, epoch, uid],
+                row_arrival,
+            )
+            .optional()?)
+    }
+
+    /// The UID a folder was first watched from, while it is still in the
+    /// epoch it was first watched in; 0 otherwise.
+    pub fn watch_floor(&self, account: &str, folder: &str, epoch: u64) -> Result<u64> {
+        let floor: Option<Option<u64>> = self
+            .db
+            .query_row(
+                "SELECT watch_from_uid FROM folders WHERE account=? AND native=? AND epoch=?",
+                params![account, folder, epoch],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(floor.flatten().unwrap_or(0))
+    }
+
+    /// Rescan-set message ids of a folder in epochs up to `epoch`.
+    pub fn rescan_set_ids(&self, account: &str, folder: &str, epoch: u64) -> Result<Vec<String>> {
+        let mut st = self.db.prepare(
+            "SELECT DISTINCT message_id FROM rescan_sets WHERE account=? AND folder=? AND epoch<=? ORDER BY message_id",
+        )?;
+        let rows = st
+            .query_map(params![account, folder, epoch], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Prunes a folder's rescan sets of epochs up to `epoch`.
+    pub fn delete_rescan_sets(&mut self, account: &str, folder: &str, epoch: u64) -> Result<()> {
+        self.db.execute(
+            "DELETE FROM rescan_sets WHERE account=? AND folder=? AND epoch<=?",
+            params![account, folder, epoch],
+        )?;
+        Ok(())
+    }
+
+    /// Whether an arrival could still hide an unidentified occurrence (spec
+    /// "Done inference"): one `pending` or `unresolved`, or one resolved
+    /// `quarantined` whose occurrence is still recorded.
+    pub fn arrivals_unsettled(&self, account: &str) -> Result<bool> {
+        Ok(self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM arrivals a WHERE a.account=?1 AND (a.state IN ('pending','unresolved')
+ OR (a.state='resolved' AND a.kind='quarantined' AND EXISTS(SELECT 1 FROM occurrences o
+  WHERE o.account=a.account AND o.mailbox=a.folder AND o.epoch=a.epoch AND o.uid=a.uid))))",
+            [account],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// `filing retry --folder`: clears the safety pause (event `released`) and
+    /// schedules a rescan of the folder in its current epoch, from its watch
+    /// floor, in one transaction. Returns whether a pause was cleared.
+    pub fn release_pause(&mut self, account: &str, native: &str, now: &str) -> Result<bool> {
+        let tx = self.db.transaction()?;
+        let reason: Option<String> = tx
+            .query_row(
+                "SELECT pause_reason FROM folders WHERE account=? AND native=?",
+                params![account, native],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        let Some(reason) = reason else {
+            return Ok(false);
+        };
+        tx.execute(
+            "UPDATE folders SET pause_reason=NULL WHERE account=? AND native=?",
+            params![account, native],
+        )?;
+        let checkpoint: Option<(u64, u64)> = tx
+            .query_row(
+                "SELECT epoch,last_uid FROM checkpoints WHERE account=? AND mailbox=?",
+                params![account, native],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if let Some((epoch, last_uid)) = checkpoint {
+            tx.execute(
+                "UPDATE folders SET rescan_epoch=?3,rescan_below_uid=?4,rescan_complete=0 WHERE account=?1 AND native=?2",
+                params![account, native, epoch, last_uid + 1],
+            )?;
+            tx.execute(
+                "UPDATE checkpoints SET last_uid=COALESCE((SELECT watch_from_uid FROM folders f WHERE f.account=?1 AND f.native=?2 AND f.epoch=?3),0),complete=0
+ WHERE account=?1 AND mailbox=?2",
+                params![account, native, epoch],
+            )?;
+        }
+        insert_event(
+            &tx,
+            account,
+            None,
+            Some(native),
+            "released",
+            &json!({"reason": reason}),
+            now,
+        )?;
+        bump(&tx)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// `filing retry --arrival`: an `unresolved` (or `dismissed`) arrival goes
+    /// back to `pending`, its message's fetch is requeued, and a merge-conflict
+    /// block recorded for this arrival is lifted, in one transaction. Returns
+    /// whether the arrival was eligible.
+    pub fn reopen_arrival(
+        &mut self,
+        account: &str,
+        arrival_id: i64,
+        generation: &str,
+        now: &str,
+    ) -> Result<bool> {
+        let tx = self.db.transaction()?;
+        let message: Option<String> = tx
+            .query_row(
+                "SELECT message_id FROM arrivals WHERE account=? AND id=? AND state IN ('unresolved','dismissed')",
+                params![account, arrival_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(message) = message else {
+            return Ok(false);
+        };
+        write_arrival(&tx, arrival_id, "pending", None, now)?;
+        tx.execute(
+            "UPDATE messages SET status='pending',error=NULL,generation=? WHERE account=? AND id=?",
+            params![generation, account, message],
+        )?;
+        tx.execute("INSERT INTO jobs(message_id,state,next_after,generation) SELECT id,'queued',?,? FROM messages WHERE account=? AND id=? ON CONFLICT(message_id) DO UPDATE SET state='queued',attempts=0,next_after=excluded.next_after,lease_until=NULL,generation=excluded.generation",params![now,generation,account,message])?;
+        tx.execute(
+            "UPDATE placements SET blocked_reason=NULL WHERE account=?1 AND blocked_reason='merge_conflict'
+ AND message_id IN (SELECT message_id FROM filing_events WHERE account=?1 AND kind='merge_conflict' AND json_extract(detail,'$.arrival_id')=?2)",
+            params![account, arrival_id],
+        )?;
+        bump(&tx)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// `filing dismiss --arrival`: an `unresolved` arrival becomes `dismissed`.
+    pub fn dismiss_arrival_row(
+        &mut self,
+        account: &str,
+        arrival_id: i64,
+        now: &str,
+    ) -> Result<bool> {
+        let n = self.db.execute(
+            "UPDATE arrivals SET state='dismissed',resolved_at=? WHERE account=? AND id=? AND state='unresolved'",
+            params![now, account, arrival_id],
+        )?;
+        Ok(n == 1)
     }
 
     pub fn folder_record(&self, account: &str, native: &str) -> Result<Option<FolderRecord>> {
@@ -464,9 +732,10 @@ impl Store {
         Ok(inserted)
     }
 
-    /// First watch of a folder starts at `start_uid`; an existing checkpoint
-    /// behaves exactly like `checkpoint`. The epoch-0/UID-0 row `scan_error`
-    /// leaves behind for a folder never scanned counts as no checkpoint.
+    /// First watch of a folder starts at `start_uid`, recorded on its folder
+    /// record (`epoch`, `watch_from_uid`); an existing checkpoint behaves
+    /// exactly like `checkpoint`. The epoch-0/UID-0 row `scan_error` leaves
+    /// behind for a folder never scanned counts as no checkpoint.
     pub fn checkpoint_start_at(
         &mut self,
         account: &str,
@@ -485,6 +754,12 @@ impl Store {
             drop(tx);
             return self.checkpoint(account, mailbox, snapshot);
         }
+        // Nothing below the watch point is ever ingested in this epoch, so
+        // reconciliation starts there (cleared by an epoch reset).
+        tx.execute(
+            "UPDATE folders SET epoch=?3,watch_from_uid=?4 WHERE account=?1 AND native=?2",
+            params![account, mailbox, snapshot.uid_validity, start_uid],
+        )?;
         bump(&tx)?;
         tx.commit()?;
         Ok(start_uid)
@@ -1024,6 +1299,47 @@ impl Store {
         tx.commit()?;
         Ok(removed)
     }
+}
+
+/// One write of `commit_filing` inside a caller's transaction. Returns
+/// `false` when a placement's `desired_rev` no longer equals its expected one.
+fn apply_write(tx: &Connection, account: &str, w: &FilingWrite<'_>, now: &str) -> Result<bool> {
+    match w {
+        FilingWrite::Placement {
+            placement,
+            expected_rev,
+        } => return write_placement(tx, placement, Some(*expected_rev)),
+        FilingWrite::Intent { id, state, patch } => write_intent(tx, *id, state, patch, now)?,
+        FilingWrite::Pause { folder, reason } => {
+            let n = tx.execute(
+                "UPDATE folders SET pause_reason=COALESCE(pause_reason,?3) WHERE account=?1 AND native=?2",
+                params![account, folder, reason],
+            )?;
+            if n == 0 {
+                bail!("no folder record to pause");
+            }
+        }
+        FilingWrite::NewRevert(r) => {
+            insert_revert_row(tx, r)?;
+        }
+        FilingWrite::Revert {
+            id,
+            state,
+            target_uid,
+            error,
+        } => write_revert(tx, *id, state, *target_uid, *error, now)?,
+        FilingWrite::Arrival { id, state, kind } => write_arrival(tx, *id, state, *kind, now)?,
+        FilingWrite::RemoveOccurrence { folder, epoch, uid } => {
+            delete_occurrence(tx, account, folder, *epoch, *uid)?;
+        }
+        FilingWrite::Event {
+            message_id,
+            folder,
+            kind,
+            detail,
+        } => insert_event(tx, account, *message_id, *folder, kind, detail, now)?,
+    }
+    Ok(true)
 }
 
 /// `save_placement` inside a caller's transaction; does not bump the revision.
