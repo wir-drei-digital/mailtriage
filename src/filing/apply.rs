@@ -450,6 +450,9 @@ fn move_batch(
         return Ok(());
     }
     let target = ctx.engine.snapshot(to)?;
+    if !target_watched(store, ctx, to, target.uid_validity)? {
+        return Ok(());
+    }
     let (batch, at) = (new_batch(), now());
     let mut claimed = Vec::new();
     for action in verified.kept {
@@ -469,6 +472,19 @@ fn move_batch(
         return Ok(());
     }
     dispatch_moves(store, ctx, folder, epoch, to, &claimed, summary)
+}
+
+/// Whether a move into `target` may be claimed: its discovery checkpoint is
+/// established in `epoch`, the epoch the target is in now, so the move's
+/// arrival (at or above the UIDNEXT just observed) lies inside the watched
+/// range and is discovered.
+pub(crate) fn target_watched(
+    store: &Store,
+    ctx: &PassContext,
+    target: &str,
+    epoch: u64,
+) -> Result<bool> {
+    Ok(store.discovery_epoch(ctx.account, target)? == Some(epoch))
 }
 
 /// One `move_messages` session for claimed intents `(intent id, UID)` verified

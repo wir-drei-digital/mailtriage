@@ -799,7 +799,11 @@ impl Store {
     /// First watch of a folder starts at `start_uid`, recorded on its folder
     /// record (`epoch`, `watch_from_uid`); an existing checkpoint behaves
     /// exactly like `checkpoint`. The epoch-0/UID-0 row `scan_error` leaves
-    /// behind for a folder never scanned counts as no checkpoint.
+    /// behind for a folder never scanned counts as no checkpoint. A move into
+    /// the folder may already be open (journaled before the first discovery
+    /// succeeded): the watch then starts no higher than the lowest open
+    /// move's `target_uid_next - 1` in this epoch, so the moved message is
+    /// discovered.
     pub fn checkpoint_start_at(
         &mut self,
         account: &str,
@@ -808,6 +812,15 @@ impl Store {
         start_uid: u64,
     ) -> Result<u64> {
         let tx = self.db.transaction()?;
+        let lowest_move: Option<u64> = tx.query_row(
+            &format!(
+                "SELECT MIN(target_uid_next) FROM filing_intents WHERE account=? AND kind='move' AND target=? AND target_epoch=? AND state IN {}",
+                open_states_sql()
+            ),
+            params![account, mailbox, snapshot.uid_validity],
+            |r| r.get(0),
+        )?;
+        let start_uid = lowest_move.map_or(start_uid, |next| start_uid.min(next.saturating_sub(1)));
         let created = tx.execute(
             "INSERT INTO checkpoints(account,mailbox,epoch,last_uid,complete) VALUES(?,?,?,?,0)
  ON CONFLICT(account,mailbox) DO UPDATE SET epoch=excluded.epoch,last_uid=excluded.last_uid,complete=0,error=NULL
@@ -968,6 +981,16 @@ impl Store {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .optional()?)
+    }
+
+    /// The epoch of a folder's discovery checkpoint once a discovery has
+    /// established one; `None` before, including while only the epoch-0
+    /// placeholder of a failed first scan exists (UIDVALIDITY is never 0).
+    pub fn discovery_epoch(&self, account: &str, folder: &str) -> Result<Option<u64>> {
+        Ok(self
+            .checkpoint_state(account, folder)?
+            .map(|c| c.0)
+            .filter(|epoch| *epoch != 0))
     }
 
     /// Arrivals in one folder epoch at `uid >= min_uid`, lowest UID first.

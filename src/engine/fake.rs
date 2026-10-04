@@ -82,6 +82,8 @@ struct State {
     config_changed: bool,
     /// Folders `alias_conflicts` reports when asked about them.
     alias_conflicts: BTreeSet<String>,
+    /// Folders whose next `snapshot` fails, one entry per failure.
+    snapshot_faults: Vec<String>,
 }
 
 impl State {
@@ -294,6 +296,7 @@ impl FakeEngine {
                 config_changed_from: None,
                 config_changed: false,
                 alias_conflicts: BTreeSet::new(),
+                snapshot_faults: Vec::new(),
             })),
         }
     }
@@ -394,6 +397,12 @@ impl FakeEngine {
         self.state().faults.push((op, fault));
     }
 
+    /// The next `snapshot(folder)` that is not refused by scope fails
+    /// without effect (a transient read error); later ones succeed again.
+    pub fn fail_next_snapshot(&self, folder: &str) {
+        self.state().snapshot_faults.push(folder.to_owned());
+    }
+
     /// Move, Flag, Create and Subscribe calls, including failed but not scope-refused ones.
     pub fn write_calls(&self) -> usize {
         self.state().calls.len()
@@ -491,6 +500,10 @@ impl MailEngine for FakeEngine {
     fn snapshot(&self, folder: &str) -> Result<MailboxSnapshot> {
         let mut s = self.state();
         s.enter(None, format!("snapshot {folder}"), &[folder])?;
+        if let Some(i) = s.snapshot_faults.iter().position(|f| f == folder) {
+            s.snapshot_faults.remove(i);
+            bail!("injected snapshot failure");
+        }
         let f = s.get(folder)?;
         Ok(MailboxSnapshot {
             uid_validity: f.epoch,

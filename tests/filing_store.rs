@@ -645,6 +645,82 @@ fn scan_error_placeholder_is_a_first_watch_not_an_epoch_reset() {
     );
 }
 
+/// Final review C1(c): a first watch starts no higher than the lowest
+/// `target_uid_next - 1` of the open moves into the folder in its epoch, so a
+/// move journaled before the folder's first discovery is discovered.
+#[test]
+fn first_watch_starts_below_open_moves_into_the_folder() {
+    use mailtriage::filing::{FolderRecord, NewIntent};
+    let (_d, mut s) = store();
+    s.ensure_account("work", "id", "g1").unwrap();
+    for name in ["News", "Fresh"] {
+        s.save_folder(&FolderRecord {
+            account: "work".into(),
+            native: name.into(),
+            configured: Some(name.into()),
+            category_id: Some(name.to_lowercase()),
+            origin: Some("created".into()),
+            state: "ok".into(),
+            role_verified: true,
+            confirmed: false,
+            subscribed: true,
+            pause_reason: None,
+            epoch: None,
+            watch_from_uid: None,
+            rescan_epoch: None,
+            rescan_below_uid: None,
+            rescan_complete: true,
+            checked_at: Some(NOW.into()),
+            error: None,
+        })
+        .unwrap();
+    }
+    let mut intent = |target: &str, target_epoch: u64, next: u64, state: &str| {
+        s.insert_intent(&NewIntent {
+            account: "work",
+            message_id: "m1",
+            kind: "move",
+            folder: "INBOX",
+            epoch: 5,
+            uid: 1,
+            target: Some(target),
+            target_epoch: Some(target_epoch),
+            target_uid_next: Some(next),
+            desired_rev: 0,
+            consumes_eligible: false,
+            batch: "b",
+            state,
+            now: NOW,
+        })
+        .unwrap();
+    };
+    intent("News", 3, 6, "sent");
+    intent("News", 3, 4, "applied"); // closed
+    intent("News", 7, 2, "sent"); // another epoch
+    intent("Fresh", 5, 3, "uncertain");
+    s.scan_error("work", "News").unwrap();
+    assert_eq!(
+        s.checkpoint_start_at("work", "News", &snap(3, 9), 8)
+            .unwrap(),
+        5,
+        "the placeholder starts below the open move"
+    );
+    assert_eq!(s.watch_floor("work", "News", 3).unwrap(), 5);
+    assert_eq!(
+        s.checkpoint_start_at("work", "Fresh", &snap(5, 9), 8)
+            .unwrap(),
+        2,
+        "a folder never scanned too"
+    );
+    assert_eq!(s.watch_floor("work", "Fresh", 5).unwrap(), 2);
+    assert_eq!(
+        s.checkpoint_start_at("work", "Fresh", &snap(5, 12), 11)
+            .unwrap(),
+        2,
+        "an established checkpoint keeps its progress"
+    );
+}
+
 #[test]
 fn hydrate_never_nulls_known_transport_metadata() {
     let (_d, mut s) = store();

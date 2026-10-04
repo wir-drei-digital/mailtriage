@@ -304,7 +304,7 @@ placements for existing messages are created by the bootstrap (below).
   `epoch_race_reverted`, `folder_created`, `folder_adopted`,
   `folder_subscribed`, `folder_missing`, `folder_special_use`,
   `folder_needs_confirmation`, `location_ambiguous`, `arrival_unresolved`,
-  `merge_conflict`, `released`.
+  `merge_conflict`, `released`, `lost`.
 
 ## Identity and placements
 
@@ -422,7 +422,11 @@ it desires its home.
 `location_state = known`, hydrated, not blocked; no open intent of the same
 kind; a known home UID in the current epoch; home folder and target folder
 without `pause_reason`; target folder in state `ok` (or would-create in a
-preview).
+preview) with a discovery checkpoint established in its current epoch (a
+failed first discovery does not establish one), so a moved message always
+lands inside the target's watched range. A move is claimed (and a retry
+re-claimed) only after `snapshot(T)` shows T still in that checkpoint's
+epoch.
 
 **Moves.** A message gets a `Move` when its desired folder differs from its
 home and:
@@ -500,7 +504,7 @@ folder is established only by an occurrence whose identity is established
 | `in_flight` | Treated as `uncertain`. |
 | `uncertain`, F or T epoch now differs from the one recorded | **Suspected epoch race** (see Epoch race). Then `awaiting_rescan`. |
 | `uncertain`, epochs unchanged | Re-verify binding, observe both ends. In T (COPYUID, or an identity-established arrival at `uid >= target_uid_next`) and not in F → `applied`. In both → `failed`, `blocked_reason = duplicate_copy`. In F only, with T scanned as for `lost` → if the intent's `desired_rev` still matches, retry (re-claimed, job backoff, up to `policy.max_attempts`, then `failed`, `blocked_reason = move_failed`); otherwise `superseded`. In neither → `sent`. |
-| `sent` | Waits for its arrival. Becomes `lost` once T has been scanned, in `target_epoch`, through the `UIDNEXT - 1` of a snapshot taken after `dispatched_at`, and every arrival in T at `uid >= target_uid_next` is `resolved` or `vanished`, ignoring arrivals whose known Message-ID differs from the moved message's (identical bytes always share it); an `unresolved` arrival in that range keeps it `sent` until retried or dismissed. A lost move sets `location_state = absent`. |
+| `sent` | Waits for its arrival. Becomes `lost` once T has been scanned, in `target_epoch`, from a watch that started below `target_uid_next` through the `UIDNEXT - 1` of a snapshot taken after `dispatched_at`, and every arrival in T at `uid >= target_uid_next` is `resolved` or `vanished`, ignoring arrivals whose known Message-ID differs from the moved message's (identical bytes always share it); an `unresolved` arrival in that range keeps it `sent` until retried or dismissed. A lost move sets `location_state = absent`, event `lost`. |
 | `sent`, T epoch changed | `awaiting_rescan`. |
 | `awaiting_rescan` | Waits until every folder whose epoch changed (F, T, or both) has a complete reset rescan. Then old-epoch UIDs and bounds are discarded and the outcome is decided by identity-established occurrences in the current epochs only: in T only → `applied`; in both → `failed`, `duplicate_copy`; in F only → retry if `desired_rev` matches, else `superseded`; in neither → `lost`. |
 
@@ -665,7 +669,11 @@ Each pass with mode not `off`:
 rescan of that folder.
 
 **First watch.** A category folder's checkpoint starts at its current
-`UIDNEXT - 1`; pre-existing content is never ingested.
+`UIDNEXT - 1`; pre-existing content is never ingested. When open move
+intents already target the folder in its current epoch (a move journaled
+before its first discovery succeeded), the checkpoint starts no higher than
+the lowest of their `target_uid_next - 1`, so the moved messages are
+discovered.
 
 **Epoch reset of any watched folder.** Before the existing code deletes its
 occurrences, the message ids of those occurrences, of placements whose home is

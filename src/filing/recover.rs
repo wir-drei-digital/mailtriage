@@ -5,7 +5,7 @@
 use super::apply::{
     close, commit, commit_with_placement, dispatch_moves, dispatch_reverts, event, flag_applied,
     flag_raced, has_flagged, matches_meta, paused, race_problem, race_until_uid, revert_failed,
-    write_failed,
+    target_watched, write_failed,
 };
 use super::arrivals::in_race_window;
 use super::observe::FolderMap;
@@ -149,8 +149,9 @@ fn observe_in_target(
 }
 
 /// "T scanned as for lost": T's checkpoint is complete in `target_epoch`,
-/// scanned after `dispatched_at`, and no arrival in T at
-/// `uid >= target_uid_next` that could be the moved message is still
+/// scanned after `dispatched_at`, its watch in that epoch started below
+/// `target_uid_next` (so the scanned range covers the move), and no arrival
+/// in T at `uid >= target_uid_next` that could be the moved message is still
 /// `pending` or `unresolved`. An arrival cannot be it when its known
 /// Message-ID differs from the moved message's (identical bytes share it), or
 /// when its occurrence is already gone from T.
@@ -167,6 +168,10 @@ fn target_scanned(store: &Store, ctx: &PassContext, intent: &Intent, target: &st
         .as_deref()
         .unwrap_or(&intent.created_at);
     if at_epoch != epoch || !complete || !later(scanned_at.as_deref(), dispatched) {
+        return Ok(false);
+    }
+    // A first watch at or above `target_uid_next` never sees the move.
+    if store.watch_floor(ctx.account, target, epoch)? >= bound {
         return Ok(false);
     }
     let ours = store
@@ -510,8 +515,9 @@ fn block(
 }
 
 /// In neither end once T settled: the message left both; it is absent. The
-/// placement and the intent change together.
+/// placement, the intent and event `lost` change together.
 fn mark_lost(store: &mut Store, ctx: &PassContext, intent: &Intent) -> Result<()> {
+    let detail = json!({"intent_id": intent.id, "from": intent.folder});
     commit_with_placement(
         store,
         ctx,
@@ -520,7 +526,15 @@ fn mark_lost(store: &mut Store, ctx: &PassContext, intent: &Intent) -> Result<()
             p.location_state = LocationState::Absent;
             p.absent_since = Some(ctx.now.clone());
         },
-        &[close(intent.id, "lost", None)],
+        &[
+            close(intent.id, "lost", None),
+            event(
+                Some(&intent.message_id),
+                intent.target.as_deref(),
+                "lost",
+                detail,
+            ),
+        ],
     )
 }
 
@@ -585,6 +599,9 @@ fn retry_or_supersede(
         return Ok(());
     }
     let snapshot = ctx.engine.snapshot(&target)?;
+    if !target_watched(store, ctx, &target, snapshot.uid_validity)? {
+        return Ok(());
+    }
     let attempts = intent.attempts + 1;
     let delay = 30_i64.saturating_mul(2_i64.pow(attempts.min(7)));
     let next = Intent {

@@ -945,3 +945,203 @@ fn unrelated_arrivals_in_a_busy_target_do_not_hold_a_lost_move() {
         vec![("move".to_string(), "lost".to_string())]
     );
 }
+
+// Final review C1: a target folder whose first discovery failed.
+
+fn review_state_of(h: &Harness, subject: &str) -> String {
+    h.service()
+        .store
+        .records("work")
+        .unwrap()
+        .into_iter()
+        .find(|r| r.envelope["subject"] == subject)
+        .unwrap()
+        .review_state
+}
+
+/// Mail filed while the target had no discovery checkpoint was never
+/// discovered there, became `lost`, then was marked done while it sat in
+/// the target. The move now waits for the target's checkpoint.
+#[test]
+fn a_failed_first_snapshot_of_the_target_never_loses_or_finishes_filed_mail() {
+    use mailtriage::filing::LocationState::{Absent, Known};
+    let h = Harness::new(DryRun);
+    h.sync();
+    h.fake
+        .deliver("INBOX", &mail("n", "Weekly newsletter", "Our newsletter"));
+    h.sync();
+    h.set_mode(Live);
+    // The pass that creates Newsletters cannot read it once.
+    h.fake.fail_next_snapshot("Newsletters");
+    for pass in 0..5 {
+        h.sync();
+        let p = placement_of(&h, "Weekly newsletter");
+        assert_ne!(p.location_state, Absent, "pass {pass}");
+        assert_eq!(
+            review_state_of(&h, "Weekly newsletter"),
+            "open",
+            "pass {pass}"
+        );
+        let kinds = event_kinds(&h);
+        assert!(
+            !kinds.iter().any(|k| k == "lost" || k == "archived_done"),
+            "pass {pass}: {kinds:?}"
+        );
+    }
+    let p = placement_of(&h, "Weekly newsletter");
+    assert_eq!(p.location_state, Known);
+    assert_eq!(p.home_folder.as_deref(), Some("Newsletters"));
+    assert_eq!(p.filed_by.as_deref(), Some("mailtriage"));
+    assert_eq!(place(&h, "n").len(), 1, "exactly one copy");
+    assert_eq!(place(&h, "n")[0].0, "Newsletters");
+    assert_eq!(
+        intent_states(&h),
+        vec![("move".to_string(), "applied".to_string())]
+    );
+    assert_eq!(move_calls(&h), 1);
+}
+
+/// A move journaled into a folder discovery has not established yet (state
+/// an older release could leave behind): the first watch starts below the
+/// move's `target_uid_next`, so the moved message is found, never `lost`.
+#[test]
+fn a_move_into_a_folder_watched_later_is_discovered_and_applied() {
+    use mailtriage::filing::{LocationState::Known, NewIntent};
+    let h = Harness::new(DryRun);
+    h.sync();
+    let uid = h
+        .fake
+        .deliver("INBOX", &mail("n", "Weekly newsletter", "Our newsletter"));
+    h.sync();
+    h.set_mode(Live);
+    h.fake.fail_next_snapshot("Newsletters");
+    h.sync(); // creates Newsletters; its discovery fails once
+    assert_eq!(place(&h, "n")[0].0, "INBOX", "no move without a checkpoint");
+    let id = placement_of(&h, "Weekly newsletter").message_id;
+    let target_epoch = h.fake.epoch("Newsletters");
+    // The move ran (client_move stands in for it) before the target was watched.
+    h.fake.client_move("INBOX", uid, "Newsletters");
+    let mut s = h.service();
+    let now = mailtriage::store::now();
+    let intent = s
+        .store
+        .insert_intent(&NewIntent {
+            account: "work",
+            message_id: &id,
+            kind: "move",
+            folder: "INBOX",
+            epoch: h.fake.epoch("INBOX"),
+            uid,
+            target: Some("Newsletters"),
+            target_epoch: Some(target_epoch),
+            target_uid_next: Some(1),
+            desired_rev: placement_of(&h, "Weekly newsletter").desired_rev,
+            consumes_eligible: false,
+            batch: "legacy",
+            state: "sent",
+            now: &now,
+        })
+        .unwrap();
+    s.store
+        .remove_occurrence("work", "INBOX", h.fake.epoch("INBOX"), uid)
+        .unwrap();
+    drop(s);
+    for pass in 0..4 {
+        h.sync();
+        let kinds = event_kinds(&h);
+        assert!(
+            !kinds.iter().any(|k| k == "lost" || k == "archived_done"),
+            "pass {pass}: {kinds:?}"
+        );
+    }
+    let s = h.service();
+    assert_eq!(s.store.intent(intent).unwrap().unwrap().state, "applied");
+    let p = placement_of(&h, "Weekly newsletter");
+    assert_eq!(p.location_state, Known);
+    assert_eq!(p.home_folder.as_deref(), Some("Newsletters"));
+    assert_eq!(place(&h, "n").len(), 1);
+}
+
+/// Final review C1(d): a lost move is recorded in the audit log.
+#[test]
+fn a_lost_move_records_a_lost_event() {
+    let h = Harness::new(Live);
+    h.sync();
+    h.fake
+        .deliver("INBOX", &mail("n", "Weekly newsletter", "Our newsletter"));
+    h.sync();
+    let (folder, uid) = place(&h, "n")[0].clone();
+    h.fake.client_delete(&folder, uid);
+    h.sync();
+    let id = placement_of(&h, "Weekly newsletter").message_id;
+    let intent = h.service().store.intents("work", false).unwrap().remove(0);
+    let events = h.service().store.events("work", Some(&id), 50).unwrap();
+    let lost: Vec<_> = events.iter().filter(|e| e["kind"] == "lost").collect();
+    assert_eq!(lost.len(), 1, "{events:?}");
+    assert_eq!(lost[0]["folder"], "Newsletters");
+    assert_eq!(lost[0]["detail"]["intent_id"], intent.id);
+}
+
+/// Final review C1(b): a watch that started above a sent move's
+/// `target_uid_next` (state a release without C1(c) could leave behind)
+/// never covers the move, so the move is never declared lost and the message
+/// is never marked done.
+#[test]
+fn a_watch_that_started_above_a_move_never_declares_it_lost() {
+    use mailtriage::engine::MailEngine;
+    use mailtriage::filing::{LocationState::Absent, NewIntent};
+    let h = Harness::new(DryRun);
+    h.sync();
+    let uid = h
+        .fake
+        .deliver("INBOX", &mail("n", "Weekly newsletter", "Our newsletter"));
+    h.sync();
+    h.set_mode(Live);
+    h.fake.fail_next_snapshot("Newsletters");
+    h.sync(); // creates Newsletters; its discovery fails once
+    let id = placement_of(&h, "Weekly newsletter").message_id;
+    let target_epoch = h.fake.epoch("Newsletters");
+    h.fake.client_move("INBOX", uid, "Newsletters");
+    let mut s = h.service();
+    // The first watch started at the tip, above the moved message.
+    let snapshot = h.fake.snapshot("Newsletters").unwrap();
+    s.store
+        .checkpoint_start_at("work", "Newsletters", &snapshot, snapshot.uid_next - 1)
+        .unwrap();
+    let now = mailtriage::store::now();
+    let intent = s
+        .store
+        .insert_intent(&NewIntent {
+            account: "work",
+            message_id: &id,
+            kind: "move",
+            folder: "INBOX",
+            epoch: h.fake.epoch("INBOX"),
+            uid,
+            target: Some("Newsletters"),
+            target_epoch: Some(target_epoch),
+            target_uid_next: Some(1),
+            desired_rev: placement_of(&h, "Weekly newsletter").desired_rev,
+            consumes_eligible: false,
+            batch: "legacy",
+            state: "sent",
+            now: &now,
+        })
+        .unwrap();
+    s.store
+        .remove_occurrence("work", "INBOX", h.fake.epoch("INBOX"), uid)
+        .unwrap();
+    drop(s);
+    for pass in 0..4 {
+        h.sync();
+        let kinds = event_kinds(&h);
+        assert!(
+            !kinds.iter().any(|k| k == "lost" || k == "archived_done"),
+            "pass {pass}: {kinds:?}"
+        );
+        assert_ne!(placement_of(&h, "Weekly newsletter").location_state, Absent);
+        assert_eq!(review_state_of(&h, "Weekly newsletter"), "open");
+    }
+    let s = h.service();
+    assert_eq!(s.store.intent(intent).unwrap().unwrap().state, "sent");
+}

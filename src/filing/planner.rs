@@ -58,6 +58,8 @@ pub struct FolderView {
     pub is_source: bool,
     pub is_category: bool,
     pub retired_listed: bool,
+    /// The epoch of the folder's discovery checkpoint; `None` until a
+    /// discovery established one (a failed first scan does not).
     pub epoch: Option<u64>,
 }
 
@@ -241,16 +243,18 @@ fn resolve_target(input: &PlanInput, m: &PlanMessage, target: &str) -> Option<St
     }
 }
 
+/// A target takes moves only once its discovery is established (`epoch`):
+/// a move into a folder without a checkpoint could land below its first
+/// watch and never be discovered. A preview also counts a folder it would
+/// create.
 fn target_usable(input: &PlanInput, folder: &str) -> bool {
     match input.folders.get(folder) {
-        Some(v) if !v.paused => {
-            v.is_source
-                || match v.usable {
-                    FolderUse::Ok => true,
-                    FolderUse::WouldCreate => input.preview,
-                    FolderUse::Unusable => false,
-                }
-        }
+        Some(v) if !v.paused => match v.usable {
+            FolderUse::WouldCreate => input.preview,
+            _ if v.epoch.is_none() => false,
+            FolderUse::Ok => true,
+            FolderUse::Unusable => v.is_source,
+        },
         _ => false,
     }
 }
@@ -775,6 +779,39 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// Final review C1(a): a target whose discovery is not established in its
+    /// current epoch (`epoch` None) takes no move, automatic or explicit; a
+    /// preview still counts a folder it would create.
+    #[test]
+    fn a_target_without_established_discovery_takes_no_move() {
+        let mut i = input(vec![msg("a", "newsletters"), msg("b", "transactions")]);
+        i.folders.get_mut("Newsletters").unwrap().epoch = None;
+        assert_eq!(moves(&plan(&i)), vec![("b".into(), "Transactions".into())]);
+        let mut i = input(vec![]);
+        i.folders.insert(
+            "Lists".into(),
+            FolderView {
+                usable: FolderUse::Ok,
+                paused: false,
+                is_source: true,
+                is_category: false,
+                retired_listed: false,
+                epoch: None,
+            },
+        );
+        let mut back = homed(msg("back", "newsletters"), "Newsletters", 2);
+        back.source_folder = "Lists".into();
+        back.desired_target = Some("@source".into());
+        i.messages.push(back);
+        assert!(moves(&plan(&i)).is_empty(), "a source target needs it too");
+        let mut i = input(vec![msg("a", "newsletters")]);
+        let news = i.folders.get_mut("Newsletters").unwrap();
+        news.usable = FolderUse::WouldCreate;
+        news.epoch = None;
+        i.preview = true;
+        assert_eq!(moves(&plan(&i)), vec![("a".into(), "Newsletters".into())]);
     }
 
     #[test]

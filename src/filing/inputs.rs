@@ -153,14 +153,14 @@ fn plan_message(p: &Placement, meta: &MessageMeta, effective: Effective) -> Plan
 /// Sources are usable; a category folder is usable only in state `ok`; a
 /// retired folder is no category and only `retired_listed` admits it as the
 /// home of an explicit move; a folder a preview would create is `WouldCreate`.
+/// `epoch` is the folder's established discovery epoch (none before its first
+/// successful discovery).
 fn folder_views(
     store: &Store,
     ctx: &PassContext,
     map: &FolderMap,
 ) -> Result<BTreeMap<String, FolderView>> {
-    let epoch_of = |folder: &str| -> Result<Option<u64>> {
-        Ok(store.checkpoint_state(ctx.account, folder)?.map(|c| c.0))
-    };
+    let epoch_of = |folder: &str| store.discovery_epoch(ctx.account, folder);
     let records: BTreeMap<String, _> = store
         .folder_records(ctx.account)?
         .into_iter()
