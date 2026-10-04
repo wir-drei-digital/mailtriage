@@ -123,6 +123,9 @@ pub trait MailEngine {
     fn move_messages(&self, folder: &str, uids: &[u64], target: &str) -> Result<WriteOutcome>;
     /// One session: SELECT folder; UID STORE uids +FLAGS.SILENT (\Flagged).
     fn add_flagged(&self, folder: &str, uids: &[u64]) -> Result<WriteOutcome>;
+    /// Folders beyond the configured sources this engine may touch this pass
+    /// (category and referenced retired folders). Default: no restriction.
+    fn set_watch_scope(&self, _folders: &[String]) {}
 }
 ```
 
@@ -233,7 +236,7 @@ and refuses with the list of categories that need an explicit `folder`. With
 filing enabled, `config::validate` requires:
 
 - each effective folder is trimmed, nonempty, at most 200 bytes, and a single
-  path segment: no `/`, `.`, `*`, `%`, `"`, `\`, `&`, or control characters;
+  path segment not starting with `-`: no `/`, `.`, `*`, `%`, `"`, `\`, `&`, or control characters;
   printable ASCII unless non-ASCII support was confirmed. `&` is the
   modified UTF-7 shift character; it stays forbidden until the provider check
   confirms how Himalaya encodes mailbox names;

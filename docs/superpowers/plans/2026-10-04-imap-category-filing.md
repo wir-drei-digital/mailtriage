@@ -2423,6 +2423,7 @@ Behaviour:
 
 2. **`resolve_folders`**, with `mode != Off`:
    - `caps = engine.capabilities()?`. `writes_allowed = mode == Live && caps.move_supported`. Missing MOVE in `Live` → problem `"move_unsupported"`.
+   - Compute every category's native name first, then call `engine.set_watch_scope(sources ∪ category natives ∪ retired folders still referenced)` before any other folder-specific engine call (the Himalaya engine refuses folders outside its configured mailboxes plus this scope).
    - `conflicts = engine.alias_conflicts(sources ∪ category folder names)?`. Any conflict → `writes_allowed = false`, problem `"alias_conflict:<folder>"`. Conflicting folders are excluded from `watch`.
    - `folders = engine.list_folders()?`; `listed` = their names.
    - Each source folder gets a record (`origin = "source"`, `category_id = None`, `state = "ok"` if listed, else `"missing"`) and is watched as `Source`.
