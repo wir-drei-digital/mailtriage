@@ -217,6 +217,9 @@ pub fn validate(config: &AppConfig) -> Result<()> {
             if let Some((id, problem)) = folder_problems(account).first() {
                 bail!("account {name}: category {id:?} {problem}");
             }
+            if let Some(mailbox) = unsafe_source_mailboxes(account).first() {
+                bail!("account {name}: source mailbox {mailbox:?} must be {SOURCE_RULE} while filing is on");
+            }
         }
     }
     Ok(())
@@ -230,6 +233,28 @@ pub fn invalid_folder_ids(account: &AccountConfig) -> Vec<String> {
     folder_problems(account)
         .into_iter()
         .map(|(id, _)| id)
+        .collect()
+}
+
+/// The rule `unsafe_source_mailboxes` enforces, for error messages.
+pub const SOURCE_RULE: &str = "printable ASCII without \\, \" or & and no leading -";
+
+/// Configured source mailboxes that filing cannot name safely in raw IMAP
+/// text: not printable ASCII, containing `\`, `"` or `&`, or starting with
+/// `-`. Applies whatever the filing mode; `validate` enforces it only with
+/// filing on.
+pub fn unsafe_source_mailboxes(account: &AccountConfig) -> Vec<String> {
+    let Some(EngineConfig::Himalaya(h)) = account.engine_config() else {
+        return vec![];
+    };
+    h.mailboxes
+        .iter()
+        .filter(|m| {
+            !m.chars().all(|c| (' '..='~').contains(&c))
+                || m.contains(['\\', '"', '&'])
+                || m.starts_with('-')
+        })
+        .cloned()
         .collect()
 }
 

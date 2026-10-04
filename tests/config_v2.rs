@@ -118,6 +118,38 @@ fn folder_rules_apply_when_filing_is_on() {
     assert!(config::validate(&c).is_err());
 }
 
+/// Final review M1: with filing on, the configured source mailboxes are
+/// written to as raw IMAP text too, so they follow the same safe-name rules.
+#[test]
+fn source_mailboxes_are_checked_when_filing_is_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut c = config::default_config();
+    let with_source = |c: &mut mailtriage::domain::AppConfig, source: &str, mode| {
+        let a = c.accounts.get_mut("work").unwrap();
+        a.engine = Some(EngineConfig::Himalaya(HimalayaConfig {
+            binary: "himalaya".into(),
+            config: dir.path().join("h.toml"),
+            account: "work".into(),
+            mailboxes: vec!["INBOX".into(), source.into()],
+            expected_version: "2.1.0".into(),
+            timeout_seconds: 30,
+            max_output_bytes: 1_000_000,
+        }));
+        a.filing.mode = mode;
+    };
+    for bad in ["a\\b", "-x", "Grüße", "a&b", "q\"", "tab\there"] {
+        with_source(&mut c, bad, FilingMode::Off);
+        config::validate(&c).unwrap_or_else(|e| panic!("filing off refused {bad:?}: {e}"));
+        with_source(&mut c, bad, FilingMode::DryRun);
+        let err = config::validate(&c).unwrap_err().to_string();
+        assert!(err.contains("source mailbox"), "{bad:?}: {err}");
+    }
+    for good in ["INBOX.Lists", "Lists/Work", "Bills and Receipts"] {
+        with_source(&mut c, good, FilingMode::Live);
+        config::validate(&c).unwrap_or_else(|e| panic!("refused {good:?}: {e}"));
+    }
+}
+
 #[test]
 fn unsupported_schema_versions_are_rejected() {
     let dir = tempfile::tempdir().unwrap();

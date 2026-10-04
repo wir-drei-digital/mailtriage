@@ -164,8 +164,9 @@ UID mode (never `--seq`), never `--seen`.
   from MOVE, CAPABILITY and NAMESPACE data, and `* LIST (attrs) delim name`
   lines. Literal-form names (`{n}`) in LIST are an error for that folder.
   Everything else is ignored.
-- **Quoting.** The engine quotes mailbox names as IMAP quoted strings, escaping
-  `"` and `\`. Non-ASCII names are supported only if the provider check
+- **Quoting.** The engine quotes mailbox names as IMAP quoted strings,
+  escaping `"`; it refuses `\`, because `imap raw` turns `\n`/`\r` into line
+  breaks even after an escaping backslash. Non-ASCII names are supported only if the provider check
   confirms how Himalaya's LIST JSON represents them; otherwise validation
   restricts folder names to printable ASCII.
 - **UID sets** are comma-joined and capped at 100 UIDs per call.
@@ -242,7 +243,12 @@ filing enabled, `config::validate` requires:
   confirms how Himalaya encodes mailbox names;
 - every category whose folder is not `INBOX` has a unique folder, compared
   case-insensitively; any case variant of `inbox` other than the literal
-  `INBOX` is rejected.
+  `INBOX` is rejected;
+- every configured source mailbox (`engine.mailboxes`) is printable ASCII
+  without `\`, `"` or `&` and does not start with `-`: writes name it in raw
+  IMAP text, where Himalaya's `imap raw` turns `\n`/`\r` into line breaks
+  even after a backslash. The engine's quoting refuses `\` for the same
+  reason.
 
 Collisions with source folders are checked online on resolved native names.
 

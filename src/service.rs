@@ -1668,24 +1668,41 @@ fn filing_mode(account: &AccountConfig) -> FilingMode {
 }
 
 /// `config::validate` for an edited configuration. With filing on, folder
-/// problems name the categories that need a valid folder.
+/// problems name the categories that need a valid folder, then the source
+/// mailboxes filing cannot write to safely.
 fn validate_edit(updated: &AppConfig, name: &str) -> Result<()> {
     config::validate(updated).map_err(|_| {
         let account = &updated.accounts[name];
-        let ids = if account.filing.mode == FilingMode::Off {
-            vec![]
-        } else {
+        let filing_on = account.filing.mode != FilingMode::Off;
+        let ids = if filing_on {
             config::invalid_folder_ids(account)
+        } else {
+            vec![]
         };
-        if ids.is_empty() {
+        let sources = if filing_on {
+            config::unsafe_source_mailboxes(account)
+        } else {
+            vec![]
+        };
+        if !ids.is_empty() {
             err(
                 2,
-                "invalid categories; require unique IDs, descriptions and exactly one catch-all",
+                format!("categories need a valid folder: {}", ids.join(", ")),
+            )
+        } else if !sources.is_empty() {
+            let names: Vec<String> = sources.iter().map(|m| format!("{m:?}")).collect();
+            err(
+                2,
+                format!(
+                    "source mailboxes are not safe to file from: {}; use {}",
+                    names.join(", "),
+                    config::SOURCE_RULE
+                ),
             )
         } else {
             err(
                 2,
-                format!("categories need a valid folder: {}", ids.join(", ")),
+                "invalid categories; require unique IDs, descriptions and exactly one catch-all",
             )
         }
     })

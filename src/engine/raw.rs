@@ -192,18 +192,20 @@ fn list_line(s: &str) -> Option<ListLine> {
     })
 }
 
+/// A mailbox name as an IMAP quoted string for raw IMAP text. A backslash is
+/// refused, not escaped: Himalaya's `imap raw` turns `\n` and `\r` into line
+/// breaks even after an escaping backslash.
 pub fn quote_mailbox(name: &str) -> Result<String> {
     if name.is_empty()
         || !name.chars().all(|c| (' '..='~').contains(&c))
-        || name.contains('&')
+        || name.contains(['&', '\\'])
         || name.starts_with('-')
     {
-        bail!("mailbox names must be nonempty printable ASCII without '&' or a leading '-'");
+        bail!(
+            "mailbox names must be nonempty printable ASCII without '&' or '\\' or a leading '-'"
+        );
     }
-    Ok(format!(
-        "\"{}\"",
-        name.replace('\\', "\\\\").replace('"', "\\\"")
-    ))
+    Ok(format!("\"{}\"", name.replace('"', "\\\"")))
 }
 
 pub fn uid_set(uids: &[u64]) -> String {
@@ -325,6 +327,17 @@ mod tests {
         assert_eq!(parse_uid_set("3:1").unwrap(), vec![1, 2, 3]);
         assert!(parse_uid_set("1:200000").is_err());
         assert!(parse_uid_set("x").is_err());
+    }
+
+    /// Final review M1: Himalaya's `imap raw` turns `\n` and `\r` into line
+    /// breaks even after an escaping backslash, so no backslash may reach
+    /// raw IMAP text; a `"` is still escaped.
+    #[test]
+    fn backslashes_are_refused_in_mailbox_names() {
+        for name in ["a\\nb", "a\\rb", "x\\", "\\"] {
+            assert!(quote_mailbox(name).is_err(), "accepted {name:?}");
+        }
+        assert_eq!(quote_mailbox("a\"b").unwrap(), "\"a\\\"b\"");
     }
 
     #[test]

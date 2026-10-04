@@ -787,3 +787,30 @@ fn cli_categories_validate_with_an_account_applies_the_folder_rules() {
         "validate writes nothing"
     );
 }
+
+/// Final review M1: `filing enable` names a configured source mailbox that
+/// filing cannot write to safely.
+#[test]
+fn enable_names_unsafe_source_mailboxes() {
+    use mailtriage::domain::EngineConfig;
+    let h = Harness::new(FilingMode::Off);
+    h.edit(|c| {
+        let Some(EngineConfig::Himalaya(e)) = &mut c.accounts.get_mut("work").unwrap().engine
+        else {
+            panic!("harness has a Himalaya engine config");
+        };
+        e.mailboxes.push("Lists\\Work".into());
+    });
+    let e = h
+        .service()
+        .filing_enable("work", FilingMode::DryRun)
+        .unwrap_err();
+    assert_eq!(
+        message(e),
+        "source mailboxes are not safe to file from: \"Lists\\\\Work\"; use printable ASCII without \\, \" or & and no leading -"
+    );
+    assert_eq!(
+        h.service().config.accounts["work"].filing.mode,
+        FilingMode::Off
+    );
+}
