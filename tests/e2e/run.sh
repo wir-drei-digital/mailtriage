@@ -62,7 +62,8 @@ cleanup() {
     docker logs --tail 100 "$container" >&2 2>&1 || true
   fi
   docker stop "$container" >/dev/null 2>&1 || true
-  docker rm -f "$container" >/dev/null 2>&1 || true
+  # -v: also remove the image's anonymous volumes, which would otherwise leak.
+  docker rm -f -v "$container" >/dev/null 2>&1 || true
   exit "$status"
 }
 trap cleanup EXIT
@@ -70,7 +71,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 # A container left over from an interrupted run would hold the name and port.
-docker rm -f "$container" >/dev/null 2>&1 || true
+docker rm -f -v "$container" >/dev/null 2>&1 || true
 docker run -d --platform linux/amd64 --name "$container" \
   -p "127.0.0.1:$port:143" \
   -v "$config:/etc/dovecot/dovecot.conf:ro" \
