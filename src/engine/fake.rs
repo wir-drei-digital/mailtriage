@@ -9,8 +9,11 @@
 //! `refused <call>`, has no effect, does not consume a fault and is not
 //! counted by `write_calls()`. After `fail_with_config_changed` triggers,
 //! every call is logged as `config_changed <call>` and fails with
-//! `ConfigChanged`, also without effect or write count.
-use super::himalaya::parse_address;
+//! `ConfigChanged`, also without effect or write count. A write whose
+//! arguments the Himalaya engine would reject before spawning (mailbox names
+//! `raw::quote_mailbox` refuses; an empty, zero-UID or over-100 UID set) is
+//! logged as `invalid <call>` and fails the same way, before scope checks.
+use super::himalaya::{check_write_uids, parse_address};
 use super::{
     raw, ConfigChanged, CopyUid, EngineCapabilities, FolderInfo, MailEngine, WriteOutcome,
 };
@@ -109,6 +112,19 @@ impl State {
         }
         self.all_calls.push(call);
         Ok(())
+    }
+
+    /// Mirrors the Himalaya engine's argument checks: refuses (logged as
+    /// `invalid <call>`) before any effect, scope check or fault.
+    fn validate(&mut self, call: &str, folders: &[&str], uids: Option<&[u64]>) -> Result<()> {
+        let checked = folders
+            .iter()
+            .try_for_each(|f| raw::quote_mailbox(f).map(drop))
+            .and_then(|()| uids.map_or(Ok(()), check_write_uids));
+        if checked.is_err() {
+            self.all_calls.push(format!("invalid {call}"));
+        }
+        checked
     }
 
     fn take_fault(&mut self, op: FakeOp) -> Option<Fault> {
@@ -546,7 +562,9 @@ impl MailEngine for FakeEngine {
     /// Unsubscribed, like IMAP CREATE. An existing folder is an error.
     fn create_folder(&self, native: &str) -> Result<()> {
         let mut s = self.state();
-        s.enter(Some(FakeOp::Create), format!("create {native}"), &[native])?;
+        let call = format!("create {native}");
+        s.validate(&call, &[native], None)?;
+        s.enter(Some(FakeOp::Create), call, &[native])?;
         let fault = s.take_fault(FakeOp::Create);
         if fault.is_some_and(|f| f != Fault::ErrorAfter) {
             bail!("injected fault before the write");
@@ -560,11 +578,9 @@ impl MailEngine for FakeEngine {
 
     fn subscribe_folder(&self, native: &str) -> Result<()> {
         let mut s = self.state();
-        s.enter(
-            Some(FakeOp::Subscribe),
-            format!("subscribe {native}"),
-            &[native],
-        )?;
+        let call = format!("subscribe {native}");
+        s.validate(&call, &[native], None)?;
+        s.enter(Some(FakeOp::Subscribe), call, &[native])?;
         let fault = s.take_fault(FakeOp::Subscribe);
         if fault.is_some_and(|f| f != Fault::ErrorAfter) {
             bail!("injected fault before the write");
@@ -593,11 +609,9 @@ impl MailEngine for FakeEngine {
 
     fn move_messages(&self, folder: &str, uids: &[u64], target: &str) -> Result<WriteOutcome> {
         let mut s = self.state();
-        s.enter(
-            Some(FakeOp::Move),
-            format!("move {folder} {} -> {target}", raw::uid_set(uids)),
-            &[folder, target],
-        )?;
+        let call = format!("move {folder} {} -> {target}", raw::uid_set(uids));
+        s.validate(&call, &[folder, target], Some(uids))?;
+        s.enter(Some(FakeOp::Move), call, &[folder, target])?;
         let fault = s.take_fault(FakeOp::Move);
         let Some(epoch) = s.select(folder, fault)? else {
             return Ok(WriteOutcome::default());
@@ -636,11 +650,9 @@ impl MailEngine for FakeEngine {
 
     fn add_flagged(&self, folder: &str, uids: &[u64]) -> Result<WriteOutcome> {
         let mut s = self.state();
-        s.enter(
-            Some(FakeOp::Flag),
-            format!("flag {folder} {}", raw::uid_set(uids)),
-            &[folder],
-        )?;
+        let call = format!("flag {folder} {}", raw::uid_set(uids));
+        s.validate(&call, &[folder], Some(uids))?;
+        s.enter(Some(FakeOp::Flag), call, &[folder])?;
         let fault = s.take_fault(FakeOp::Flag);
         let Some(epoch) = s.select(folder, fault)? else {
             return Ok(WriteOutcome::default());
@@ -738,6 +750,33 @@ mod tests {
         assert_eq!(f.flags("News", n), vec!["\\Flagged".to_string()]);
         f.reset_epoch("News");
         assert_eq!(f.uids("News"), vec![1]);
+    }
+
+    #[test]
+    fn invalid_write_arguments_are_refused_like_himalaya() {
+        let f = FakeEngine::new();
+        f.add_folder("News", &[]);
+        let u = f.deliver("INBOX", &raw("a"));
+        f.inject(FakeOp::Move, Fault::ErrorAfter);
+        assert!(f.move_messages("INBOX", &[], "News").is_err());
+        assert!(f.move_messages("INBOX", &[0], "News").is_err());
+        let too_many: Vec<u64> = (1..=101).collect();
+        assert!(f.move_messages("INBOX", &too_many, "News").is_err());
+        assert!(f.move_messages("INBOX", &[u], "A&B").is_err());
+        assert!(f.add_flagged("INBOX", &[]).is_err());
+        assert!(f.add_flagged("-x", &[u]).is_err());
+        assert!(f.create_folder("Grüße").is_err());
+        assert!(f.subscribe_folder("").is_err());
+        assert_eq!(f.write_calls(), 0, "refused before any write");
+        assert!(f
+            .calls()
+            .contains(&"invalid move INBOX  -> News".to_string()));
+        assert_eq!(f.locate("<a@t>"), vec![("INBOX".to_string(), u)]);
+        assert!(
+            f.move_messages("INBOX", &[u], "News").is_err(),
+            "the fault survived the invalid calls"
+        );
+        assert_eq!(f.locate("<a@t>")[0].0, "News");
     }
 
     #[test]

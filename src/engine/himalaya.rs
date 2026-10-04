@@ -620,7 +620,8 @@ fn write_outcome(captured: &Captured) -> Result<WriteOutcome> {
     })
 }
 
-fn check_write_uids(uids: &[u64]) -> Result<()> {
+/// The UID-set rule of every write: 1 to 100 UIDs, none of them 0.
+pub(crate) fn check_write_uids(uids: &[u64]) -> Result<()> {
     if uids.is_empty() || uids.len() > MAX_UIDS_PER_WRITE {
         bail!("a write takes between 1 and {MAX_UIDS_PER_WRITE} UIDs");
     }

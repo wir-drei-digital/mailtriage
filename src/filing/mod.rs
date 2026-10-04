@@ -1,6 +1,9 @@
 //! IMAP category filing.
+pub mod apply;
+pub mod inputs;
 pub mod observe;
 pub mod planner;
+pub mod recover;
 pub mod store;
 pub mod types;
 

@@ -495,7 +495,7 @@ PRAGMA user_version=3; COMMIT;")?;
         )
     }
 }
-fn row_record(r: &rusqlite::Row<'_>) -> rusqlite::Result<Record> {
+pub(crate) fn row_record(r: &rusqlite::Row<'_>) -> rusqlite::Result<Record> {
     fn decode<T: serde::de::DeserializeOwned>(s: String) -> rusqlite::Result<T> {
         serde_json::from_str(&s).map_err(|e| {
             rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))

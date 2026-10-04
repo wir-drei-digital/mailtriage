@@ -1,13 +1,13 @@
 //! Filing persistence (schema v3): the store API every filing step uses.
 use super::{
-    mode_str, open_states_sql, planner::Action, rfc_message_id, Arrival, FilingStateRow,
-    FolderRecord, HydrationBatch, Intent, IntentPatch, LocationState, MessageMeta, NewIntent,
-    Placement, Revert, StageOptions,
+    mode_str, open_states_sql, planner::Action, rfc_message_id, Arrival, CheckpointState,
+    FilingStateRow, FolderRecord, HydrationBatch, Intent, IntentPatch, LocationState, MessageMeta,
+    NewIntent, Placement, Revert, StageOptions,
 };
 use crate::domain::{FilingMode, MailboxSnapshot, SourceEnvelope};
-use crate::store::{bump, envelope_of, merge_envelope, now, Store};
+use crate::store::{bump, envelope_of, merge_envelope, now, row_record, Record, Store};
 use anyhow::{bail, Result};
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use uuid::Uuid;
@@ -503,6 +503,19 @@ impl Store {
         Ok(self.db.last_insert_rowid())
     }
 
+    /// Test hook: lets the retry backoff of every open intent elapse.
+    #[doc(hidden)]
+    pub fn expire_intent_backoff_for_tests(&mut self, account: &str) -> Result<()> {
+        self.db.execute(
+            &format!(
+                "UPDATE filing_intents SET next_after='1970-01-01T00:00:00+00:00' WHERE account=? AND state IN {}",
+                open_states_sql()
+            ),
+            [account],
+        )?;
+        Ok(())
+    }
+
     /// Intents oldest first; `open_only` keeps `OPEN_INTENT_STATES`.
     pub fn intents(&self, account: &str, open_only: bool) -> Result<Vec<Intent>> {
         let filter = if open_only {
@@ -515,6 +528,123 @@ impl Store {
         ))?;
         let rows = st
             .query_map([account], row_intent)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn intent(&self, id: i64) -> Result<Option<Intent>> {
+        Ok(self
+            .db
+            .query_row(
+                &format!("SELECT {INTENT_COLUMNS} FROM filing_intents WHERE id=?"),
+                [id],
+                row_intent,
+            )
+            .optional()?)
+    }
+
+    /// Re-claims an open move intent for a retry in one immediate transaction:
+    /// refused (`false`) when the intent is no longer open, the placement's
+    /// `desired_rev` is no longer `intent.desired_rev`, or the placement is
+    /// blocked. Writes `in_flight` with `intent`'s source locator (`epoch`,
+    /// `uid`), target snapshot (`target_epoch`, `target_uid_next`), `attempts`
+    /// and `next_after`, sets `dispatched_at = now`, and clears the previous
+    /// attempt's `target_uid` and `error`.
+    pub fn reclaim_move(&mut self, intent: &Intent, now: &str) -> Result<bool> {
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let ok: bool = tx
+            .query_row(
+                &format!(
+                    "SELECT i.kind='move' AND i.state IN {} AND p.desired_rev=?2 AND p.blocked_reason IS NULL
+ FROM filing_intents i JOIN placements p ON p.account=i.account AND p.message_id=i.message_id WHERE i.id=?1",
+                    open_states_sql()
+                ),
+                params![intent.id, intent.desired_rev],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if !ok {
+            return Ok(false);
+        }
+        tx.execute(
+            "UPDATE filing_intents SET state='in_flight',epoch=?2,uid=?3,target_epoch=?4,target_uid_next=?5,target_uid=NULL,attempts=?6,next_after=?7,dispatched_at=?8,updated_at=?8,error=NULL WHERE id=?1",
+            params![
+                intent.id,
+                intent.epoch,
+                intent.uid,
+                intent.target_epoch,
+                intent.target_uid_next,
+                intent.attempts,
+                intent.next_after,
+                now
+            ],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// The checkpoint of a folder: (epoch, last UID, complete, scanned_at).
+    pub fn checkpoint_state(&self, account: &str, folder: &str) -> Result<Option<CheckpointState>> {
+        Ok(self
+            .db
+            .query_row(
+                "SELECT epoch,last_uid,complete,scanned_at FROM checkpoints WHERE account=? AND mailbox=?",
+                params![account, folder],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?)
+    }
+
+    /// Arrivals in one folder epoch at `uid >= min_uid`, lowest UID first.
+    pub fn arrivals_at(
+        &self,
+        account: &str,
+        folder: &str,
+        epoch: u64,
+        min_uid: u64,
+    ) -> Result<Vec<Arrival>> {
+        let mut st = self.db.prepare(&format!(
+            "SELECT {ARRIVAL_COLUMNS} FROM arrivals WHERE account=? AND folder=? AND epoch=? AND uid>=? ORDER BY uid, id"
+        ))?;
+        let rows = st
+            .query_map(params![account, folder, epoch, min_uid], row_arrival)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Every placement with its message (without content) and transport
+    /// metadata, in message id order.
+    pub fn records_for_planning(
+        &self,
+        account: &str,
+    ) -> Result<Vec<(Record, Placement, MessageMeta)>> {
+        let placement: Vec<String> = PLACEMENT_COLUMNS
+            .split(',')
+            .map(|c| format!("p.{c}"))
+            .collect();
+        let mut st = self.db.prepare(&format!(
+            "SELECT m.id,m.account,NULL,m.envelope,m.status,m.classification,m.overrides,m.review_state,m.observed_at,m.error,m.generation,{},
+ m.rfc_message_id,m.size,m.internal_date,m.fingerprint IS NOT NULL,m.source_managed
+ FROM placements p JOIN messages m ON m.id=p.message_id WHERE p.account=? ORDER BY p.message_id",
+            placement.join(",")
+        ))?;
+        let rows = st
+            .query_map([account], |r| {
+                let record = row_record(r)?;
+                let placement = row_placement_at(r, 11)?;
+                let meta = MessageMeta {
+                    rfc_message_id: r.get(29)?,
+                    size: r.get(30)?,
+                    internal_date: r.get(31)?,
+                    flags: envelope_flags(&record.envelope),
+                    fingerprinted: r.get(32)?,
+                    source_managed: r.get(33)?,
+                };
+                Ok((record, placement, meta))
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
@@ -567,7 +697,9 @@ impl Store {
         else {
             bail!("claim_move needs a Move")
         };
-        let tx = self.db.transaction()?;
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let ok: bool = tx
             .query_row(
                 &format!(
@@ -593,7 +725,7 @@ impl Store {
     }
 
     /// Claims the one flag attempt a placement ever gets: refused (`None`) when
-    /// `flag_attempted_at` is set or a flag intent is open.
+    /// `flag_attempted_at` is set, it is blocked, or a flag intent is open.
     pub fn claim_flag(
         &mut self,
         account: &str,
@@ -604,11 +736,13 @@ impl Store {
         let Action::Flag { message_id, at } = action else {
             bail!("claim_flag needs a Flag")
         };
-        let tx = self.db.transaction()?;
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let rev: Option<i64> = tx
             .query_row(
                 &format!(
-                    "SELECT desired_rev FROM placements WHERE account=? AND message_id=? AND flag_attempted_at IS NULL
+                    "SELECT desired_rev FROM placements WHERE account=? AND message_id=? AND flag_attempted_at IS NULL AND blocked_reason IS NULL
                      AND NOT EXISTS(SELECT 1 FROM filing_intents WHERE message_id=placements.message_id AND kind='flag' AND state IN {})",
                     open_states_sql()
                 ),
@@ -793,16 +927,7 @@ impl Store {
             )
             .optional()?;
         Ok(row.map(|(meta, envelope)| MessageMeta {
-            flags: envelope
-                .get("flags")
-                .and_then(Value::as_array)
-                .map(|a| {
-                    a.iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_string)
-                        .collect()
-                })
-                .unwrap_or_default(),
+            flags: envelope_flags(&envelope),
             ..meta
         }))
     }
@@ -958,33 +1083,52 @@ fn decode_json(column: usize, s: String) -> rusqlite::Result<Value> {
 }
 
 fn row_placement(r: &Row<'_>) -> rusqlite::Result<Placement> {
-    let location: String = r.get(6)?;
+    row_placement_at(r, 0)
+}
+
+/// A placement whose `PLACEMENT_COLUMNS` start at column `at`.
+fn row_placement_at(r: &Row<'_>, at: usize) -> rusqlite::Result<Placement> {
+    let location: String = r.get(at + 6)?;
     Ok(Placement {
-        account: r.get(0)?,
-        message_id: r.get(1)?,
-        source_folder: r.get(2)?,
-        home_folder: r.get(3)?,
-        home_epoch: r.get(4)?,
-        home_uid: r.get(5)?,
+        account: r.get(at)?,
+        message_id: r.get(at + 1)?,
+        source_folder: r.get(at + 2)?,
+        home_folder: r.get(at + 3)?,
+        home_epoch: r.get(at + 4)?,
+        home_uid: r.get(at + 5)?,
         location_state: LocationState::parse(&location).ok_or_else(|| {
             rusqlite::Error::FromSqlConversionFailure(
-                6,
+                at + 6,
                 rusqlite::types::Type::Text,
                 "invalid location_state".into(),
             )
         })?,
-        absent_since: r.get(7)?,
-        desired_target: r.get(8)?,
-        pinned: r.get(9)?,
-        eligible_once: r.get(10)?,
-        desired_rev: r.get(11)?,
-        filed_at: r.get(12)?,
-        filed_by: r.get(13)?,
-        flag_attempted_at: r.get(14)?,
-        flagged_at: r.get(15)?,
-        done_inferred: r.get(16)?,
-        blocked_reason: r.get(17)?,
+        absent_since: r.get(at + 7)?,
+        desired_target: r.get(at + 8)?,
+        pinned: r.get(at + 9)?,
+        eligible_once: r.get(at + 10)?,
+        desired_rev: r.get(at + 11)?,
+        filed_at: r.get(at + 12)?,
+        filed_by: r.get(at + 13)?,
+        flag_attempted_at: r.get(at + 14)?,
+        flagged_at: r.get(at + 15)?,
+        done_inferred: r.get(at + 16)?,
+        blocked_reason: r.get(at + 17)?,
     })
+}
+
+/// The `flags` array of an envelope JSON object.
+fn envelope_flags(envelope: &Value) -> Vec<String> {
+    envelope
+        .get("flags")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn row_folder(r: &Row<'_>) -> rusqlite::Result<FolderRecord> {

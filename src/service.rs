@@ -364,11 +364,9 @@ impl Service {
         let (account, generation) = self.ensure(name)?;
         // 1. Engine check and filing mode.
         let engine = self.engine(&account)?;
-        let mode = if engine.is_some() {
-            account.filing.mode
-        } else {
-            FilingMode::Off
-        };
+        let mode = engine
+            .as_ref()
+            .map_or(FilingMode::Off, |_| account.filing.mode);
         let now = now();
         self.store.sync_filing_mode(name, mode, &now)?;
         if let Some(h) = &engine {
@@ -395,7 +393,7 @@ impl Service {
             ..Default::default()
         };
         // 2. Folder resolution.
-        let map = resolve_or_sources(&mut self.store, filing, &account, &mut summary)?;
+        let mut map = resolve_or_sources(&mut self.store, filing, &account, &mut summary)?;
         // 3–4. Discovery and reconciliation of every watched folder.
         let mut removed = Vec::new(); // Task 8 re-evaluates these messages' placements.
         let (discovered, scan_errors) = match engine.as_deref() {
@@ -412,7 +410,10 @@ impl Service {
             }
             None => (0, 0),
         };
-        // 4. (Task 7 inserts intent recovery here.)
+        // 4. Intent recovery, before any arrival inference.
+        if let Some(ctx) = filing {
+            self.recover_intents(ctx, &mut map, &mut summary)?;
+        }
         // 5. Fetch and classify.
         let done = self.fetch_and_classify(
             name,
@@ -423,11 +424,12 @@ impl Service {
             limit,
         )?;
         // 6. (Task 8 inserts arrival resolution and re-evaluation here.)
-        // 7. Rescan completion, then bootstrap and hydration.
+        // 7. Rescan completion, then bootstrap and hydration; 8. plan and apply.
+        // (Task 8 inserts done inference after step 8.)
         if let Some(ctx) = filing {
             observe_placements(&mut self.store, ctx, &map, &mut summary)?;
+            self.plan_and_apply(ctx, &mut map, &mut summary)?;
         }
-        // 8. (Task 7 inserts plan and apply here; Task 8 inserts done inference after it.)
         // 9. Summary.
         self.sync_response(
             name,
@@ -436,6 +438,53 @@ impl Service {
             &done,
             filing.map(|_| &summary),
         )
+    }
+    /// Step 4: intent recovery, with mail writes gated on the configuration.
+    fn recover_intents(
+        &mut self,
+        ctx: &PassContext,
+        map: &mut FolderMap,
+        summary: &mut FilingSummary,
+    ) -> Result<()> {
+        self.gate_writes(map, summary)?;
+        if let Err(e) = filing::recover::recover(&mut self.store, ctx, map, summary) {
+            step_failed(e, "recovery_failed", summary)?;
+        }
+        Ok(())
+    }
+    /// Step 8: the pure planner over the stored state (a preview in
+    /// `dry_run`); in `live`, its actions are claimed and applied, with mail
+    /// writes gated on the configuration.
+    fn plan_and_apply(
+        &mut self,
+        ctx: &PassContext,
+        map: &mut FolderMap,
+        summary: &mut FilingSummary,
+    ) -> Result<()> {
+        self.gate_writes(map, summary)?;
+        let store = &mut self.store;
+        let result = (|| {
+            let preview = ctx.mode == FilingMode::DryRun;
+            let plan =
+                filing::planner::plan(&filing::inputs::plan_input(store, ctx, map, preview)?);
+            summary.planned = plan.actions.len();
+            filing::apply::apply(store, ctx, map, &plan, summary)
+        })();
+        if let Err(e) = result {
+            step_failed(e, "apply_failed", summary)?;
+        }
+        Ok(())
+    }
+    /// Spec "Error handling": a mailtriage configuration that changed during
+    /// the pass stops this pass's mail writes (claims, retries, reverts); the
+    /// pass is partial and the next one runs with the new configuration.
+    fn gate_writes(&self, map: &mut FolderMap, summary: &mut FilingSummary) -> Result<()> {
+        if map.writes_allowed && !self.unchanged()? {
+            map.writes_allowed = false;
+            summary.errors += 1;
+            summary.problems.push("config_changed".into());
+        }
+        Ok(())
     }
     /// The sync JSON; with filing on it gains `filing`, is stored as the last
     /// pass, and any filing error makes it partial.

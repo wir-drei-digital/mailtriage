@@ -157,6 +157,9 @@ pub struct FilingStateRow {
     pub last_pass: Option<serde_json::Value>,
 }
 
+/// A folder's checkpoint: (epoch, last UID, complete, scanned_at).
+pub type CheckpointState = (u64, u64, bool, Option<String>);
+
 /// Transport metadata of a message.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct MessageMeta {
