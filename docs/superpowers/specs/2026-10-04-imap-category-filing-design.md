@@ -571,7 +571,7 @@ quarantined or explained by a revert, and whose message has no open intent:
 
 | Arrival | Home UID still present (`envelopes` on `home_folder`/`home_epoch`/`home_uid`) | Result |
 | --- | --- | --- |
-| Category C's folder | no | `user_move`: client move into category C; if C already is the message's effective category, only the location is updated (event `relocated`, no override) |
+| Category C's folder | no | `user_move`: client move into category C; if C already is the message's effective category, no override is written: home updated, `pinned = 0`, `desired_target` cleared (the user's latest move wins), event `relocated` |
 | A source folder | no | `user_pin`: client move into a source folder |
 | Any watched folder | yes | `extra`: occurrence recorded, no change |
 | Category C's folder, message had no placement | n/a | `new`: placement with home here, `filed_by = user`, client-correction override to C, never moved automatically |
