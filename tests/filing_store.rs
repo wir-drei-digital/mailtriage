@@ -849,3 +849,38 @@ fn filing_commits_are_all_or_nothing() {
         Some("duplicate_copy")
     );
 }
+
+/// Final review M3: `filing adopt` sets only `confirmed`, so a pause (or any
+/// other field) a concurrent pass wrote is never overwritten.
+#[test]
+fn confirming_a_folder_changes_only_confirmed() {
+    use mailtriage::filing::FolderRecord;
+    let (_d, mut s) = store();
+    s.ensure_account("work", "id", "g1").unwrap();
+    let rec = FolderRecord {
+        account: "work".into(),
+        native: "News".into(),
+        configured: Some("News".into()),
+        category_id: Some("news".into()),
+        origin: None,
+        state: "needs_confirmation".into(),
+        role_verified: false,
+        confirmed: false,
+        subscribed: true,
+        pause_reason: Some("epoch_race".into()),
+        epoch: Some(3),
+        watch_from_uid: Some(7),
+        rescan_epoch: Some(3),
+        rescan_below_uid: Some(8),
+        rescan_complete: false,
+        checked_at: Some(NOW.into()),
+        error: Some("e".into()),
+    };
+    s.save_folder(&rec).unwrap();
+    assert!(s.confirm_folder("work", "News").unwrap());
+    let mut want = rec.clone();
+    want.confirmed = true;
+    assert_eq!(s.folder_record("work", "News").unwrap().unwrap(), want);
+    assert!(!s.confirm_folder("work", "Nope").unwrap(), "no record");
+    assert!(s.folder_record("work", "Nope").unwrap().is_none());
+}

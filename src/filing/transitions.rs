@@ -276,14 +276,11 @@ pub fn dismiss_arrival(store: &mut Store, account: &str, arrival_id: i64, now: &
 }
 
 /// `filing adopt --folder`: confirms an existing folder whose role could not
-/// be verified; the next pass re-resolves it (spec "Folders" rule 3).
+/// be verified; the next pass re-resolves it (spec "Folders" rule 3). Only
+/// `confirmed` is written: `filing adopt` runs without the account lock.
 pub fn adopt_folder(store: &mut Store, account: &str, native: &str, _now: &str) -> Result<()> {
-    let Some(mut rec) = store.folder_record(account, native)? else {
+    if !store.confirm_folder(account, native)? {
         return Err(err(2, "unknown folder; run sync first"));
-    };
-    if !rec.confirmed {
-        rec.confirmed = true;
-        store.save_folder(&rec)?;
     }
     Ok(())
 }

@@ -700,6 +700,16 @@ impl Store {
         Ok(rows)
     }
 
+    /// `filing adopt`: sets only `confirmed` on an existing folder record, so
+    /// a field a concurrent pass writes (a pause, say) is never overwritten.
+    /// Returns whether the record exists.
+    pub fn confirm_folder(&mut self, account: &str, native: &str) -> Result<bool> {
+        Ok(self.db.execute(
+            "UPDATE folders SET confirmed=1 WHERE account=? AND native=?",
+            params![account, native],
+        )? == 1)
+    }
+
     /// Inserts or replaces every field of a folder record.
     pub fn save_folder(&mut self, f: &FolderRecord) -> Result<()> {
         self.db.execute(
