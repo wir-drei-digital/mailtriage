@@ -2,7 +2,7 @@
 
 Date: 2026-10-04
 Status: Design approved in conversation; written spec revised after review
-round 2.
+round 3 (final Codex round).
 Scope: first of two projects. The system tray app is a separate, later spec
 that consumes this one.
 
@@ -126,10 +126,12 @@ pub trait MailEngine {
 }
 ```
 
-`Err` from a write means no usable response arrived (spawn failure, timeout,
-unparseable output); the outcome is then unknown. Any parsed response is an
-`Ok(WriteOutcome)`, including NO/BAD completions, so partial results such as a
-COPYUID on a failed MOVE are never lost.
+Any parsed response is an `Ok(WriteOutcome)`, including NO/BAD completions, so
+partial results such as a COPYUID on a failed MOVE are never lost. On timeout
+the Himalaya engine still parses the stdout captured before it killed the
+process (today `Himalaya::run` discards it) and returns what that output
+proves. `Err` means not even the SELECT result was captured; the outcome is
+then unknown.
 
 Engine construction is a single factory, `engine::open(&EngineConfig) ->
 Result<Box<dyn MailEngine>>`. The service never names `Himalaya` directly. All
@@ -244,9 +246,10 @@ Collisions with source folders are checked online on resolved native names.
 Migration from v2 runs in one transaction. It adds columns and tables only;
 placements for existing messages are created by the bootstrap (below).
 
-- `messages` gains `match_key TEXT` and `internal_date TEXT`, with an index on
-  `(account, match_key)`. Every writer of `envelope` (including `attach`)
-  merges fields instead of replacing transport metadata.
+- `messages` gains `rfc_message_id TEXT`, `size INTEGER` and
+  `internal_date TEXT`, with an index on `(account, rfc_message_id)`. Every
+  writer of `envelope` (including `attach`) merges fields instead of replacing
+  transport metadata.
 - `filing_state(account PK, mode, enabled_at, bootstrap_done INTEGER,
   last_pass TEXT)`.
 - `placements(account, message_id PK, ...)`, one row per message with
@@ -265,18 +268,30 @@ placements for existing messages are created by the bootstrap (below).
   epoch, watch_from_uid, checked_at, error)`. `origin`: `created`/`adopted`.
   `state` (observed): `ok`, `missing`, `special_use`, `noselect`,
   `needs_confirmation`, `retired`, `error`. `pause_reason` (safety, explicit
-  release only): null or `epoch_race`.
-- `arrivals(id PK, account, folder, epoch, uid, message_id, match_key, state,
-  kind, intent_id, created_at, resolved_at)`. `state`: `pending`, `resolved`,
-  `unresolved` (identity could not be established: terminal fetch failure, or
-  the occurrence vanished before fetch). `kind` on resolution: `own_move`,
-  `user_move`, `user_pin`, `extra`, `new`, `rescan`, `quarantined`.
+  release only): null, `epoch_race` or `epoch_race_suspected`. `rescan_epoch`
+  and `rescan_complete` record the epoch of the latest reset rescan and whether
+  it finished.
+- `arrivals(id PK, account, folder, epoch, uid, message_id, rfc_message_id,
+  state, kind, intent_id, created_at, resolved_at)`. `state`: `pending`,
+  `resolved`, `vanished` (the occurrence disappeared before its identity was
+  established), `unresolved` (terminal fetch failure while the occurrence still
+  exists), `dismissed` (an unresolved arrival the user explicitly dismissed).
+  `kind` on resolution: `own_move`, `user_move`, `user_pin`, `extra`, `new`,
+  `rescan`, `reverted`, `quarantined`.
 - `rescan_sets(account, folder, epoch, message_id)`: messages to look for when
   a folder's epoch resets (see Folders).
 - `filing_intents(id PK, account, message_id, kind, folder, epoch, uid, target,
   target_epoch, target_uid_next, target_uid, desired_rev, consumes_eligible
   INTEGER, batch, state, attempts, next_after, dispatched_at, created_at,
-  updated_at, error)`. `kind`: `move`, `revert`, `flag`.
+  updated_at, error)`. `kind`: `move` or `flag`. `state`: `in_flight`,
+  `sent`, `uncertain`, `awaiting_rescan`, `applied`, `lost`, `failed`,
+  `superseded`.
+- `filing_reverts(id PK, account, parent_intent, folder, folder_epoch, uid,
+  target, target_epoch, state, target_uid, created_at, updated_at, error)`:
+  compensation for an epoch race. `folder`/`folder_epoch`/`uid` is the
+  COPYUID destination locator of a message the race moved; `target` is the
+  original source folder and `target_epoch` the session epoch the race ran in.
+  It references no message identity.
 - `filing_events(id PK, account, message_id, folder, at, kind, detail)`:
   append-only audit log. Kinds: `moved`, `flagged`, `client_correction`,
   `pinned`, `unpinned`, `relocated`, `archived_done`, `reopened`,
@@ -288,10 +303,13 @@ placements for existing messages are created by the bootstrap (below).
 
 ## Identity and placements
 
-`match_key` = SHA-256 of `message_id` (trimmed, case-sensitive), `size`, and
-`internal_date` normalized to UTC RFC 3339 with seconds; null when Message-ID
-is missing. It narrows candidates and checks batches before writes; it never
-establishes identity.
+`rfc_message_id` is the ENVELOPE Message-ID, trimmed and case-sensitive; null
+when missing. Identical raw content always has the same Message-ID, so it is a
+sound filter for "could this be the same message" (null matches null). Size and
+INTERNALDATE are not used as filters, because a client may assign a new
+INTERNALDATE when it transfers a message. Before a write, an occurrence is
+re-verified by comparing its Message-ID and size with the stored values. None
+of these establish identity.
 
 **Every** newly discovered occurrence in a watched folder is committed together
 with a `pending` arrival row, in the discovery transaction. Its identity is
@@ -452,8 +470,8 @@ For each batch (folder F, verified epoch E, target T):
 
 1. Re-verify the binding; re-read the batch's envelopes in F with `envelopes()`
    bracketed by `snapshot(F)` before and after. Drop UIDs that are absent or
-   whose `match_key` differs from the stored one (their placements are
-   re-evaluated); abort the batch if F's epoch is not E.
+   whose Message-ID or size differs from the stored values (their placements
+   are re-evaluated); abort the batch if F's epoch is not E.
 2. `snapshot(T)` → `target_epoch`, `target_uid_next`.
 3. Claim the actions (intents `in_flight`, `dispatched_at = now`).
 4. `move_messages(F, uids, T)`:
@@ -465,39 +483,56 @@ For each batch (folder F, verified epoch E, target T):
      "still in F".
    - `Err`: intents → `uncertain`.
 
-**Intent recovery** (step 5 of each pass, and after any crash):
+**Intent recovery** (step 5 of each pass, and after any crash). Presence in a
+folder is established only by an occurrence whose identity is established
+(COPYUID or fingerprint) in that folder's current epoch.
 
 | State | Recovery |
 | --- | --- |
 | `in_flight` | Treated as `uncertain`. |
-| `sent` | Waits for its arrival. Becomes `lost` once T has been scanned, in `target_epoch`, through the `UIDNEXT - 1` of a snapshot taken after `dispatched_at`, and every arrival in T at `uid >= target_uid_next` is resolved or unresolved with a different `match_key`. A lost move sets `location_state = absent`. |
-| `uncertain` | Re-verify binding, then observe both ends: present in T (COPYUID or a resolved arrival at `uid >= target_uid_next`) and absent from F → `applied`. Present in both → `failed`, `blocked_reason = duplicate_copy`. Present in F only, with T scanned as for `lost` → retry with the job backoff up to `policy.max_attempts`, then `failed`, `blocked_reason = move_failed`. Absent from both → `sent`. |
-| any, T epoch changed | UID comparisons in T are invalid; the intent's message is added to T's rescan set and the intent waits until the rescan completes, then applies the rules above. |
-| any, F epoch changed | Presence in F is decided by the rescan of F the same way. |
+| `uncertain`, F or T epoch now differs from the one recorded | **Suspected epoch race** (see Epoch race). Then `awaiting_rescan`. |
+| `uncertain`, epochs unchanged | Re-verify binding, observe both ends. In T (COPYUID, or an identity-established arrival at `uid >= target_uid_next`) and not in F → `applied`. In both → `failed`, `blocked_reason = duplicate_copy`. In F only, with T scanned as for `lost` → if the intent's `desired_rev` still matches, retry (re-claimed, job backoff, up to `policy.max_attempts`, then `failed`, `blocked_reason = move_failed`); otherwise `superseded`. In neither → `sent`. |
+| `sent` | Waits for its arrival. Becomes `lost` once T has been scanned, in `target_epoch`, through the `UIDNEXT - 1` of a snapshot taken after `dispatched_at`, and every arrival in T at `uid >= target_uid_next` is `resolved` or `vanished`; an `unresolved` arrival in that range keeps it `sent` until retried or dismissed. A lost move sets `location_state = absent`. |
+| `sent`, T epoch changed | `awaiting_rescan`. |
+| `awaiting_rescan` | Waits until every folder whose epoch changed (F, T, or both) has a complete reset rescan. Then old-epoch UIDs and bounds are discarded and the outcome is decided by identity-established occurrences in the current epochs only: in T only → `applied`; in both → `failed`, `duplicate_copy`; in F only → retry if `desired_rev` matches, else `superseded`; in neither → `lost`. |
 
-Arrivals at the target that belong to an open intent are resolved only as that
-intent's outcome; client-move inference never runs for a message with an open
-move or revert intent.
+`superseded` and `lost` close the intent without a block. `applied` follows the
+"Move applied" transition, so a superseding request is never consumed by an
+older intent. Arrivals at the target that belong to an open intent are resolved
+only as that intent's outcome; client-move inference never runs for a message
+with an open move intent or for an arrival quarantined or explained by a
+revert.
 
 ### Epoch race
 
-The write session saw a different epoch than the batch was verified in, so it
-may have acted on other messages.
+A write ran, or may have run, in a different epoch from the one its batch was
+verified in, so it may have acted on other messages.
 
-- **Move with COPYUID**: journal a `revert` intent per reported pair, then move
-  the reported target UIDs from T back to F's session epoch with the same
-  procedure (verification step 1 uses the COPYUID target epoch). Event
-  `epoch_race_reverted`. A revert is never itself reverted: a race during a
-  revert falls through to the next case.
-- **Move without COPYUID, or a failed revert**: F gets
-  `pause_reason = epoch_race`; every arrival in T at `uid >= target_uid_next`
-  in `target_epoch` that no intent explains is resolved `quarantined`, and the
-  resulting placements get `blocked_reason = quarantined`. Event `epoch_race`.
-- **Flag**: F gets `pause_reason = epoch_race`; event `epoch_race` (another
-  message may now be flagged; flags are never removed).
+- **Detected move race with COPYUID.** For each reported pair, journal a
+  `filing_reverts` row (destination locator T/`copyuid.target_epoch`/target
+  UID, back to F in the race's session epoch, parent intent), then mark the
+  pending arrivals at those T UIDs `quarantined` pending the revert. Each
+  revert is dispatched like a move but verified differently: `snapshot(T)` must
+  still report `copyuid.target_epoch`, the revert session's epoch must equal
+  it, and the UID must still be present. Nothing is compared with any
+  message's stored metadata, because the moved message's identity is unknown.
+  The revert's own COPYUID locates the returned messages in F; arrivals there
+  resolve as `reverted`. A completed revert closes its quarantined arrival
+  (kind `reverted`, occurrence removed) and changes no placement. Event
+  `epoch_race_reverted`. A revert is never itself reverted: a race or error
+  during a revert falls through to the next case.
+- **Detected move race without COPYUID, failed revert, or suspected race.** F
+  gets `pause_reason = epoch_race` (`epoch_race_suspected` when no session
+  outcome was captured). Every arrival in T at `uid >= target_uid_next` in
+  `target_epoch` that no intent explains is resolved `quarantined`, and
+  placements created from those arrivals get `blocked_reason = quarantined`.
+  Quarantine is written in step 5, before arrival resolution in step 7, so it
+  is never mistaken for a client move. Event `epoch_race`.
+- **Flag race, detected or suspected.** F gets `pause_reason = epoch_race`;
+  event `epoch_race` (another message may now be flagged; flags are never
+  removed). The flag intent becomes `failed`.
 
-The batch's original intents become `uncertain` and resolve normally once F is
-released and rescanned.
+The race batch's original move intents become `awaiting_rescan`.
 
 ### Flags
 
@@ -508,9 +543,10 @@ released and rescanned.
 3. `add_flagged(F, [uid])`, batched per folder:
    - `selected`, `session_epoch == E`, `completed` → `applied`, `flagged_at`,
      event `flagged`;
-   - epoch race → as above, intent `failed`;
-   - anything else → `uncertain`. Next pass: re-read flags; `\Flagged` present
-     → `applied`; absent → `failed`, event `flag_failed`. Never retried.
+   - epoch race → as above;
+   - anything else → `uncertain`. Next pass: if F's epoch changed, suspected
+     flag race as above; otherwise re-read flags: `\Flagged` present →
+     `applied`; absent → `failed`, event `flag_failed`. Never retried.
 
 A crash between claim and dispatch leaves the message unflagged; that is the
 price of never overriding a user's unflag.
@@ -519,8 +555,8 @@ price of never overriding a user's unflag.
 
 ### Arrival resolution
 
-Step 7 resolves `pending` arrivals whose identity is established and whose
-message has no open intent:
+Step 7 resolves `pending` arrivals whose identity is established, that are not
+quarantined or explained by a revert, and whose message has no open intent:
 
 | Arrival | Home UID still present (`envelopes` on `home_folder`/`home_epoch`/`home_uid`) | Result |
 | --- | --- | --- |
@@ -529,11 +565,14 @@ message has no open intent:
 | Any watched folder | yes | `extra`: occurrence recorded, no change |
 | Category C's folder, message had no placement | n/a | `new`: placement with home here, `filed_by = user`, client-correction override to C, never moved automatically |
 | Source folder, message had no placement | n/a | `new`: ordinary new mail |
+| Below a folder's reset-time `UIDNEXT` during its rescan | n/a | `rescan`: location update only (home re-established, or the placement re-evaluated); never a correction or pin |
 
-An arrival whose provisional message failed to fetch terminally, or whose
-occurrence vanished before fetch, becomes `unresolved` (event
-`arrival_unresolved`). `filing retry --arrival ID` requeues its fetch if the
-occurrence still exists.
+An arrival whose occurrence disappears before its identity is established
+becomes `vanished`. One whose provisional message fails to fetch terminally
+while the occurrence still exists becomes `unresolved` (event
+`arrival_unresolved`). `filing retry --arrival ID` requeues the fetch;
+`filing dismiss --arrival ID` marks it `dismissed` after the user has reviewed
+it. Both are listed in `filing status`.
 
 ### Placement re-evaluation
 
@@ -543,7 +582,8 @@ check), and its message has no open intent:
 - exactly one surviving occurrence in a watched folder → the matching client
   move transition (category folder → client move into that category; source
   folder → client move into a source folder, which pins); a surviving
-  occurrence in the same category records only `relocated`;
+  occurrence in the same category records only `relocated`. During a rescan,
+  or for a `rescan` arrival, only the location is updated;
 - several surviving occurrences → `location_state = ambiguous`, event
   `location_ambiguous`;
 - none → `location_state = absent`, `absent_since = now`.
@@ -564,8 +604,9 @@ message is never touched and keeps `done_inferred = 0`):
 - it is still absent from every watched, retired, paused or missing folder;
 - every watched folder's checkpoint is complete in an epoch unchanged since
   `absent_since`, and no rescan is in progress;
-- no `pending` arrival exists in the account;
-- no `unresolved` arrival exists with the same `match_key` (null matches null);
+- no `pending` or `unresolved` arrival and no quarantined, unreverted arrival
+  exists in the account (an unidentified occurrence could be this message);
+- no folder has a `pause_reason`;
 - it has no open intent.
 
 On success: `review_state = done`, `done_inferred = 1`, event `archived_done`.
@@ -603,9 +644,9 @@ Each pass with mode not `off`:
    `subscribed` is tracked separately, so a crash between create and subscribe
    completes next pass.
 7. A recorded folder no longer referenced by any category → `retired`. It stays
-   watched while open intents, pending arrivals or rescan sets reference it;
-   afterwards its occurrences are frozen and still count as present for done
-   inference.
+   watched while open intents, reverts, pending arrivals or rescan sets
+   reference it; afterwards its occurrences are frozen and still count as
+   present for done inference.
 
 `pause_reason` is independent of the observed state: rule 3 never clears it.
 `filing retry --folder NAME` clears it (event `released`) and schedules a
@@ -617,12 +658,15 @@ rescan of that folder.
 **Epoch reset of any watched folder.** Before the existing code deletes its
 occurrences, the message ids of those occurrences, of placements whose home is
 the folder, of open intents targeting it and of pending arrivals in it are
-written to `rescan_sets`. The folder is rescanned from UID 1. For a category
-folder, an envelope below the reset-time `UIDNEXT` becomes a provisional
-message only if its `match_key` equals that of a rescan-set member (null keys
-match null-key members); other pre-existing content is not ingested. Identity
-is then established by fingerprint as usual (arrival kind `rescan`). When the
-rescan completes, rescan-set members not found are re-evaluated.
+written to `rescan_sets`; `rescan_epoch` is set and `rescan_complete` cleared.
+The folder is rescanned from UID 1. For a category folder, an envelope below
+the reset-time `UIDNEXT` becomes a provisional message only if its
+`rfc_message_id` equals that of a rescan-set member (null matches null); other
+pre-existing content is not ingested. Source folders are rescanned in full, as
+today. Identity is then established by fingerprint (arrival kind `rescan`).
+`rescan_complete` is set when the scan reaches the reset-time `UIDNEXT - 1`
+and every provisional message it created has resolved, vanished or become
+unresolved. Rescan-set members not found are then re-evaluated.
 
 ## Commands
 
@@ -637,7 +681,8 @@ codes, and are safe to retry.
 | `filing plan [--limit N]` | Read-only planner output: `folders_to_create` and actions. |
 | `filing backfill (--days N \| --all) [--apply]` | Lists source-folder placements that would become eligible; `--apply` (requires `live`) sets `eligible_once` on them. `--days` uses the hydrated internal date. |
 | `filing pin --id ID` / `filing unpin --id ID` | Placement transitions. |
-| `filing retry --id ID \| --folder NAME \| --arrival ID` | Clears a message block or quarantine, releases a folder's safety pause, or requeues an unresolved arrival. |
+| `filing retry --id ID \| --folder NAME \| --arrival ID` | Clears a message block or quarantine, releases a folder's safety pause, or requeues an unresolved arrival's fetch. |
+| `filing dismiss --arrival ID` | Marks a reviewed unresolved arrival `dismissed`, lifting its done-inference barrier. |
 | `filing adopt --folder NAME` | Confirms adoption of an existing folder whose role could not be verified. |
 | `filing log [--id ID] [--limit N]` | Recent `filing_events`, newest first. |
 
@@ -673,9 +718,11 @@ Error text never includes message bodies, subjects or credentials.
 - **Verification-to-write window.** The Himalaya engine verifies a batch in one
   subprocess and writes in another, so a mailbox recreated in the milliseconds
   between them can be written to in its new epoch. Invariant 5 guarantees
-  detection; moves are reverted with COPYUID where available, otherwise the
-  folder pauses and arrivals are quarantined; a mistaken flag stays (flags are
-  never removed) and is reported. A native IMAP engine closes the window by
+  detection when the write's response is captured, and a write whose outcome
+  was lost is treated as a suspected race whenever the folder's epoch changed;
+  moves are reverted with COPYUID where available, otherwise the folder pauses
+  and arrivals are quarantined; a mistaken flag stays (flags are never removed)
+  and is reported. A native IMAP engine closes the window by
   checking SELECT's UIDVALIDITY before sending the write.
 - **Re-download without UIDPLUS.** Identity of moved mail is established by
   fingerprint, costing one extra download per moved message.
@@ -695,11 +742,16 @@ Error text never includes message bodies, subjects or credentials.
 - **Service with `FakeEngine`**: every row of the transition, intent-recovery,
   arrival and re-evaluation tables; zero write calls in `off`/`dry_run`;
   crash injection before, during and after each write; epoch race with and
-  without COPYUID, during a revert, and for flags; duplicate copy; stale claim
-  dropped after a concurrent `correct` or `pin`; newer correction survives an
-  older intent; flag attempted once; done inference blocked by pending and
-  same-key unresolved arrivals, never applied to explicit done, reversed on
-  reappearance; target epoch reset during a `sent` move; bootstrap and
+  without COPYUID, during a revert, suspected after a lost response, and for
+  flags; reverts never touching placements; duplicate copy; stale claim
+  dropped after a concurrent `correct` or `pin`; an uncertain intent superseded
+  by a newer request closes without retry; newer correction survives an older
+  intent; flag attempted once; done inference blocked by pending, unresolved
+  and quarantined arrivals and by paused folders, never applied to explicit
+  done, reversed on reappearance; target and source epoch resets during
+  `sent` and `uncertain` moves resolved by `awaiting_rescan`; a client
+  transfer that changes INTERNALDATE still found by rescan; timeout with
+  partial output; bootstrap and
   hydration on an existing database; offline-ingested record gaining an
   occurrence; merge conflict; folder confirmation, pause release, missing and
   retired folders; adopted content not ingested; backfill in capped batches.
