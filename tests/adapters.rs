@@ -161,8 +161,15 @@ fn decisions_errors_are_bounded_and_do_not_expose_response_bodies() {
     }
 }
 
+/// A fake Himalaya binary with a timeout generous enough for a loaded test
+/// machine; only the timeout subcases use `fake_himalaya_timeout` directly.
 #[cfg(unix)]
 fn fake_himalaya(script: &str) -> (TempDir, Himalaya) {
+    fake_himalaya_timeout(script, 5)
+}
+
+#[cfg(unix)]
+fn fake_himalaya_timeout(script: &str, timeout_seconds: u64) -> (TempDir, Himalaya) {
     use std::os::unix::fs::PermissionsExt;
     let temp = TempDir::new().unwrap();
     let binary = temp.path().join("himalaya");
@@ -178,7 +185,7 @@ fn fake_himalaya(script: &str) -> (TempDir, Himalaya) {
         account: "work".into(),
         mailboxes: vec!["INBOX".into()],
         expected_version: "2.1.0".into(),
-        timeout_seconds: 1,
+        timeout_seconds,
         max_output_bytes: 4096,
     })
     .unwrap();
@@ -246,7 +253,7 @@ fn himalaya_rejects_epoch_reset_timeout_and_large_output() {
         .to_string()
         .contains("epoch changed"));
 
-    let (_fixture, delayed) = fake_himalaya("#!/bin/sh\nsleep 3\n");
+    let (_fixture, delayed) = fake_himalaya_timeout("#!/bin/sh\nsleep 3\n", 1);
     assert!(delayed
         .snapshot("INBOX")
         .unwrap_err()
@@ -260,7 +267,7 @@ fn himalaya_rejects_epoch_reset_timeout_and_large_output() {
         .to_string()
         .contains("output limit"));
 
-    let (_fixture, inherited_pipe) = fake_himalaya("#!/bin/sh\n(sleep 3) &\nexit 0\n");
+    let (_fixture, inherited_pipe) = fake_himalaya_timeout("#!/bin/sh\n(sleep 3) &\nexit 0\n", 1);
     let started = std::time::Instant::now();
     assert!(inherited_pipe
         .snapshot("INBOX")
