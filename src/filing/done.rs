@@ -2,7 +2,7 @@
 //! left every watched folder is marked done once nothing could still hide
 //! it. An explicit review state is never touched.
 use super::observe::FolderMap;
-use super::{FilingSummary, FilingWrite, LocationState, PassContext, Placement};
+use super::{FilingSummary, FilingWrite, PassContext, Placement};
 use crate::store::Store;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -15,8 +15,8 @@ fn time(s: &str) -> Option<DateTime<Utc>> {
         .map(|t| t.with_timezone(&Utc))
 }
 
-/// Marks done every `absent` placement whose absence was recorded in an
-/// earlier pass (`absent_since` strictly before this pass's `now`), that has
+/// Marks done every `absent` placement of an `open` message whose absence
+/// was recorded in an earlier pass (`absent_since` strictly before this pass's `now`), that has
 /// no occurrence anywhere (frozen ones in retired, paused or missing folders
 /// count as present) and no open intent, while the account is settled.
 pub fn infer_done(
@@ -38,9 +38,9 @@ pub fn infer_done(
             .is_some_and(|t| t < now)
     };
     let candidates: Vec<Placement> = store
-        .placements(ctx.account)?
+        .open_absent_placements(ctx.account)?
         .into_iter()
-        .filter(|p| p.location_state == LocationState::Absent && earlier(p))
+        .filter(earlier)
         .collect();
     if candidates.is_empty() || !settled(store, ctx, map)? {
         return Ok(());

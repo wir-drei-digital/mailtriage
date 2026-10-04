@@ -884,3 +884,40 @@ fn confirming_a_folder_changes_only_confirmed() {
     assert!(!s.confirm_folder("work", "Nope").unwrap(), "no record");
     assert!(s.folder_record("work", "Nope").unwrap().is_none());
 }
+
+/// Final review M4: done inference only looks at absent placements of open
+/// messages; an explicitly or inferred done one is never re-checked.
+#[test]
+fn done_candidates_are_absent_and_open() {
+    let (_d, mut s) = store();
+    s.ensure_account("work", "id", "g1").unwrap();
+    s.checkpoint("work", "INBOX", &snap(5, 5)).unwrap();
+    let none = BTreeMap::new();
+    let envelopes: Vec<_> = (1..=3).map(|u| env(u, &format!("m{u}"))).collect();
+    s.stage_with("work", "INBOX", 5, 3, &envelopes, "g1", true, &opts(&none))
+        .unwrap();
+    let mut ids = Vec::new();
+    for a in s.arrivals("work", None).unwrap() {
+        let raw = format!("Message-ID: <m{}@t>\r\nSubject: s\r\n\r\nbody", a.uid);
+        let msg = normalize::rfc822(raw.as_bytes(), 1000).unwrap();
+        s.attach("work", &a.message_id, &msg).unwrap();
+        s.ensure_placement("work", &a.message_id, &["INBOX".to_string()])
+            .unwrap();
+        ids.push(a.message_id);
+    }
+    // ids[0] stays known; ids[1] and ids[2] are absent; ids[2] is done.
+    for id in &ids[1..] {
+        let mut p = s.placement("work", id).unwrap().unwrap();
+        p.location_state = LocationState::Absent;
+        p.absent_since = Some(NOW.into());
+        assert!(s.save_placement(&p, None).unwrap());
+    }
+    s.review("work", &ids[2], true).unwrap();
+    let candidates: Vec<String> = s
+        .open_absent_placements("work")
+        .unwrap()
+        .into_iter()
+        .map(|p| p.message_id)
+        .collect();
+    assert_eq!(candidates, vec![ids[1].clone()]);
+}

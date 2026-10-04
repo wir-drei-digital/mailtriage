@@ -129,6 +129,24 @@ impl Store {
         Ok(rows)
     }
 
+    /// Done-inference candidates: `absent` placements whose message is still
+    /// `open` (a done one, explicit or inferred, is never re-checked).
+    pub fn open_absent_placements(&self, account: &str) -> Result<Vec<Placement>> {
+        let columns: Vec<String> = PLACEMENT_COLUMNS
+            .split(',')
+            .map(|c| format!("p.{c}"))
+            .collect();
+        let mut st = self.db.prepare(&format!(
+            "SELECT {} FROM placements p JOIN messages m ON m.id=p.message_id
+ WHERE p.account=? AND p.location_state='absent' AND m.review_state='open' ORDER BY p.message_id",
+            columns.join(",")
+        ))?;
+        let rows = st
+            .query_map([account], row_placement)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     /// Creates the placement of a fingerprinted message with an occurrence and
     /// no placement yet. Home: the first source folder by `sources` order, then
     /// lowest UID; else the lowest (folder, UID). Returns whether it created one.
