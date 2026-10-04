@@ -11,7 +11,7 @@ use crate::domain::{EngineConfig, MailboxSnapshot, SourceEnvelope};
 use anyhow::Result;
 use std::rc::Rc;
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct EngineCapabilities {
     pub move_supported: bool,
     /// COPYUID available.

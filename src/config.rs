@@ -214,22 +214,37 @@ pub fn validate(config: &AppConfig) -> Result<()> {
             bail!("account {name}: filing.max_actions_per_pass must be 1..=1000");
         }
         if account.filing.mode != FilingMode::Off {
-            let mut folders = std::collections::BTreeSet::new();
-            for cat in &account.categories {
-                let folder = cat.effective_folder();
-                if !valid_folder_name(folder) {
-                    bail!("account {name}: category {:?} needs a valid folder", cat.id);
-                }
-                if folder != "INBOX" && !folders.insert(folder.to_ascii_lowercase()) {
-                    bail!(
-                        "account {name}: category {:?} reuses another category's folder",
-                        cat.id
-                    );
-                }
+            if let Some((id, problem)) = folder_problems(account).first() {
+                bail!("account {name}: category {id:?} {problem}");
             }
         }
     }
     Ok(())
+}
+
+/// Categories whose effective folder breaks the filing rules, in category
+/// order: an invalid name, or a folder an earlier category already uses
+/// (compared case-insensitively; `INBOX` may repeat). Applies whatever the
+/// filing mode; `validate` enforces it only with filing on.
+pub fn invalid_folder_ids(account: &AccountConfig) -> Vec<String> {
+    folder_problems(account)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect()
+}
+
+fn folder_problems(account: &AccountConfig) -> Vec<(String, &'static str)> {
+    let mut folders = std::collections::BTreeSet::new();
+    let mut problems = Vec::new();
+    for cat in &account.categories {
+        let folder = cat.effective_folder();
+        if !valid_folder_name(folder) {
+            problems.push((cat.id.clone(), "needs a valid folder"));
+        } else if folder != "INBOX" && !folders.insert(folder.to_ascii_lowercase()) {
+            problems.push((cat.id.clone(), "reuses another category's folder"));
+        }
+    }
+    problems
 }
 
 /// A single printable-ASCII path segment, or the literal `INBOX` (stay in the source folder).

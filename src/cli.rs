@@ -1,8 +1,8 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{ArgGroup, Args, Parser, Subcommand};
 use mailtriage::{
     config,
-    domain::Category,
-    service::{ListOptions, Service, ServiceError},
+    domain::{Category, FilingMode},
+    service::{Backfill, ListOptions, RetryTarget, Service, ServiceError},
 };
 use serde_json::{json, Value};
 use std::{
@@ -50,6 +50,11 @@ enum Command {
     },
     Reclassify(ReclassifyArg),
     Export(AccountArg),
+    /// File classified mail into per-category IMAP folders.
+    Filing {
+        #[command(subcommand)]
+        command: FilingCommand,
+    },
 }
 
 #[derive(Args)]
@@ -153,6 +158,103 @@ struct ReclassifyArg {
     #[arg(long)]
     dry_run: bool,
     #[arg(long, default_value_t = 100, value_parser = parse_limit)]
+    limit: usize,
+}
+
+#[derive(Subcommand)]
+enum FilingCommand {
+    /// Mode, folders, intents, blocks and the last pass; no mailbox access.
+    Status(AccountArg),
+    /// Give every category a folder, validate, and set the filing mode.
+    Enable(EnableArg),
+    /// Set the filing mode to off.
+    Disable(AccountArg),
+    /// Preview what the next pass would create, move and flag.
+    Plan(PlanArg),
+    /// Make existing inbox mail eligible for filing once.
+    Backfill(BackfillArg),
+    /// Keep a message in its source folder.
+    Pin(IdArg),
+    /// Let automatic filing apply to a pinned message again, once.
+    Unpin(IdArg),
+    /// Lift a message block, a folder pause, or requeue an unresolved arrival.
+    Retry(RetryArg),
+    /// Mark a reviewed unresolved arrival dismissed.
+    Dismiss(ArrivalArg),
+    /// Confirm an existing folder whose role could not be verified.
+    Adopt(FolderArg),
+    /// Recent filing events, newest first.
+    Log(LogArg),
+}
+
+#[derive(Args)]
+struct EnableArg {
+    #[arg(long)]
+    account: String,
+    #[arg(long, value_parser = ["dry-run", "live"])]
+    mode: String,
+}
+
+#[derive(Args)]
+struct PlanArg {
+    #[arg(long)]
+    account: String,
+    #[arg(long, default_value_t = 50, value_parser = parse_limit)]
+    limit: usize,
+}
+
+#[derive(Args)]
+#[command(group(ArgGroup::new("scope").required(true).args(["days", "all"])))]
+struct BackfillArg {
+    #[arg(long)]
+    account: String,
+    /// Mail received within the last N days (1..=3650).
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=3650))]
+    days: Option<u32>,
+    /// All mail in the source folders.
+    #[arg(long)]
+    all: bool,
+    /// Make the matched mail eligible (requires filing mode live).
+    #[arg(long)]
+    apply: bool,
+}
+
+#[derive(Args)]
+#[command(group(ArgGroup::new("target").required(true).args(["id", "folder", "arrival"])))]
+struct RetryArg {
+    #[arg(long)]
+    account: String,
+    #[arg(long)]
+    id: Option<String>,
+    #[arg(long)]
+    folder: Option<String>,
+    #[arg(long, value_parser = clap::value_parser!(i64).range(1..))]
+    arrival: Option<i64>,
+}
+
+#[derive(Args)]
+struct ArrivalArg {
+    #[arg(long)]
+    account: String,
+    #[arg(long, value_parser = clap::value_parser!(i64).range(1..))]
+    arrival: i64,
+}
+
+#[derive(Args)]
+struct FolderArg {
+    #[arg(long)]
+    account: String,
+    #[arg(long)]
+    folder: String,
+}
+
+#[derive(Args)]
+struct LogArg {
+    #[arg(long)]
+    account: String,
+    #[arg(long)]
+    id: Option<String>,
+    #[arg(long, default_value_t = 50, value_parser = parse_limit)]
     limit: usize,
 }
 
@@ -365,7 +467,47 @@ fn execute(cli: &Cli) -> Result<Value, CliError> {
         Command::Export(arg) => open(&cli.config)?
             .export(&arg.account)
             .map_err(service_error),
+        Command::Filing { command } => filing(&cli.config, command),
     }
+}
+
+fn filing(config: &Path, command: &FilingCommand) -> Result<Value, CliError> {
+    let mut service = open(config)?;
+    match command {
+        FilingCommand::Status(arg) => service.filing_status(&arg.account),
+        FilingCommand::Enable(arg) => {
+            let mode = if arg.mode == "live" {
+                FilingMode::Live
+            } else {
+                FilingMode::DryRun
+            };
+            service.filing_enable(&arg.account, mode)
+        }
+        FilingCommand::Disable(arg) => service.filing_disable(&arg.account),
+        FilingCommand::Plan(arg) => service.filing_plan(&arg.account, arg.limit),
+        FilingCommand::Backfill(arg) => {
+            let scope = match arg.days {
+                Some(days) => Backfill::Days(days),
+                None => Backfill::All,
+            };
+            service.filing_backfill(&arg.account, scope, arg.apply)
+        }
+        FilingCommand::Pin(arg) => service.filing_pin(&arg.account, &arg.id),
+        FilingCommand::Unpin(arg) => service.filing_unpin(&arg.account, &arg.id),
+        FilingCommand::Retry(arg) => {
+            let target = match (&arg.id, &arg.folder, arg.arrival) {
+                (Some(id), _, _) => RetryTarget::Message(id.clone()),
+                (_, Some(folder), _) => RetryTarget::Folder(folder.clone()),
+                (_, _, Some(arrival)) => RetryTarget::Arrival(arrival),
+                _ => return Err(CliError::input("specify --id, --folder or --arrival")),
+            };
+            service.filing_retry(&arg.account, target)
+        }
+        FilingCommand::Dismiss(arg) => service.filing_dismiss(&arg.account, arg.arrival),
+        FilingCommand::Adopt(arg) => service.filing_adopt(&arg.account, &arg.folder),
+        FilingCommand::Log(arg) => service.filing_log(&arg.account, arg.id.as_deref(), arg.limit),
+    }
+    .map_err(service_error)
 }
 
 fn read_input(path: &Path, max_bytes: usize) -> Result<Vec<u8>, CliError> {

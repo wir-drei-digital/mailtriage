@@ -2,7 +2,7 @@
 
 `mailtriage` is a local CLI that classifies mail by urgency, category, and whether the recipient needs to act. It stores results in SQLite so listing and reading work offline. Himalaya supplies IMAP messages; the provider is either an explicit offline fake or OpenRouter Decisions.
 
-The first release handles one configured account namespace at a time. It does not send, move, delete, or mark server messages as read. `done` changes only the local review state.
+The first release handles one configured account namespace at a time. It never sends, deletes, or marks server messages as read. It moves mail and adds `\Flagged` only for an account that enables [filing into folders](#filing-into-folders); otherwise `done` changes only the local review state.
 
 ## Build
 
@@ -62,7 +62,7 @@ Category files may contain a JSON array or an object with a `categories` array. 
 
 ## Himalaya and OpenRouter
 
-Set up Himalaya v2.1.0 separately, then add `himalaya` to the target account in `mailtriage.json`. Set `binary`, `config`, `account`, `mailboxes`, `expected_version`, `timeout_seconds`, and `max_output_bytes`. The adapter requires IMAP UID and UIDVALIDITY support and checks the binary version in `doctor`. It does not invoke Himalaya's setup wizard.
+Set up Himalaya v2.1.0 separately, then add an `engine` object with `"kind": "himalaya"` to the target account in `mailtriage.json` (an older `himalaya` block is still read, and is written back as `engine` when mailtriage saves the config). Set `binary`, `config`, `account`, `mailboxes`, `expected_version`, `timeout_seconds`, and `max_output_bytes`. The adapter requires IMAP UID and UIDVALIDITY support and checks the binary version in `doctor`. It does not invoke Himalaya's setup wizard.
 
 ```sh
 mailtriage doctor --account work --json
@@ -75,6 +75,40 @@ mailtriage watch --account work --limit 100 --interval-seconds 60 --json
 OpenRouter requires an explicit `provider.kind` of `openrouter`, a verified Decisions endpoint, a model ID, and the name of an environment variable containing the API key. Put the key in that environment variable, never in the config. Verify a synthetic call and evaluate thresholds with labeled mail before disabling review mode. The tool does not silently fall back to a different provider.
 
 The SQLite database and normalized message text under `state_dir` are authoritative private data. Stop the worker before copying this directory (including any SQLite WAL files), and keep a JSON export; losing the database loses user corrections and Done state. Raw attachments are not retained by default. The state directory is intended for one local owner and should not be shared over a network filesystem. See [the Hermes guide](docs/hermes.md) for headless use and [the design](docs/design.md) for the full behavior contract.
+
+## Filing into folders
+
+Filing makes the classification visible in every mail client: each classified message in a source folder (the engine's `mailboxes`, usually `INBOX`) is moved into a top-level folder named after its category (or the category's `folder`), and mail that needs action or is urgent gets `\Flagged`, so the inbox stays empty without a new mail app. It is off by default and is enabled per account.
+
+```sh
+mailtriage filing enable --account work --mode dry-run --json
+mailtriage filing plan --account work --json
+mailtriage filing enable --account work --mode live --json
+mailtriage filing backfill --account work --days 30 --json
+mailtriage filing backfill --account work --days 30 --apply --json
+mailtriage filing status --account work --json
+mailtriage filing log --account work --limit 50 --json
+```
+
+`filing.mode` has three values. `off` (the default) leaves the mailbox exactly as before. `dry_run` watches the category folders and plans every pass without writing anything: no folder is created and no message is moved or flagged; each `sync` reports how many moves and flags it would make under `filing.planned`, and `filing plan` lists them. `live` creates and subscribes the category folders, moves mail and adds flags. `filing enable` and `filing disable` write `filing.mode` under the configuration lock; the change takes effect at the next pass. The account needs a mail engine; `enable` refuses without one.
+
+Recommended rollout: `filing enable --mode dry-run`, keep `watch` (or scheduled `sync`) running, and check `filing plan` and the `sync` summaries for a few days. Then `filing enable --mode live`. Only mail that arrives after filing was enabled is filed automatically. To file older mail, preview it with `filing backfill (--days N | --all)` and repeat with `--apply`, which requires `live` and makes each listed message eligible once; `--days` uses the server's internal date. Moves happen over the following passes, at most `filing.max_actions_per_pass` (default 200) per pass. Mail that arrives while filing is off counts as older mail when filing is enabled again.
+
+`filing enable` gives every category without one an explicit `folder` (its current name), so renaming a category later never moves its folder; `categories apply` with filing on keeps each category's folder the same way. A folder must be a single segment of printable ASCII, at most 200 bytes, without `/ . * % " \ &` and not starting with `-`, and unique among the categories (ignoring case). A category whose `folder` is the literal `INBOX` stays in its source folder. Invalid folders are refused as `categories need a valid folder: <ids>`. A server's personal namespace prefix (for example `INBOX.`) is added automatically. An existing folder with the category's name is adopted when the server reports it has no special role; when the server cannot report roles it waits for `filing adopt --folder NAME`. Folders with a special role (Sent, Trash, Junk, Archive, All Mail and the like, or such names) are never used, and a deleted category folder is not recreated. `filing status` lists such categories under `paused_categories`.
+
+A message is moved automatically at most once, only out of a source folder, and only on a current classification (made under the current categories, provider and policy, and not from incomplete input) or your category correction. Review mode does not hold filing back. `\Flagged` is added once when the effective decision is `action_required` or `high` urgency, and only to new, backfilled or already filed mail. If the message already carries `\Flagged`, that counts as the attempt, so unflagging it later in a client is respected. Set `filing.flag` to `false` to disable flags.
+
+You correct filing from any mail client. Moving a message into another category's folder is a category correction, exactly like `correct --category`. Moving it back to a source folder pins it there: it is not filed again until `filing unpin --id ID`. Moving a message into its own category's folder keeps it there and drops any pin. With filing on, `correct --category` (or clearing the correction) moves the mail to the resulting category's folder. `filing pin --id ID` keeps a message in its source folder, moving it back if it was filed. Mail delivered straight into a category folder (for example by a server rule) is recorded as filed by you in that category.
+
+Archiving or deleting a message in a client means done: once it is gone from every watched folder, a later pass that has fully scanned every watched folder, with no paused folder and no unidentified arrival outstanding, marks it done locally (`list --view all` shows it with `review_state` `done`). If it comes back, that inferred done is reopened. A message you marked done yourself is never reopened by observation.
+
+`filing status` makes no mailbox calls. It reports the configured and stored mode, `enabled_at`, the server's MOVE, UIDPLUS and SPECIAL-USE support from the last pass, every folder with its state, pause and subscription, paused categories, intents by state, counts of `blocked` and `quarantined` messages, `ambiguous` locations, `unresolved_arrivals` (listed under `unresolved_arrival_items`), `eligible_unfiled` mail, `stale_requests` (requests for a category that no longer exists; correct or unpin them), alias conflicts, and the last pass summary. `filing log` lists filing events newest first, optionally for one message with `--id`. `list` and `read` items carry a `placement` object (folder, location state, who filed it, pin, flag, block and pending move). `doctor` adds a `filing` block with the server's capabilities, folders and problems when filing is on.
+
+Safety rules: mailtriage never deletes or expunges mail, never removes a flag, never changes read state (`\Seen`), and never renames or deletes a folder. It writes only on servers with the IMAP MOVE extension; there is no copy-and-delete fallback. Every move and flag is journaled before it is sent and is resolved by observation after a failure or crash. If a write may have run against a recreated mailbox, mailtriage reverts it where the server reported where the mail went, otherwise it pauses that folder and quarantines the mail that arrived; nothing is written to a paused folder or a blocked message until you act. After checking the folder, `filing retry --folder NAME` releases a pause and rescans it; `filing retry --id ID` lifts a message's `move_failed`, `duplicate_copy` or `quarantined` block; an arrival that could not be identified is refetched with `filing retry --arrival N` or marked reviewed with `filing dismiss --arrival N`, and either lifts a merge-conflict block it caused. A Himalaya mailbox alias that points a watched folder elsewhere stops that folder's discovery and fetches and all filing writes until it is fixed. A change to the Himalaya configuration during a pass, or to `mailtriage.json` before the pass writes, aborts the pass with exit code 5; the next pass uses the new configuration.
+
+Provider check: before you run `live` on a real mailbox, the live provider check in the [filing design](docs/superpowers/specs/2026-10-04-imap-category-filing-design.md#live-provider-check) must have recorded a go for your provider (Gmail / Google Workspace, Microsoft 365 / Outlook.com, iCloud, Fastmail / Dovecot) in [the verification receipt](docs/verification.md). No provider has been checked yet, so use `dry_run` until yours is; a no-go will be listed here.
+
+Filing commands use the usual exit codes: 0 for success; 2 for invalid input or config (no mail engine, invalid folders, `backfill --apply` outside `live`, an unknown folder or message, an arrival that is not unresolved); 3 for an operational failure; 4 for a partial sync, which any filing error in a pass causes; and 5 for a conflict (the configuration changed during the command or pass, a placement changed concurrently, a message whose identity is not yet established, or a changed account binding).
 
 ## Current verification boundary
 

@@ -26,6 +26,13 @@ desktop UI, cross-device synchronization or server hosting. Later backends can
 implement the same source contract; Himalaya supporting a backend does not
 automatically mean this adapter has tested it.
 
+2026-10-04: accounts that enable filing (`filing enable`) lift the "no moving"
+boundary: mailtriage then creates category folders, moves mail into them and
+adds `\Flagged`, as specified in
+[IMAP category filing](superpowers/specs/2026-10-04-imap-category-filing-design.md).
+Accounts with `filing.mode` `off` (the default) behave as described here, and
+the rest of this design remains in force for every account.
+
 ## Public mental model
 
 ```text

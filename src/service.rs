@@ -3,21 +3,23 @@ use crate::{
     domain::*,
     engine::{self, himalaya::source_binding, MailEngine},
     filing::{
-        self, arrivals,
-        observe::{self, FolderMap, WatchRole, WatchSpec},
+        self, arrivals, inputs,
+        observe::{self, FolderMap, OfflineEngine, WatchRole, WatchSpec},
+        planner::{self, Plan},
         transitions::{self, Transition},
-        FilingSummary, Intent, LocationState, PassContext, Placement, StageOptions,
+        FilingSummary, FilingWrite, FolderRecord, Intent, LocationState, PassContext, Placement,
+        StageOptions,
     },
     normalize, policy, provider,
     store::{now, Record, Store},
 };
 use anyhow::{anyhow, Result};
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use fs2::FileExt;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fmt,
     fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
@@ -64,6 +66,25 @@ impl Default for ListOptions {
         }
     }
 }
+/// `filing backfill` scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backfill {
+    /// Mail whose hydrated internal date lies within the last N days (1..=3650).
+    Days(u32),
+    All,
+}
+
+/// What `filing retry` lifts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RetryTarget {
+    /// A message's `move_failed`, `duplicate_copy` or `quarantined` block.
+    Message(String),
+    /// A folder's safety pause.
+    Folder(String),
+    /// An unresolved arrival: its fetch is requeued.
+    Arrival(i64),
+}
+
 pub struct Service {
     pub config: AppConfig,
     path: PathBuf,
@@ -213,9 +234,28 @@ impl Service {
                 json!({"configured":true,"ready":false,"error":"Himalaya version/config check failed"})
             }
         };
-        Ok(
-            json!({"schema_version":1,"account":name,"ready":provider_valid&&key_present&&transport["ready"]==true,"provider":{"kind":self.config.provider.kind,"model":self.config.provider.model,"configuration_valid":provider_valid,"key_present":key_present},"transport":transport,"review_mode":self.config.policy.review_mode,"state_dir":self.config.state_dir,"live_checks_performed":false,"coverage":self.coverage(name)?}),
-        )
+        let mut out = json!({"schema_version":1,"account":name,"ready":provider_valid&&key_present&&transport["ready"]==true,"provider":{"kind":self.config.provider.kind,"model":self.config.provider.model,"configuration_valid":provider_valid,"key_present":key_present},"transport":transport,"review_mode":self.config.policy.review_mode,"state_dir":self.config.state_dir,"live_checks_performed":false,"coverage":self.coverage(name)?});
+        if let Some(filing) = self.doctor_filing(&account) {
+            out["filing"] = filing;
+        }
+        Ok(out)
+    }
+    /// `doctor`'s filing block with filing on and an engine configured, from
+    /// read-only engine calls; a failed check is reported, never raised.
+    fn doctor_filing(&self, account: &AccountConfig) -> Option<Value> {
+        if account.filing.mode == FilingMode::Off {
+            return None;
+        }
+        let report = match self.engine(account) {
+            Ok(None) => return None,
+            Ok(Some(engine)) => observe::engine_report(engine.as_ref(), account),
+            Err(e) => Err(e),
+        };
+        let mut report = report.unwrap_or_else(|_| {
+            json!({"move_supported":null,"uidplus":null,"special_use":null,"personal_prefix":null,"alias_conflicts":[],"folders":[],"problems":["engine_check_failed"]})
+        });
+        report["mode"] = json!(filing::mode_str(account.filing.mode));
+        Some(report)
     }
     pub fn classify(&mut self, name: &str, bytes: &[u8], format: &str) -> Result<Value> {
         let _lock = self.lock(name)?;
@@ -1007,6 +1047,281 @@ impl Service {
         transitions::apply_transition(&mut self.store, name, &row.id, t, &sources, &now())?;
         self.read(name, &row.id)
     }
+    /// `filing unpin`: automatic filing applies again, once.
+    pub fn filing_unpin(&mut self, name: &str, id: &str) -> Result<Value> {
+        self.placement_command(name, id, Transition::Unpin)
+    }
+    /// `filing retry`: lifts a message's block or quarantine, releases a
+    /// folder's safety pause (scheduling a rescan of it), or requeues an
+    /// unresolved arrival's fetch.
+    pub fn filing_retry(&mut self, name: &str, target: RetryTarget) -> Result<Value> {
+        match target {
+            RetryTarget::Message(id) => self.placement_command(name, &id, Transition::Retry),
+            RetryTarget::Folder(folder) => {
+                let _config_lock = self.shared_config_lock()?;
+                self.require_unchanged()?;
+                self.ensure(name)?;
+                transitions::release_folder(&mut self.store, name, &folder, &now())?;
+                self.folder_result(name, &folder)
+            }
+            RetryTarget::Arrival(arrival) => {
+                let _config_lock = self.shared_config_lock()?;
+                self.require_unchanged()?;
+                let (_, generation) = self.ensure(name)?;
+                transitions::retry_arrival(&mut self.store, name, arrival, &generation, &now())?;
+                self.arrival_result(name, arrival)
+            }
+        }
+    }
+    /// `filing dismiss`: a reviewed unresolved arrival stops holding done
+    /// inference, and a merge-conflict block it caused is lifted.
+    pub fn filing_dismiss(&mut self, name: &str, arrival: i64) -> Result<Value> {
+        let _config_lock = self.shared_config_lock()?;
+        self.require_unchanged()?;
+        self.ensure(name)?;
+        transitions::dismiss_arrival(&mut self.store, name, arrival, &now())?;
+        self.arrival_result(name, arrival)
+    }
+    /// `filing adopt`: confirms an existing folder whose role could not be
+    /// verified; the next pass makes it `ok`.
+    pub fn filing_adopt(&mut self, name: &str, folder: &str) -> Result<Value> {
+        let _config_lock = self.shared_config_lock()?;
+        self.require_unchanged()?;
+        self.ensure(name)?;
+        transitions::adopt_folder(&mut self.store, name, folder, &now())?;
+        self.folder_result(name, folder)
+    }
+    fn folder_result(&self, name: &str, folder: &str) -> Result<Value> {
+        Ok(
+            json!({"schema_version":1,"account":name,"ok":true,"folder":self.store.folder_record(name, folder)?}),
+        )
+    }
+    fn arrival_result(&self, name: &str, arrival: i64) -> Result<Value> {
+        Ok(
+            json!({"schema_version":1,"account":name,"ok":true,"arrival":self.store.arrival(name, arrival)?}),
+        )
+    }
+    /// `filing log`: filing events, newest first, optionally of one message.
+    pub fn filing_log(&mut self, name: &str, id: Option<&str>, limit: usize) -> Result<Value> {
+        if !(1..=500).contains(&limit) {
+            return Err(err(2, "log limit must be 1..=500"));
+        }
+        self.ensure(name)?;
+        let id = id
+            .map(|id| self.required(name, id))
+            .transpose()?
+            .map(|r| r.id);
+        let items = self.store.events(name, id.as_deref(), limit)?;
+        Ok(json!({"schema_version":1,"account":name,"items":items}))
+    }
+    /// `filing enable`: gives every category without one an explicit folder
+    /// (its name), validates the folders and writes the mode, under the
+    /// exclusive configuration lock. Idempotent.
+    pub fn filing_enable(&mut self, name: &str, mode: FilingMode) -> Result<Value> {
+        if mode == FilingMode::Off {
+            return Err(err(2, "filing enable needs mode dry_run or live"));
+        }
+        if self.account(name)?.engine_config().is_none() {
+            return Err(err(2, "account has no mail engine configured"));
+        }
+        let _lock = self.exclusive_config_lock()?;
+        self.require_unchanged()?;
+        self.ensure(name)?;
+        self.write_filing_mode(name, mode)
+    }
+    /// `filing disable`: writes mode `off`; the next pass stops filing.
+    pub fn filing_disable(&mut self, name: &str) -> Result<Value> {
+        let _lock = self.exclusive_config_lock()?;
+        self.require_unchanged()?;
+        self.write_filing_mode(name, FilingMode::Off)
+    }
+    /// Edits the configuration as stored (relative paths stay relative); an
+    /// unchanged configuration is not rewritten.
+    fn write_filing_mode(&mut self, name: &str, mode: FilingMode) -> Result<Value> {
+        let stored = config::load(&self.path).map_err(|_| err(2, "invalid configuration"))?;
+        let mut updated = stored.clone();
+        let a = updated
+            .accounts
+            .get_mut(name)
+            .ok_or_else(|| err(2, "unknown account"))?;
+        if mode != FilingMode::Off {
+            for c in a.categories.iter_mut().filter(|c| c.folder.is_none()) {
+                c.folder = Some(c.name.clone());
+            }
+        }
+        a.filing.mode = mode;
+        validate_edit(&updated, name)?;
+        if serde_json::to_value(&updated)? != serde_json::to_value(&stored)? {
+            config::save(&self.path, &updated)?;
+            self.config_bytes_hash = hash(&fs::read(&self.path)?);
+            resolve_paths(&mut updated, &self.path);
+            self.config = updated;
+        }
+        let account = self.account(name)?;
+        let folders: serde_json::Map<String, Value> = account
+            .categories
+            .iter()
+            .map(|c| (c.id.clone(), json!(c.effective_folder())))
+            .collect();
+        Ok(
+            json!({"schema_version":1,"account":name,"mode":filing::mode_str(mode),"folders":folders}),
+        )
+    }
+    /// `filing status`: configuration and stored state only, no engine calls.
+    pub fn filing_status(&mut self, name: &str) -> Result<Value> {
+        let (account, _) = self.ensure(name)?;
+        let state = self.store.filing_state(name)?;
+        let map = observe::offline_map(&self.store, name, &account)?;
+        let folders = self.store.folder_records(name)?;
+        let sources = sources_of(&account);
+        let mut intents = BTreeMap::<String, usize>::new();
+        for intent in self.store.intents(name, false)? {
+            *intents.entry(intent.state).or_default() += 1;
+        }
+        let (mut blocked, mut quarantined, mut ambiguous, mut eligible) = (0, 0, 0, 0);
+        let mut stale = Vec::new();
+        for (_, p, meta) in self.store.records_for_planning(name)? {
+            match p.blocked_reason.as_deref() {
+                Some("quarantined") => quarantined += 1,
+                Some(_) => blocked += 1,
+                None => {}
+            }
+            if p.location_state == LocationState::Ambiguous {
+                ambiguous += 1;
+            }
+            if unfiled_in_source(&p, &sources)
+                && !p.pinned
+                && (p.eligible_once || inputs::is_new(&p, &meta, state.enabled_at.as_deref()))
+            {
+                eligible += 1;
+            }
+            // The planner leaves a request for a removed category pending.
+            if p.desired_target
+                .as_deref()
+                .is_some_and(|t| t != "@source" && !account.categories.iter().any(|c| c.id == t))
+            {
+                stale.push(p.message_id);
+            }
+        }
+        let unresolved = self.store.arrivals(name, Some("unresolved"))?;
+        let last_pass = state.last_pass.clone().unwrap_or(Value::Null);
+        Ok(json!({
+            "schema_version": 1,
+            "account": name,
+            "mode": filing::mode_str(account.filing.mode),
+            "engine_configured": account.engine_config().is_some(),
+            "state_mode": state.mode,
+            "enabled_at": state.enabled_at,
+            "bootstrap_done": state.bootstrap_done,
+            "capabilities": last_pass.get("capabilities").cloned().unwrap_or(Value::Null),
+            "folders": folders,
+            "paused_categories": paused_categories(&account, &map, &folders),
+            "intents": intents,
+            "blocked": blocked,
+            "quarantined": quarantined,
+            "ambiguous": ambiguous,
+            "unresolved_arrivals": unresolved.len(),
+            "unresolved_arrival_items": &unresolved[..unresolved.len().min(LISTED)],
+            "eligible_unfiled": eligible,
+            "stale_requests": {"count": stale.len(), "ids": &stale[..stale.len().min(LISTED)]},
+            "alias_conflicts": map.alias_conflicts,
+            "problems": last_pass.get("problems").cloned().unwrap_or(json!([])),
+            "last_pass": last_pass,
+        }))
+    }
+    /// `filing plan`: the planner over stored state as a preview, with the
+    /// offline folder map; read-only, no engine calls. Empty with filing off.
+    pub fn filing_plan(&mut self, name: &str, limit: usize) -> Result<Value> {
+        if !(1..=500).contains(&limit) {
+            return Err(err(2, "plan limit must be 1..=500"));
+        }
+        let (account, generation) = self.ensure(name)?;
+        let mode = filing_mode(&account);
+        let plan = if mode == FilingMode::Off {
+            Plan::default()
+        } else {
+            let map = observe::offline_map(&self.store, name, &account)?;
+            let no_binding_check = || -> Result<()> { Ok(()) };
+            let ctx = PassContext {
+                account: name,
+                cfg: &account,
+                engine: &OfflineEngine,
+                mode,
+                generation: &generation,
+                now: now(),
+                max_attempts: self.config.policy.max_attempts,
+                verify_binding: &no_binding_check,
+            };
+            planner::plan(&inputs::plan_input(&self.store, &ctx, &map, true)?)
+        };
+        let shown = &plan.actions[..plan.actions.len().min(limit)];
+        Ok(
+            json!({"schema_version":1,"account":name,"mode":filing::mode_str(mode),"folders_to_create":plan.folders_to_create,"actions":shown,"total":plan.actions.len()}),
+        )
+    }
+    /// `filing backfill`: placements homed in a source folder that are
+    /// unfiled, unpinned, unblocked and not yet eligible once; with `apply`
+    /// (mode `live` only) each becomes eligible once in one transaction.
+    pub fn filing_backfill(&mut self, name: &str, scope: Backfill, apply: bool) -> Result<Value> {
+        let since = match scope {
+            Backfill::All => None,
+            Backfill::Days(days) if (1..=3650).contains(&days) => {
+                Some(Utc::now() - Duration::days(days.into()))
+            }
+            Backfill::Days(_) => return Err(err(2, "backfill days must be 1..=3650")),
+        };
+        if !apply {
+            let (account, _) = self.ensure(name)?;
+            let ids: Vec<String> =
+                backfill_candidates(&self.store, name, &sources_of(&account), since)?
+                    .into_iter()
+                    .map(|p| p.message_id)
+                    .collect();
+            return Ok(
+                json!({"schema_version":1,"account":name,"matched":ids.len(),"items":&ids[..ids.len().min(LISTED)]}),
+            );
+        }
+        let _config_lock = self.shared_config_lock()?;
+        self.require_unchanged()?;
+        let (account, _) = self.ensure(name)?;
+        if filing_mode(&account) != FilingMode::Live {
+            return Err(err(2, "backfill --apply requires filing mode live"));
+        }
+        let sources = sources_of(&account);
+        let scope = match scope {
+            Backfill::All => json!("all"),
+            Backfill::Days(days) => json!({ "days": days }),
+        };
+        for _ in 0..5 {
+            let read = backfill_candidates(&self.store, name, &sources, since)?;
+            if read.is_empty() {
+                return Ok(json!({"schema_version":1,"account":name,"applied":0}));
+            }
+            let changed: Vec<Placement> = read
+                .iter()
+                .map(|p| Placement {
+                    eligible_once: true,
+                    desired_rev: p.desired_rev + 1,
+                    ..p.clone()
+                })
+                .collect();
+            let mut writes: Vec<FilingWrite> = read
+                .iter()
+                .zip(&changed)
+                .map(|(read, placement)| FilingWrite::PlacementFrom { placement, read })
+                .collect();
+            writes.push(FilingWrite::Event {
+                message_id: None,
+                folder: None,
+                kind: "backfill",
+                detail: json!({"scope": scope, "applied": read.len()}),
+            });
+            if self.store.commit_filing(name, &writes, &now())? {
+                return Ok(json!({"schema_version":1,"account":name,"applied":read.len()}));
+            }
+        }
+        Err(err(5, "placements changed concurrently; retry"))
+    }
     pub fn review(&mut self, name: &str, id: &str, done: bool) -> Result<Value> {
         let (_, generation) = self.ensure(name)?;
         let row = self.required(name, id)?;
@@ -1024,7 +1339,8 @@ impl Service {
             json!({"schema_version":1,"account":name,"taxonomy_revision":account.taxonomy_revision,"categories":account.categories}),
         )
     }
-    pub fn apply_categories(&mut self, name: &str, categories: Vec<Category>) -> Result<Value> {
+    /// The exclusive configuration lock of a command that edits the file.
+    fn exclusive_config_lock(&self) -> Result<File> {
         let lock = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -1033,9 +1349,25 @@ impl Service {
             .open(self.path.with_extension("lock"))?;
         lock.try_lock_exclusive()
             .map_err(|_| err(5, "configuration is being edited"))?;
+        Ok(lock)
+    }
+    /// With filing on, a category without `folder` keeps the folder its id
+    /// had before (a rename does not move its folder); a new one uses its name.
+    pub fn apply_categories(&mut self, name: &str, categories: Vec<Category>) -> Result<Value> {
+        let _lock = self.exclusive_config_lock()?;
         self.require_unchanged()?;
         self.ensure(name)?;
         let previous = self.account(name)?;
+        let mut categories = categories;
+        if previous.filing.mode != FilingMode::Off {
+            for c in categories.iter_mut().filter(|c| c.folder.is_none()) {
+                let folder = match previous.categories.iter().find(|p| p.id == c.id) {
+                    Some(before) => before.effective_folder().to_string(),
+                    None => c.name.clone(),
+                };
+                c.folder = Some(folder);
+            }
+        }
         let ids: BTreeSet<_> = categories.iter().map(|c| c.id.as_str()).collect();
         for row in self.store.metadata_records(name)? {
             if let Some(id) = row.overrides["category_id"].as_str() {
@@ -1058,12 +1390,7 @@ impl Service {
                 .checked_add(1)
                 .ok_or_else(|| err(2, "taxonomy revision overflow"))?;
         }
-        config::validate(&updated).map_err(|_| {
-            err(
-                2,
-                "invalid categories; require unique IDs, descriptions and exactly one catch-all",
-            )
-        })?;
+        validate_edit(&updated, name)?;
         config::save(&self.path, &updated)?;
         self.config_bytes_hash = hash(&fs::read(&self.path)?);
         self.config = updated;
@@ -1260,6 +1587,96 @@ fn sources_of(account: &AccountConfig) -> Vec<String> {
         .engine_config()
         .map(|e| e.mailboxes().to_vec())
         .unwrap_or_default()
+}
+
+/// At most this many ids or rows in a filing listing (`status`, `backfill`).
+const LISTED: usize = 50;
+
+/// The filing mode a pass would run: the configured one, `off` without an engine.
+fn filing_mode(account: &AccountConfig) -> FilingMode {
+    match account.engine_config() {
+        Some(_) => account.filing.mode,
+        None => FilingMode::Off,
+    }
+}
+
+/// `config::validate` for an edited configuration. With filing on, folder
+/// problems name the categories that need a valid folder.
+fn validate_edit(updated: &AppConfig, name: &str) -> Result<()> {
+    config::validate(updated).map_err(|_| {
+        let account = &updated.accounts[name];
+        let ids = if account.filing.mode == FilingMode::Off {
+            vec![]
+        } else {
+            config::invalid_folder_ids(account)
+        };
+        if ids.is_empty() {
+            err(
+                2,
+                "invalid categories; require unique IDs, descriptions and exactly one catch-all",
+            )
+        } else {
+            err(
+                2,
+                format!("categories need a valid folder: {}", ids.join(", ")),
+            )
+        }
+    })
+}
+
+/// Known in a source folder and never filed.
+fn unfiled_in_source(p: &Placement, sources: &[String]) -> bool {
+    p.location_state == LocationState::Known
+        && p.filed_at.is_none()
+        && p.home_folder.as_ref().is_some_and(|h| sources.contains(h))
+}
+
+/// What `filing backfill` would make eligible: unfiled placements in a source
+/// folder, not pinned, not blocked and not already eligible once (so a repeated
+/// apply changes nothing); with `since`, only mail whose hydrated internal
+/// date is at or after it. In message id order.
+fn backfill_candidates(
+    store: &Store,
+    name: &str,
+    sources: &[String],
+    since: Option<DateTime<Utc>>,
+) -> Result<Vec<Placement>> {
+    Ok(store
+        .records_for_planning(name)?
+        .into_iter()
+        .filter(|(_, p, meta)| {
+            unfiled_in_source(p, sources)
+                && !p.pinned
+                && p.blocked_reason.is_none()
+                && !p.eligible_once
+                && since.is_none_or(|since| inputs::dated_since(meta, since))
+        })
+        .map(|(_, p, _)| p)
+        .collect())
+}
+
+/// Categories filed outside `INBOX` whose folder cannot receive mail now: its
+/// native name collides with a source, or its recorded folder is not `ok` or
+/// is under a safety pause. A folder never recorded is not paused; a pass
+/// creates it.
+fn paused_categories(
+    account: &AccountConfig,
+    map: &FolderMap,
+    folders: &[FolderRecord],
+) -> Vec<String> {
+    account
+        .categories
+        .iter()
+        .filter(|c| c.effective_folder() != "INBOX")
+        .filter(|c| match map.native_for(&c.id) {
+            None => true,
+            Some(native) => folders
+                .iter()
+                .find(|r| r.native == native)
+                .is_some_and(|r| r.state != "ok" || r.pause_reason.is_some()),
+        })
+        .map(|c| c.id.clone())
+        .collect()
 }
 
 /// Discovery inputs shared by every watched folder of one pass.

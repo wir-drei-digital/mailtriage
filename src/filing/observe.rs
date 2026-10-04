@@ -1,13 +1,14 @@
 //! Observation steps of a filing pass (spec "Sync pass order", "Folders",
 //! "Identity and placements"): folder resolution and the watch list, the
 //! discovery options of watched folders, rescan completion, bootstrap and
-//! hydration.
+//! hydration; and, outside a pass, the offline folder map of `filing plan` /
+//! `filing status` and `doctor`'s read-only folder report.
 use super::{
     is_config_changed, planner::CategoryFolder, FilingSummary, FolderRecord, HydrationBatch,
     Intent, PassContext, RescanFilter,
 };
-use crate::domain::{AccountConfig, FilingMode};
-use crate::engine::{EngineCapabilities, FolderInfo};
+use crate::domain::{AccountConfig, FilingMode, MailboxSnapshot, SourceEnvelope};
+use crate::engine::{EngineCapabilities, FolderInfo, MailEngine, WriteOutcome};
 use crate::store::Store;
 use anyhow::Result;
 use serde_json::json;
@@ -107,6 +108,7 @@ pub fn resolve_folders(
     summary: &mut FilingSummary,
 ) -> Result<FolderMap> {
     let caps = ctx.engine.capabilities()?;
+    summary.capabilities = Some(caps.clone());
     let mut map = FolderMap {
         sources: sources_of(ctx.cfg),
         writes_allowed: ctx.mode == FilingMode::Live && caps.move_supported,
@@ -162,6 +164,161 @@ pub fn resolve_folders(
     Ok(map)
 }
 
+/// The folder map from stored folder records and the configuration only (no
+/// engine calls), for `filing plan` and `filing status`. Native names use the
+/// personal prefix of the last pass (`""` before any); a category without a
+/// usable record (never recorded, or a create that failed) would be created
+/// by a live pass, as rule 4 decides, unless its name is denylisted.
+/// `listed` holds the recorded folders not known to be missing, `caps` and
+/// `alias_conflicts` come from the last pass, nothing is watched and writes
+/// are never allowed.
+pub fn offline_map(store: &Store, account: &str, cfg: &AccountConfig) -> Result<FolderMap> {
+    let last_pass = store.filing_state(account)?.last_pass;
+    let caps: Option<EngineCapabilities> = last_pass
+        .as_ref()
+        .and_then(|p| p.get("capabilities"))
+        .and_then(|c| serde_json::from_value(c.clone()).ok());
+    let prefix = caps
+        .as_ref()
+        .map_or(String::new(), |c| c.personal_prefix.clone());
+    let records: BTreeMap<String, FolderRecord> = store
+        .folder_records(account)?
+        .into_iter()
+        .map(|r| (r.native.clone(), r))
+        .collect();
+    let mut map = FolderMap {
+        caps,
+        sources: sources_of(cfg),
+        ..Default::default()
+    };
+    for category in &cfg.categories {
+        let folder = category.effective_folder();
+        if folder == "INBOX" {
+            map.categories
+                .insert(category.id.clone(), CategoryFolder::Inbox);
+            continue;
+        }
+        let native = native_name(&prefix, folder);
+        if map.sources.iter().any(|s| same_folder(s, &native)) {
+            continue;
+        }
+        let creatable = records
+            .get(&native)
+            .is_none_or(|r| r.state == "error" && r.origin.is_none());
+        if creatable && !denylisted(&native, &prefix) {
+            map.would_create.push(native.clone());
+        }
+        map.categories
+            .insert(category.id.clone(), CategoryFolder::Native(native));
+    }
+    map.listed = records
+        .values()
+        .filter(|r| r.state != "missing")
+        .map(|r| r.native.clone())
+        .collect();
+    map.alias_conflicts = last_pass
+        .as_ref()
+        .and_then(|p| p.get("problems"))
+        .and_then(|p| p.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|p| p.as_str()?.strip_prefix("alias_conflict:"))
+        .map(str::to_string)
+        .collect();
+    Ok(map)
+}
+
+/// The engine of an offline preview: every call fails, so a `filing plan`
+/// never reaches the mailbox.
+pub struct OfflineEngine;
+
+impl OfflineEngine {
+    fn refuse<T>() -> Result<T> {
+        anyhow::bail!("offline preview makes no engine calls")
+    }
+}
+
+impl MailEngine for OfflineEngine {
+    fn version(&self) -> Result<String> {
+        Self::refuse()
+    }
+    fn binding_identity(&self) -> Result<serde_json::Value> {
+        Self::refuse()
+    }
+    fn snapshot(&self, _: &str) -> Result<MailboxSnapshot> {
+        Self::refuse()
+    }
+    fn discover(&self, _: &str, _: u64, _: u64) -> Result<Vec<SourceEnvelope>> {
+        Self::refuse()
+    }
+    fn fetch_raw(&self, _: &str, _: u64) -> Result<Vec<u8>> {
+        Self::refuse()
+    }
+    fn capabilities(&self) -> Result<EngineCapabilities> {
+        Self::refuse()
+    }
+    fn list_folders(&self) -> Result<Vec<FolderInfo>> {
+        Self::refuse()
+    }
+    fn create_folder(&self, _: &str) -> Result<()> {
+        Self::refuse()
+    }
+    fn subscribe_folder(&self, _: &str) -> Result<()> {
+        Self::refuse()
+    }
+    fn envelopes(&self, _: &str, _: &[u64]) -> Result<Vec<SourceEnvelope>> {
+        Self::refuse()
+    }
+    fn move_messages(&self, _: &str, _: &[u64], _: &str) -> Result<WriteOutcome> {
+        Self::refuse()
+    }
+    fn add_flagged(&self, _: &str, _: &[u64]) -> Result<WriteOutcome> {
+        Self::refuse()
+    }
+}
+
+/// `doctor`'s filing block (without `mode`), from read-only engine calls
+/// only: capabilities, the alias check of the sources and category folders,
+/// and LIST. Problems are codes: `move_unsupported`,
+/// `folder_collides_with_source:<category>` and `alias_conflict:<folder>`.
+pub fn engine_report(engine: &dyn MailEngine, cfg: &AccountConfig) -> Result<serde_json::Value> {
+    let caps = engine.capabilities()?;
+    let sources = sources_of(cfg);
+    let mut problems = Vec::new();
+    if !caps.move_supported {
+        problems.push("move_unsupported".to_string());
+    }
+    let mut checked = sources.clone();
+    for category in &cfg.categories {
+        let folder = category.effective_folder();
+        if folder == "INBOX" {
+            continue;
+        }
+        let native = native_name(&caps.personal_prefix, folder);
+        if sources.iter().any(|s| same_folder(s, &native)) {
+            problems.push(format!("folder_collides_with_source:{}", category.id));
+        } else if !checked.contains(&native) {
+            checked.push(native);
+        }
+    }
+    let conflicts = engine.alias_conflicts(&checked)?;
+    problems.extend(conflicts.iter().map(|f| format!("alias_conflict:{f}")));
+    let folders: Vec<_> = engine
+        .list_folders()?
+        .into_iter()
+        .map(|f| json!({"name": f.name, "roles": f.roles, "subscribed": f.subscribed}))
+        .collect();
+    Ok(json!({
+        "move_supported": caps.move_supported,
+        "uidplus": caps.uidplus,
+        "special_use": caps.special_use,
+        "personal_prefix": caps.personal_prefix,
+        "alias_conflicts": conflicts,
+        "folders": folders,
+        "problems": problems,
+    }))
+}
+
 fn sources_of(cfg: &AccountConfig) -> Vec<String> {
     cfg.engine_config()
         .map(|e| e.mailboxes().to_vec())
@@ -185,12 +342,7 @@ fn category_natives(
                 .insert(category.id.clone(), CategoryFolder::Inbox);
             continue;
         }
-        let prefix = caps.personal_prefix.as_str();
-        let native = if prefix.is_empty() || folder.starts_with(prefix) {
-            folder.to_string()
-        } else {
-            format!("{prefix}{folder}")
-        };
+        let native = native_name(&caps.personal_prefix, folder);
         if map.sources.iter().any(|s| same_folder(s, &native)) {
             summary
                 .problems
@@ -206,6 +358,15 @@ fn category_natives(
         });
     }
     wanted
+}
+
+/// Rule 2: `personal_prefix + folder`, unless the folder already carries it.
+fn native_name(prefix: &str, folder: &str) -> String {
+    if prefix.is_empty() || folder.starts_with(prefix) {
+        folder.to_string()
+    } else {
+        format!("{prefix}{folder}")
+    }
 }
 
 /// Native names are compared exactly, except `INBOX`, which IMAP treats case-insensitively.

@@ -82,14 +82,7 @@ pub fn plan_input(
         preview,
         flag_enabled: ctx.cfg.filing.flag,
         max_actions: ctx.cfg.filing.max_actions_per_pass,
-        // INTERNALDATE has whole-second resolution, so `enabled_at` is compared
-        // at that resolution: mail delivered in the second filing was enabled is new.
-        enabled_at: store
-            .filing_state(ctx.account)?
-            .enabled_at
-            .as_deref()
-            .and_then(parse_time)
-            .and_then(|t| t.with_nanosecond(0)),
+        enabled_at: enabled_second(store.filing_state(ctx.account)?.enabled_at.as_deref()),
         categories: map.categories.clone(),
         folders: folder_views(store, ctx, map)?,
         messages,
@@ -100,6 +93,30 @@ fn parse_time(s: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
         .ok()
         .map(|t| t.with_timezone(&Utc))
+}
+
+/// INTERNALDATE has whole-second resolution, so `enabled_at` is compared at
+/// that resolution: mail delivered in the second filing was enabled is new.
+fn enabled_second(enabled_at: Option<&str>) -> Option<DateTime<Utc>> {
+    enabled_at
+        .and_then(parse_time)
+        .and_then(|t| t.with_nanosecond(0))
+}
+
+/// Spec "Filing mode and new mail", as the planner decides it: unfiled, with
+/// an internal date at or after `enabled_at`.
+pub(crate) fn is_new(p: &Placement, meta: &MessageMeta, enabled_at: Option<&str>) -> bool {
+    let date = meta.internal_date.as_deref().and_then(parse_time);
+    p.filed_at.is_none()
+        && matches!((date, enabled_second(enabled_at)), (Some(d), Some(on)) if d >= on)
+}
+
+/// Whether the message's internal date (known once hydrated) is at or after `since`.
+pub(crate) fn dated_since(meta: &MessageMeta, since: DateTime<Utc>) -> bool {
+    meta.internal_date
+        .as_deref()
+        .and_then(parse_time)
+        .is_some_and(|d| d >= since)
 }
 
 fn plan_message(p: &Placement, meta: &MessageMeta, effective: Effective) -> PlanMessage {

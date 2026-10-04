@@ -13,7 +13,7 @@ pub mod types;
 pub use types::*;
 
 use crate::domain::{AccountConfig, FilingMode};
-use crate::engine::MailEngine;
+use crate::engine::{EngineCapabilities, MailEngine};
 
 /// The `filing` object of a sync response; also stored as the last pass.
 #[derive(Debug, Default, Clone, serde::Serialize)]
@@ -33,6 +33,8 @@ pub struct FilingSummary {
     pub errors: usize,
     /// Codes only, never message text.
     pub problems: Vec<String>,
+    /// What the engine reported this pass; `filing status` reads it back.
+    pub capabilities: Option<EngineCapabilities>,
 }
 
 /// What every filing step of one pass needs. It borrows nothing from
