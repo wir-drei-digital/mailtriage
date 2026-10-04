@@ -343,7 +343,7 @@ own intents or placement state. If the provisional message carries local edits
 (overrides or Done), the existing refusal stands; the arrival becomes
 `unresolved` with event `merge_conflict`, the canonical placement gets
 `blocked_reason = merge_conflict`, and both stay listed in `filing status`
-until the user clears the provisional edits and runs `filing retry --arrival`.
+until the user clears the provisional edits and runs `filing retry --arrival`, or reviews it and runs `filing dismiss --arrival`, which lifts that block.
 
 **Bootstrap.** On the first pass with mode not `off` (and until
 `bootstrap_done`), placements are created for existing source-managed messages
@@ -694,7 +694,7 @@ codes, and are safe to retry.
 | `filing backfill (--days N \| --all) [--apply]` | Lists source-folder placements that would become eligible; `--apply` (requires `live`) sets `eligible_once` on them. `--days` uses the hydrated internal date. |
 | `filing pin --id ID` / `filing unpin --id ID` | Placement transitions. |
 | `filing retry --id ID \| --folder NAME \| --arrival ID` | Clears a message block or quarantine, releases a folder's safety pause, or requeues an unresolved arrival's fetch. |
-| `filing dismiss --arrival ID` | Marks a reviewed unresolved arrival `dismissed`, lifting its done-inference barrier. |
+| `filing dismiss --arrival ID` | Marks a reviewed unresolved arrival `dismissed`, lifting its done-inference barrier and any `merge_conflict` block it caused. |
 | `filing adopt --folder NAME` | Confirms adoption of an existing folder whose role could not be verified. |
 | `filing log [--id ID] [--limit N]` | Recent `filing_events`, newest first. |
 
