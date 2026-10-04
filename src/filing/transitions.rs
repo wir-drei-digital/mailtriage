@@ -256,7 +256,8 @@ pub fn retry_arrival(
 }
 
 /// `filing dismiss --arrival`: a reviewed unresolved arrival becomes
-/// `dismissed`, lifting its done-inference barrier.
+/// `dismissed`, lifting its done-inference barrier and the `merge_conflict`
+/// block it caused on the canonical placement.
 pub fn dismiss_arrival(store: &mut Store, account: &str, arrival_id: i64, now: &str) -> Result<()> {
     if !store.dismiss_arrival_row(account, arrival_id, now)? {
         return Err(err(2, "arrival is not unresolved"));

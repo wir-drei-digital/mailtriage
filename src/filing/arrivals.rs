@@ -484,21 +484,30 @@ fn quarantine(
     summary: &mut FilingSummary,
 ) -> Result<()> {
     let writes = arrival_writes(Some((a.id, "quarantined")));
-    let block = Some("quarantined");
-    let created = store.place_with(
-        ctx.account,
-        &a.message_id,
-        &map.sources,
-        block,
-        &writes,
-        &ctx.now,
-    )?;
-    let unblocked_here = store
-        .placement(ctx.account, &a.message_id)?
-        .is_some_and(|p| home_of(&p).as_ref() == Some(at) && p.blocked_reason.is_none());
-    if !created && unblocked_here {
-        let block = |p: &mut Placement| p.blocked_reason = Some("quarantined".into());
-        commit_with_placement(store, ctx, &a.message_id, block, &[])?;
+    match store.placement(ctx.account, &a.message_id)? {
+        // Placed, blocked and resolved in one transaction.
+        None => {
+            let block = Some("quarantined");
+            let sources = &map.sources;
+            store.place_with(
+                ctx.account,
+                &a.message_id,
+                sources,
+                block,
+                &writes,
+                &ctx.now,
+            )?;
+        }
+        // Placed at this occurrence earlier (at fetch, for a source folder):
+        // blocked and resolved in one transaction.
+        Some(p) if home_of(&p).as_ref() == Some(at) => {
+            let block = |p: &mut Placement| {
+                p.blocked_reason.get_or_insert_with(|| "quarantined".into());
+            };
+            commit_with_placement(store, ctx, &a.message_id, block, &writes)?;
+        }
+        // An existing placement elsewhere is left untouched.
+        Some(_) => commit(store, ctx, &writes)?,
     }
     summary.quarantined += 1;
     Ok(())
@@ -571,14 +580,7 @@ fn placed_arrival(
     }
     match kind_of(map, &a.folder) {
         Kind::Category(c) if effective_category(store, ctx, &a.message_id)? == Some(c.clone()) => {
-            relocate(
-                store,
-                ctx,
-                &a.message_id,
-                at,
-                Some("relocated"),
-                Some((a.id, "user_move")),
-            )?
+            same_category_move(store, ctx, &a.message_id, at, Some((a.id, "user_move")))?
         }
         Kind::Category(c) => client_move(
             store,
@@ -665,6 +667,29 @@ fn client_move(
         }
     }
     bail!("placement kept changing concurrently")
+}
+
+/// Spec "Arrival resolution", client move into the folder of the message's
+/// own effective category: no override; home here, unpinned, the explicit
+/// request cleared (the user's latest move wins), a new revision, event
+/// `relocated`, in one transaction.
+fn same_category_move(
+    store: &mut Store,
+    ctx: &PassContext,
+    id: &str,
+    at: &Loc,
+    arrival: Option<(i64, &str)>,
+) -> Result<()> {
+    let mut writes = arrival_writes(arrival);
+    writes.push(event(Some(id), Some(&at.0), "relocated", json!({})));
+    writes.push(reopen_write(ctx, id));
+    let filed_here = |p: &mut Placement| {
+        set_home(p, at);
+        p.pinned = false;
+        p.desired_target = None;
+        p.desired_rev += 1;
+    };
+    commit_with_placement(store, ctx, id, filed_here, &writes)
 }
 
 /// Spec "Placement transitions", client move into a source folder: home
@@ -889,7 +914,7 @@ fn survivor(
                 .record(ctx.account, id)?
                 .ok_or_else(|| anyhow!("unknown message"))?;
             if effective(&record, ctx.generation).category_id.as_deref() == Some(c.as_str()) {
-                relocate(store, ctx, id, s, Some("relocated"), None)
+                same_category_move(store, ctx, id, s, None)
             } else {
                 client_move(store, ctx, id, s, &c, None, summary)
             }

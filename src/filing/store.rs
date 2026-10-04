@@ -650,28 +650,33 @@ impl Store {
             params![generation, account, message],
         )?;
         tx.execute("INSERT INTO jobs(message_id,state,next_after,generation) SELECT id,'queued',?,? FROM messages WHERE account=? AND id=? ON CONFLICT(message_id) DO UPDATE SET state='queued',attempts=0,next_after=excluded.next_after,lease_until=NULL,generation=excluded.generation",params![now,generation,account,message])?;
-        tx.execute(
-            "UPDATE placements SET blocked_reason=NULL WHERE account=?1 AND blocked_reason='merge_conflict'
- AND message_id IN (SELECT message_id FROM filing_events WHERE account=?1 AND kind='merge_conflict' AND json_extract(detail,'$.arrival_id')=?2)",
-            params![account, arrival_id],
-        )?;
+        lift_merge_conflict(&tx, account, arrival_id, now)?;
         bump(&tx)?;
         tx.commit()?;
         Ok(true)
     }
 
-    /// `filing dismiss --arrival`: an `unresolved` arrival becomes `dismissed`.
+    /// `filing dismiss --arrival`: an `unresolved` arrival becomes
+    /// `dismissed`; the user reviewed it, so a `merge_conflict` block it
+    /// caused is lifted (event `released`), in one transaction.
     pub fn dismiss_arrival_row(
         &mut self,
         account: &str,
         arrival_id: i64,
         now: &str,
     ) -> Result<bool> {
-        let n = self.db.execute(
+        let tx = self.db.transaction()?;
+        let n = tx.execute(
             "UPDATE arrivals SET state='dismissed',resolved_at=? WHERE account=? AND id=? AND state='unresolved'",
             params![now, account, arrival_id],
         )?;
-        Ok(n == 1)
+        if n != 1 {
+            return Ok(false);
+        }
+        lift_merge_conflict(&tx, account, arrival_id, now)?;
+        bump(&tx)?;
+        tx.commit()?;
+        Ok(true)
     }
 
     pub fn folder_record(&self, account: &str, native: &str) -> Result<Option<FolderRecord>> {
@@ -1358,6 +1363,44 @@ impl Store {
         tx.commit()?;
         Ok(removed)
     }
+}
+
+/// Lifts the `merge_conflict` block that `arrival_id` caused on its canonical
+/// placement (recorded in its `merge_conflict` event), compared and set
+/// against that value, unless another unresolved arrival still conflicts
+/// with the same canonical; event `released` for each lift.
+fn lift_merge_conflict(tx: &Connection, account: &str, arrival_id: i64, now: &str) -> Result<()> {
+    let canonicals: Vec<String> = {
+        let mut st = tx.prepare(
+            "SELECT DISTINCT message_id FROM filing_events WHERE account=? AND kind='merge_conflict'
+ AND message_id IS NOT NULL AND json_extract(detail,'$.arrival_id')=?",
+        )?;
+        let rows = st
+            .query_map(params![account, arrival_id], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    for canonical in canonicals {
+        let lifted = tx.execute(
+            "UPDATE placements SET blocked_reason=NULL WHERE account=?1 AND message_id=?2 AND blocked_reason='merge_conflict'
+ AND NOT EXISTS(SELECT 1 FROM filing_events e JOIN arrivals a ON a.account=e.account AND a.id=json_extract(e.detail,'$.arrival_id')
+  WHERE e.account=?1 AND e.kind='merge_conflict' AND e.message_id=?2 AND a.state='unresolved' AND a.id<>?3)",
+            params![account, canonical, arrival_id],
+        )? == 1;
+        if lifted {
+            let detail = json!({"arrival_id": arrival_id, "cleared": "merge_conflict"});
+            insert_event(
+                tx,
+                account,
+                Some(&canonical),
+                None,
+                "released",
+                &detail,
+                now,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// One write of `commit_filing` inside a caller's transaction. Returns

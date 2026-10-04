@@ -38,7 +38,7 @@ fn opts<'a>(t: &'a BTreeMap<u64, (String, i64)>) -> StageOptions<'a> {
 const NOW: &str = "2026-10-04T12:00:00+00:00";
 
 #[test]
-fn migration_reaches_v3_and_is_idempotent() {
+fn migration_reaches_v4_and_is_idempotent() {
     let d = tempfile::tempdir().unwrap();
     let p = d.path().join("db");
     assert_eq!(Store::open(&p).unwrap().schema_version().unwrap(), 4);

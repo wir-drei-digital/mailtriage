@@ -1298,3 +1298,142 @@ fn occurrences_in_a_missing_folder_count_as_present() {
     assert_eq!(p.location_state, LocationState::Known);
     assert_eq!(s.store.occurrences_of("work", &id).unwrap().len(), 1);
 }
+
+// Fix round 2: dismissal lifts a merge conflict, quarantine of a placement
+// created at fetch, and a same-category move unpins.
+
+#[test]
+fn dismissing_a_merge_conflict_lifts_its_block() {
+    use mailtriage::domain::FilingMode::DryRun;
+    let h = Harness::new(DryRun);
+    h.fake.add_folder("Updates", &[]);
+    h.sync();
+    let uid = h
+        .fake
+        .deliver("INBOX", &mail("d", "Weekly newsletter", "Our newsletter"));
+    h.fake.client_copy("INBOX", uid, "Updates");
+    let mut s = h.service();
+    s.sync("work", 1).unwrap(); // the Updates copy stays provisional
+    let all = s
+        .list(
+            "work",
+            ListOptions {
+                view: "all".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let provisional = all["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["classification"]["state"] == "pending")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    s.review("work", &provisional, true).unwrap();
+    h.sync(); // merge refused: the canonical is blocked
+    let d = {
+        let s = h.service();
+        let records = s.store.records("work").unwrap();
+        records
+            .into_iter()
+            .find(|r| s.store.placement("work", &r.id).unwrap().is_some())
+            .unwrap()
+            .id
+    };
+    assert_ne!(d, provisional);
+    let blocked = |h: &Harness| {
+        h.service()
+            .store
+            .placement("work", &d)
+            .unwrap()
+            .unwrap()
+            .blocked_reason
+    };
+    assert_eq!(blocked(&h).as_deref(), Some("merge_conflict"));
+    h.set_mode(Live);
+    h.sync();
+    assert_eq!(at(&h, "d")[0].0, "INBOX", "a blocked message is not filed");
+    let mut s = h.service();
+    let arrival = s.store.arrivals("work", Some("unresolved")).unwrap()[0].id;
+    transitions::dismiss_arrival(&mut s.store, "work", arrival, &now()).unwrap();
+    assert_eq!(blocked(&h), None, "the reviewed conflict no longer blocks");
+    let released = h.service().store.events("work", Some(&d), 50).unwrap();
+    assert!(released.iter().any(|e| e["kind"] == "released"));
+    h.sync();
+    assert!(
+        at(&h, "d").iter().any(|(f, _)| f == "Newsletters"),
+        "plannable again: filed"
+    );
+}
+
+#[test]
+fn a_raced_message_placed_in_its_source_target_is_blocked_and_never_filed() {
+    let h = Harness::new(Live);
+    h.fake.set_capabilities(true, false, true);
+    h.sync();
+    filed(&h, "a", "Old newsletter", "newsletter");
+    let (n, _) = filed(&h, "n", "Weekly newsletter", "Our newsletter");
+    let (f, a_uid) = at(&h, "a")[0].clone();
+    h.fake.client_delete(&f, a_uid);
+    h.service().filing_pin("work", &n).unwrap(); // a move back to INBOX
+                                                 // Discovered this pass but not fetched (the INBOX message takes the one
+                                                 // fetch); the race renumbers Newsletters and moves r instead of n.
+    h.fake.deliver("INBOX", &mail("c", "Hello", "Plain mail"));
+    h.fake
+        .deliver("Newsletters", &mail("r", "Invoice", "Payment due today"));
+    h.fake.inject(FakeOp::Move, Fault::EpochRaceBefore);
+    h.service().sync("work", 1).unwrap();
+    assert_eq!(at(&h, "r")[0].0, "INBOX", "the race moved r");
+    assert_eq!(
+        folder(&h, "Newsletters").pause_reason.as_deref(),
+        Some("epoch_race")
+    );
+    for _ in 0..3 {
+        h.sync();
+    }
+    let r = arrival_of(&h, "INBOX", "r");
+    assert_eq!(
+        (r.state.as_str(), r.kind.as_deref()),
+        ("resolved", Some("quarantined"))
+    );
+    let s = h.service();
+    let p = s.store.placement("work", &r.message_id).unwrap().unwrap();
+    assert_eq!(p.home_folder.as_deref(), Some("INBOX"));
+    assert_eq!(p.blocked_reason.as_deref(), Some("quarantined"));
+    assert_eq!(at(&h, "r"), vec![("INBOX".to_string(), r.uid)]);
+    assert!(h.fake.flags("INBOX", r.uid).is_empty(), "never flagged");
+    assert!(s
+        .store
+        .intents("work", false)
+        .unwrap()
+        .iter()
+        .all(|i| i.message_id != r.message_id));
+}
+
+#[test]
+fn a_pinned_message_filed_into_its_own_category_stays_there_unpinned() {
+    let h = Harness::new(Live);
+    h.sync();
+    let (id, home) = filed(&h, "n", "Weekly newsletter", "Our newsletter");
+    h.service().filing_pin("work", &id).unwrap();
+    h.sync();
+    h.sync();
+    assert_eq!(at(&h, "n")[0].0, "INBOX");
+    assert_eq!(item(&h, &id)["placement"]["pinned"], true);
+    let (f, uid) = at(&h, "n")[0].clone();
+    h.fake.client_move(&f, uid, &home);
+    for _ in 0..3 {
+        h.sync();
+    }
+    assert_eq!(at(&h, "n")[0].0, home, "not moved back against the user");
+    let it = item(&h, &id);
+    assert_eq!(it["placement"]["pinned"], false);
+    assert_eq!(it["placement"]["pending_action"], serde_json::Value::Null);
+    assert_eq!(it["overrides"], json!({}));
+    let kinds = event_kinds(&h);
+    assert!(!kinds.iter().any(|k| k == "client_correction"));
+    assert!(kinds.iter().any(|k| k == "relocated"));
+}

@@ -56,6 +56,7 @@ pub fn recover(
 /// A raced move whose target `UIDNEXT` could not be observed right after the
 /// race gets it now, before any arrival in its target is resolved.
 fn record_race_bounds(store: &mut Store, ctx: &PassContext) -> Result<()> {
+    let mut verified = false;
     for intent in store.intents(ctx.account, false)? {
         let raced = intent.kind == "move"
             && intent.race_until_uid.is_none()
@@ -66,6 +67,10 @@ fn record_race_bounds(store: &mut Store, ctx: &PassContext) -> Result<()> {
         let Some(target) = intent.target.as_deref().filter(|_| raced) else {
             continue;
         };
+        if !verified {
+            (ctx.verify_binding)()?;
+            verified = true;
+        }
         if let Some(until) = race_until_uid(ctx, target, &intent) {
             let patch = IntentPatch {
                 race_until_uid: Some(until),
