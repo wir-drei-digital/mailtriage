@@ -463,7 +463,7 @@ compare-and-swap in that same transaction.
 | `correct` of other fields | none |
 | `filing pin` | `pinned = 1`; `desired_target = @source` (a no-op only if home is a source folder and no move intent is open) |
 | `filing unpin` | `pinned = 0`; `desired_target` cleared; `eligible_once = 1` |
-| `filing retry --id` | clears `move_failed`, `duplicate_copy` or `quarantined`; `eligible_once = 1` |
+| `filing retry --id` | clears `move_failed` or `quarantined`; `eligible_once = 1`. Clears `duplicate_copy` only once the message has a single recorded occurrence (the user removed one copy and a sync observed it), without setting `eligible_once`; while more than one is recorded it is refused (exit 5, "remove one copy first, then sync and retry") |
 | Move applied | observed home updated; `filed_at`, `filed_by = mailtriage`; `desired_target` cleared only if the intent's `desired_rev` equals the current one; `eligible_once` cleared only if the intent has `consumes_eligible` and `desired_rev` still matches |
 | Client move into category C | override `category_id = C` unless already C; home updated; `filed_by = user`; `pinned = 0`; `desired_target` cleared |
 | Client move into a source folder | home updated; `pinned = 1`; `desired_target` cleared |

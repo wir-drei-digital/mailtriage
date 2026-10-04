@@ -10,7 +10,8 @@ use serde_json::{json, Value};
 
 const IDENTITY_PENDING: &str = "identity not yet established; retry after sync";
 const NO_PLACEMENT: &str = "message has no mailbox placement";
-/// Blocks `filing retry --id` lifts.
+const DUPLICATE_PRESENT: &str = "remove one copy first, then sync and retry";
+/// Blocks `filing retry --id` lifts; `duplicate_copy` only once one copy is left.
 const RETRYABLE: [&str; 3] = ["move_failed", "duplicate_copy", "quarantined"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +98,15 @@ pub(crate) fn plan_transition(
             p.pinned = false;
             p.desired_target = None;
             p.eligible_once = true;
+        }
+        // A duplicate copy is lifted only once the user removed one copy and
+        // a sync observed it, and never makes the message eligible: filing
+        // a message that still has two copies would make a second one.
+        Transition::Retry if p.blocked_reason.as_deref() == Some("duplicate_copy") => {
+            if store.occurrences_of(account, message_id)?.len() > 1 {
+                return Err(err(5, DUPLICATE_PRESENT));
+            }
+            p.blocked_reason = None;
         }
         Transition::Retry => {
             if p.blocked_reason

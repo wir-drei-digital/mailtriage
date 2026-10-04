@@ -1188,3 +1188,89 @@ fn passes_after_a_configuration_change_mid_pass_continue() {
     assert!(!is_config_change(&e), "{e}");
     assert_eq!(code(&e), Some(5));
 }
+
+/// Final review I2: `filing retry --id` on a `duplicate_copy` block is refused
+/// while both copies are recorded; once the user removed one copy and a sync
+/// observed it, the retry lifts the block without making the message
+/// eligible once, and no second copy is ever created.
+#[test]
+fn retry_of_a_duplicate_copy_waits_for_one_copy_to_be_removed() {
+    use mailtriage::service::{RetryTarget, ServiceError};
+    let h = Harness::new(Live);
+    h.sync();
+    h.fake
+        .deliver("INBOX", &mail("n", "Weekly newsletter", "Our newsletter"));
+    h.fake.inject(FakeOp::Move, Fault::PartialCopy);
+    h.sync();
+    h.sync();
+    let p = placement_of(&h, "Weekly newsletter");
+    assert_eq!(p.blocked_reason.as_deref(), Some("duplicate_copy"));
+    assert_eq!(place(&h, "n").len(), 2);
+    let retry = |h: &Harness| {
+        h.service()
+            .filing_retry("work", RetryTarget::Message(p.message_id.clone()))
+    };
+    let e = retry(&h).unwrap_err();
+    let e = e.downcast_ref::<ServiceError>().unwrap();
+    assert_eq!(
+        (e.code, e.message.as_str()),
+        (5, "remove one copy first, then sync and retry")
+    );
+    let after = placement_of(&h, "Weekly newsletter");
+    assert_eq!(after.blocked_reason.as_deref(), Some("duplicate_copy"));
+    assert_eq!(after.desired_rev, p.desired_rev, "nothing written");
+    h.sync();
+    assert_eq!(place(&h, "n").len(), 2, "still blocked");
+    // The user deletes the copy left in the source folder; a sync observes it.
+    let inbox = place(&h, "n")
+        .into_iter()
+        .find(|(f, _)| f == "INBOX")
+        .unwrap();
+    h.fake.client_delete(&inbox.0, inbox.1);
+    h.sync();
+    retry(&h).unwrap();
+    let p = placement_of(&h, "Weekly newsletter");
+    assert_eq!(p.blocked_reason, None);
+    assert!(
+        !p.eligible_once,
+        "lifting duplicate_copy grants no eligibility"
+    );
+    let moves = move_calls(&h);
+    for _ in 0..3 {
+        h.sync();
+        assert_eq!(place(&h, "n").len(), 1, "never a second copy");
+    }
+    assert_eq!(place(&h, "n")[0].0, "Newsletters");
+    assert_eq!(move_calls(&h), moves, "the remaining copy is already filed");
+}
+
+/// Final review I2, the other copy: with the category folder's copy removed,
+/// the lifted message is still new mail in the source folder and is filed
+/// once more, as its only copy.
+#[test]
+fn retry_after_removing_the_filed_copy_files_the_remaining_one_once() {
+    use mailtriage::service::RetryTarget;
+    let h = Harness::new(Live);
+    h.sync();
+    h.fake
+        .deliver("INBOX", &mail("n", "Weekly newsletter", "Our newsletter"));
+    h.fake.inject(FakeOp::Move, Fault::PartialCopy);
+    h.sync();
+    h.sync();
+    let id = placement_of(&h, "Weekly newsletter").message_id;
+    let filed = place(&h, "n")
+        .into_iter()
+        .find(|(f, _)| f == "Newsletters")
+        .unwrap();
+    h.fake.client_delete(&filed.0, filed.1);
+    h.sync();
+    h.service()
+        .filing_retry("work", RetryTarget::Message(id))
+        .unwrap();
+    for _ in 0..3 {
+        h.sync();
+        assert_eq!(place(&h, "n").len(), 1, "never a second copy");
+    }
+    assert_eq!(place(&h, "n")[0].0, "Newsletters");
+    assert_eq!(placement_of(&h, "Weekly newsletter").blocked_reason, None);
+}
