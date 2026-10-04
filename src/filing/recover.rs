@@ -336,7 +336,7 @@ fn recover_uncertain(
     let in_t = observe_in_target(store, ctx, intent, (ends.target, ends.t_now), true)?;
     let in_f = match observe_in_source(store, ctx, &intent.message_id, &from)? {
         Seen::EpochChanged => return suspect_race(store, ctx, intent, summary),
-        Seen::Mismatch => return Ok(()),
+        Seen::Mismatch => return mismatch_wait(&intent.folder, summary),
         Seen::Present(_) => true,
         Seen::Absent => false,
     };
@@ -403,7 +403,8 @@ fn recover_awaiting(
         match observe_in_source(store, ctx, &intent.message_id, &at)? {
             Seen::Present(_) => Some(intent.uid),
             Seen::Absent => None,
-            Seen::Mismatch | Seen::EpochChanged => return Ok(()),
+            Seen::Mismatch => return mismatch_wait(&intent.folder, summary),
+            Seen::EpochChanged => return Ok(()),
         }
     };
     match (in_t, in_f) {
@@ -427,6 +428,18 @@ fn recover_awaiting(
         }
         (None, None) => mark_lost(store, ctx, intent),
     }
+}
+
+/// A recorded source UID shows another Message-ID or size than stored:
+/// nothing is concluded from it (the intent waits), and each pass that waits
+/// on it reports the code-only problem `source_mismatch:<folder>` (once per
+/// folder and pass).
+fn mismatch_wait(folder: &str, summary: &mut FilingSummary) -> Result<()> {
+    let code = format!("source_mismatch:{folder}");
+    if !summary.problems.contains(&code) {
+        summary.problems.push(code);
+    }
+    Ok(())
 }
 
 /// Whether a folder's reset rescan in `epoch` is complete.
@@ -592,11 +605,10 @@ fn retry_or_supersede(
     {
         return Ok(());
     }
-    if !matches!(
-        observe_in_source(store, ctx, &intent.message_id, &from)?,
-        Seen::Present(_)
-    ) {
-        return Ok(());
+    match observe_in_source(store, ctx, &intent.message_id, &from)? {
+        Seen::Present(_) => {}
+        Seen::Mismatch => return mismatch_wait(&from.folder, summary),
+        Seen::Absent | Seen::EpochChanged => return Ok(()),
     }
     let snapshot = ctx.engine.snapshot(&target)?;
     if !target_watched(store, ctx, &target, snapshot.uid_validity)? {

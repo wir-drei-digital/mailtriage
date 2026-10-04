@@ -1274,3 +1274,45 @@ fn retry_after_removing_the_filed_copy_files_the_remaining_one_once() {
     assert_eq!(place(&h, "n")[0].0, "Newsletters");
     assert_eq!(placement_of(&h, "Weekly newsletter").blocked_reason, None);
 }
+
+/// Final review M5: an uncertain move whose source UID shows another
+/// Message-ID or size than stored waits, and says so each pass it waits.
+#[test]
+fn a_source_mismatch_is_reported_each_pass_it_waits() {
+    use mailtriage::domain::SourceEnvelope;
+    let h = Harness::new(Live);
+    h.sync();
+    let uid = h
+        .fake
+        .deliver("INBOX", &mail("n", "Weekly newsletter", "Our newsletter"));
+    h.fake.inject(FakeOp::Move, Fault::ErrorBefore);
+    h.sync();
+    assert_eq!(
+        intent_states(&h),
+        vec![("move".to_string(), "uncertain".to_string())]
+    );
+    // The stored size no longer matches what the server shows at the UID.
+    let id = placement_of(&h, "Weekly newsletter").message_id;
+    let wrong = SourceEnvelope {
+        uid,
+        size: Some(1),
+        ..Default::default()
+    };
+    h.service().store.hydrate("work", &id, &wrong).unwrap();
+    for pass in 0..2 {
+        let out = h.sync();
+        let problems = out["filing"]["problems"].as_array().unwrap();
+        assert_eq!(
+            problems
+                .iter()
+                .filter(|p| *p == "source_mismatch:INBOX")
+                .count(),
+            1,
+            "pass {pass}: {problems:?}"
+        );
+        assert_eq!(
+            intent_states(&h),
+            vec![("move".to_string(), "uncertain".to_string())]
+        );
+    }
+}
