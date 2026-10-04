@@ -355,7 +355,8 @@ until hydrated; lacking an internal date it is never "new".
 `filing.mode` in the config is authoritative. Each pass compares it with
 `filing_state.mode`:
 
-- `off` → `dry_run` or `live`: set `enabled_at` to now.
+- `off` → `dry_run` or `live`: set `enabled_at` to now and restart the
+  bootstrap, so messages fetched while filing was off get placements.
 - `dry_run` ↔ `live`: keep `enabled_at`.
 - anything → `off`: keep the old value; the next enable sets a new one.
 
@@ -433,8 +434,10 @@ home and:
 **Flags.** A message gets a `Flag` when `filing.flag` is true,
 `flag_attempted_at` is empty, its current envelope lacks `\Flagged`, and the
 effective decision has `action_required == true` or `urgency == high`, where
-each field comes from an override or a current classification. Flags do not
-depend on "new".
+each field comes from an override or a current classification. Like moves,
+flags only apply to mail in scope: new mail, mail with `eligible_once`, or mail
+already filed by mailtriage. Backlog mail is never flagged until it is
+backfilled.
 
 **Ordering and caps.** Oldest internal date first, flags before moves for the
 same message, truncated at `max_actions_per_pass`.
