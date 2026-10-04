@@ -37,7 +37,73 @@ pub struct AccountConfig {
     pub brief: String,
     pub taxonomy_revision: u64,
     pub categories: Vec<Category>,
+    /// Schema 1 location of the Himalaya settings. Read on load, moved into
+    /// `engine` by `config::normalize`, never serialized.
+    #[serde(default, skip_serializing)]
     pub himalaya: Option<HimalayaConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<EngineConfig>,
+    #[serde(default)]
+    pub filing: FilingConfig,
+}
+impl AccountConfig {
+    pub fn engine_config(&self) -> Option<EngineConfig> {
+        self.engine
+            .clone()
+            .or_else(|| self.himalaya.clone().map(EngineConfig::Himalaya))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum EngineConfig {
+    Himalaya(HimalayaConfig),
+}
+impl EngineConfig {
+    pub fn mailboxes(&self) -> &[String] {
+        match self {
+            EngineConfig::Himalaya(h) => &h.mailboxes,
+        }
+    }
+    pub fn timeout_seconds(&self) -> u64 {
+        match self {
+            EngineConfig::Himalaya(h) => h.timeout_seconds,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FilingMode {
+    #[default]
+    Off,
+    DryRun,
+    Live,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FilingConfig {
+    #[serde(default)]
+    pub mode: FilingMode,
+    #[serde(default = "default_true")]
+    pub flag: bool,
+    #[serde(default = "default_max_actions")]
+    pub max_actions_per_pass: usize,
+}
+impl Default for FilingConfig {
+    fn default() -> Self {
+        Self {
+            mode: FilingMode::Off,
+            flag: true,
+            max_actions_per_pass: 200,
+        }
+    }
+}
+fn default_true() -> bool {
+    true
+}
+fn default_max_actions() -> usize {
+    200
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -49,9 +115,16 @@ pub struct Category {
     pub examples: Vec<String>,
     #[serde(default)]
     pub catch_all: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
+}
+impl Category {
+    pub fn effective_folder(&self) -> &str {
+        self.folder.as_deref().unwrap_or(&self.name)
+    }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HimalayaConfig {
     pub binary: PathBuf,
     pub config: PathBuf,
@@ -114,10 +187,18 @@ pub struct MailboxSnapshot {
     pub uid_next: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SourceEnvelope {
     pub uid: u64,
     pub subject: String,
     pub from: Vec<Address>,
     pub sent_at: Option<String>,
+    #[serde(default)]
+    pub message_id: Option<String>,
+    #[serde(default)]
+    pub internal_date: Option<String>,
+    #[serde(default)]
+    pub size: Option<u64>,
+    #[serde(default)]
+    pub flags: Vec<String>,
 }

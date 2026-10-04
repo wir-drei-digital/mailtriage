@@ -1,7 +1,10 @@
 //! Narrow, read-only Himalaya v2.1.0 IMAP adapter.
+use super::MailEngine;
 use crate::domain::{Address, HimalayaConfig, MailboxSnapshot, SourceEnvelope};
+use crate::service::err;
 use anyhow::{anyhow, bail, Context, Result};
-use serde_json::Value;
+use serde_json::{json, Value};
+use std::fs;
 use std::io::Read;
 use std::process::{Command, Stdio};
 use std::sync::{
@@ -149,6 +152,7 @@ impl Himalaya {
                     subject,
                     from,
                     sent_at,
+                    ..Default::default()
                 });
             }
             start = end
@@ -269,6 +273,72 @@ impl Himalaya {
             bail!("Himalaya command failed with status {status}");
         }
         Ok(output)
+    }
+}
+
+impl MailEngine for Himalaya {
+    fn version(&self) -> Result<String> {
+        Himalaya::version(self)
+    }
+    fn binding_identity(&self) -> Result<Value> {
+        source_binding(&self.config)
+    }
+    fn snapshot(&self, folder: &str) -> Result<MailboxSnapshot> {
+        Himalaya::snapshot(self, folder)
+    }
+    fn discover(&self, folder: &str, after: u64, through: u64) -> Result<Vec<SourceEnvelope>> {
+        Himalaya::discover(self, folder, after, through)
+    }
+    fn fetch_raw(&self, folder: &str, uid: u64) -> Result<Vec<u8>> {
+        self.fetch(folder, uid)
+    }
+}
+
+// Credentials rotate without changing the mailbox namespace. Hash connection
+// identity, never retain or expose the account's secret-bearing TOML.
+pub fn source_binding(h: &HimalayaConfig) -> Result<Value> {
+    let bytes = fs::read_to_string(&h.config)
+        .map_err(|_| err(2, "Himalaya configuration cannot be read"))?;
+    let parsed: toml::Value =
+        toml::from_str(&bytes).map_err(|_| err(2, "invalid Himalaya TOML configuration"))?;
+    let account = parsed
+        .get("accounts")
+        .and_then(|v| v.get(&h.account))
+        .ok_or_else(|| err(2, "Himalaya account is missing from its configuration"))?;
+    let mut imap = serde_json::to_value(
+        account
+            .get("imap")
+            .ok_or_else(|| err(2, "Himalaya account must configure IMAP"))?,
+    )?;
+    let server = imap
+        .get("server")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| err(2, "Himalaya IMAP server is missing"))?
+        .to_string();
+    scrub_secrets(&mut imap);
+    Ok(json!({"account":h.account,"server":server,"imap_identity":imap}))
+}
+fn scrub_secrets(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            for (key, value) in map.iter_mut() {
+                if ["password", "passwd", "token", "secret"]
+                    .iter()
+                    .any(|word| key.to_ascii_lowercase().contains(word))
+                {
+                    *value = json!("<credential>");
+                } else {
+                    scrub_secrets(value);
+                }
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                scrub_secrets(value);
+            }
+        }
+        _ => {}
     }
 }
 

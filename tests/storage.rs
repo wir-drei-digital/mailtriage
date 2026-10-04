@@ -159,6 +159,7 @@ fn durable_discovery_epoch_reset_alias_and_stale_generation() {
         subject: "Pending".into(),
         from: vec![],
         sent_at: None,
+        ..Default::default()
     };
     st.stage("work", "INBOX", 5, 2, &[env], "g1", true).unwrap();
     assert_eq!(st.checkpoint("work", "INBOX", &snap).unwrap(), 2);
@@ -339,6 +340,7 @@ fn vanished_unfetched_source_remains_reviewable() {
                 subject: "Pending fetch".into(),
                 from: vec![],
                 sent_at: None,
+                ..Default::default()
             }],
             "g",
             true,

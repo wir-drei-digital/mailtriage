@@ -1,7 +1,7 @@
 use crate::{
     config,
     domain::*,
-    himalaya::Himalaya,
+    engine::{self, himalaya::source_binding, MailEngine},
     normalize, policy, provider,
     store::{now, Record, Store},
 };
@@ -15,6 +15,7 @@ use std::{
     fmt,
     fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
+    rc::Rc,
 };
 
 #[derive(Debug)]
@@ -28,7 +29,7 @@ impl fmt::Display for ServiceError {
     }
 }
 impl std::error::Error for ServiceError {}
-fn err(code: i32, message: impl Into<String>) -> anyhow::Error {
+pub(crate) fn err(code: i32, message: impl Into<String>) -> anyhow::Error {
     ServiceError {
         code,
         message: message.into(),
@@ -62,6 +63,7 @@ pub struct Service {
     path: PathBuf,
     config_bytes_hash: String,
     pub store: Store,
+    engine_override: Option<Rc<dyn MailEngine>>,
 }
 impl Service {
     pub fn open(path: &Path) -> Result<Self> {
@@ -87,7 +89,15 @@ impl Service {
             path,
             config_bytes_hash: hash(&bytes),
             store,
+            engine_override: None,
         })
+    }
+    fn engine(&self, account: &AccountConfig) -> Result<Option<Rc<dyn MailEngine>>> {
+        match (&self.engine_override, account.engine_config()) {
+            (_, None) => Ok(None),
+            (Some(engine), Some(_)) => Ok(Some(Rc::clone(engine))),
+            (None, Some(cfg)) => Ok(Some(engine::open(&cfg)?)),
+        }
     }
     fn account(&self, name: &str) -> Result<AccountConfig> {
         self.config
@@ -99,7 +109,7 @@ impl Service {
     fn ensure(&mut self, name: &str) -> Result<(AccountConfig, String)> {
         let account = self.account(name)?;
         let generation = generation(&self.config, &account)?;
-        let identity = binding_identity(&account)?;
+        let identity = binding_identity(&account, self.engine_override.as_deref())?;
         self.store.ensure_account(name,&identity,&generation).map_err(|_|err(5,"account binding changed or state unavailable; verify config and use a new namespace for a different mailbox"))?;
         let cutoff =
             Utc::now() - Duration::hours(self.config.policy.freshness_hours.min(87600) as i64);
@@ -145,7 +155,7 @@ impl Service {
                 .query_row("SELECT identity FROM accounts WHERE name=?", [name], |r| {
                     r.get(0)
                 })?;
-        if binding_identity(account)? != expected {
+        if binding_identity(account, self.engine_override.as_deref())? != expected {
             return Err(err(5, "Himalaya mailbox identity changed during operation"));
         }
         Ok(())
@@ -169,14 +179,12 @@ impl Service {
             || std::env::var(&self.config.provider.api_key_env)
                 .map(|v| !v.trim().is_empty())
                 .unwrap_or(false);
-        let transport = match &account.himalaya {
-            Some(h) => match Himalaya::new(h).and_then(|h| h.version()) {
-                Ok(v) => json!({"configured":true,"ready":true,"version":v}),
-                Err(_) => {
-                    json!({"configured":true,"ready":false,"error":"Himalaya version/config check failed"})
-                }
-            },
-            None => json!({"configured":false,"ready":true}),
+        let transport = match self.engine(&account).map(|e| e.map(|e| e.version())) {
+            Ok(None) => json!({"configured":false,"ready":true}),
+            Ok(Some(Ok(v))) => json!({"configured":true,"ready":true,"version":v}),
+            _ => {
+                json!({"configured":true,"ready":false,"error":"Himalaya version/config check failed"})
+            }
         };
         Ok(
             json!({"schema_version":1,"account":name,"ready":provider_valid&&key_present&&transport["ready"]==true,"provider":{"kind":self.config.provider.kind,"model":self.config.provider.model,"configuration_valid":provider_valid,"key_present":key_present},"transport":transport,"review_mode":self.config.policy.review_mode,"state_dir":self.config.state_dir,"live_checks_performed":false,"coverage":self.coverage(name)?}),
@@ -204,13 +212,12 @@ impl Service {
         account: &AccountConfig,
         generation: &str,
         id: &str,
-        source: Option<&Himalaya>,
+        source: Option<&dyn MailEngine>,
     ) -> Result<String> {
         let lease_seconds = self.config.provider.timeout_seconds
             + account
-                .himalaya
-                .as_ref()
-                .map(|h| 3 * h.timeout_seconds)
+                .engine_config()
+                .map(|e| 3 * e.timeout_seconds())
                 .unwrap_or(0)
             + 60;
         if !self.store.lease(id, generation, lease_seconds)? {
@@ -228,7 +235,7 @@ impl Service {
                 if h.snapshot(&mailbox)?.uid_validity != epoch {
                     return Err(anyhow!("mailbox epoch changed"));
                 }
-                let raw = h.fetch(&mailbox, uid)?;
+                let raw = h.fetch_raw(&mailbox, uid)?;
                 if h.snapshot(&mailbox)?.uid_validity != epoch {
                     return Err(anyhow!("mailbox epoch changed"));
                 }
@@ -327,12 +334,13 @@ impl Service {
         }
         let _lock = self.lock(name)?;
         let (account, generation) = self.ensure(name)?;
-        let h = account.himalaya.as_ref().map(Himalaya::new).transpose()?;
+        let engine_config = account.engine_config();
+        let h = self.engine(&account)?;
         let mut discovered = 0;
         let mut scan_errors = 0;
-        if let Some(h) = &h {
+        if let (Some(h), Some(cfg)) = (&h, &engine_config) {
             h.version()?;
-            for mailbox in &account.himalaya.as_ref().unwrap().mailboxes {
+            for mailbox in cfg.mailboxes() {
                 let attempt = (|| -> Result<usize> {
                     let snapshot = h.snapshot(mailbox)?;
                     let last = self.store.checkpoint(name, mailbox, &snapshot)?;
@@ -408,7 +416,7 @@ impl Service {
         for id in ids {
             let needed_fetch = self.required(name, &id)?.normalized.is_none();
             match self
-                .process_one(name, &account, &generation, &id, h.as_ref())?
+                .process_one(name, &account, &generation, &id, h.as_deref())?
                 .as_str()
             {
                 "classified" => classified += 1,
@@ -472,9 +480,9 @@ impl Service {
     }
     fn coverage(&self, name: &str) -> Result<Value> {
         let mut coverage = self.store.coverage(name)?;
-        if let Some(h) = &self.account(name)?.himalaya {
+        if let Some(cfg) = self.account(name)?.engine_config() {
             let scans = coverage["scans"].as_array().unwrap();
-            let all_configured = h.mailboxes.iter().all(|m| {
+            let all_configured = cfg.mailboxes().iter().all(|m| {
                 scans
                     .iter()
                     .any(|s| s["mailbox"].as_str() == Some(m.as_str()))
@@ -482,7 +490,7 @@ impl Service {
             if !all_configured {
                 coverage["complete"] = json!(false);
             }
-            coverage["configured_mailboxes"] = json!(h.mailboxes);
+            coverage["configured_mailboxes"] = json!(cfg.mailboxes());
         }
         Ok(coverage)
     }
@@ -748,10 +756,10 @@ impl Service {
         let matched = ids.len();
         self.store.requeue(name, &ids, &generation)?;
         let selected: Vec<_> = ids.into_iter().take(limit).collect();
-        let h = account.himalaya.as_ref().map(Himalaya::new).transpose()?;
+        let h = self.engine(&account)?;
         let mut failed = 0;
         for id in &selected {
-            if self.process_one(name, &account, &generation, id, h.as_ref())? == "failed" {
+            if self.process_one(name, &account, &generation, id, h.as_deref())? == "failed" {
                 failed += 1;
             }
         }
@@ -781,7 +789,7 @@ fn resolve_paths(cfg: &mut AppConfig, path: &Path) {
         cfg.state_dir = base.join(&cfg.state_dir);
     }
     for a in cfg.accounts.values_mut() {
-        if let Some(h) = &mut a.himalaya {
+        if let Some(EngineConfig::Himalaya(h)) = &mut a.engine {
             if h.config.is_relative() {
                 h.config = base.join(&h.config);
             }
@@ -805,56 +813,60 @@ fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-// Credentials rotate without changing the mailbox namespace. Hash connection
-// identity, never retain or expose the account's secret-bearing TOML.
-fn source_binding(h: &HimalayaConfig) -> Result<Value> {
-    let bytes = fs::read_to_string(&h.config)
-        .map_err(|_| err(2, "Himalaya configuration cannot be read"))?;
-    let parsed: toml::Value =
-        toml::from_str(&bytes).map_err(|_| err(2, "invalid Himalaya TOML configuration"))?;
-    let account = parsed
-        .get("accounts")
-        .and_then(|v| v.get(&h.account))
-        .ok_or_else(|| err(2, "Himalaya account is missing from its configuration"))?;
-    let mut imap = serde_json::to_value(
-        account
-            .get("imap")
-            .ok_or_else(|| err(2, "Himalaya account must configure IMAP"))?,
-    )?;
-    let server = imap
-        .get("server")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| err(2, "Himalaya IMAP server is missing"))?
-        .to_string();
-    scrub_secrets(&mut imap);
-    Ok(json!({"account":h.account,"server":server,"imap_identity":imap}))
-}
-fn scrub_secrets(value: &mut Value) {
-    match value {
-        Value::Object(map) => {
-            for (key, value) in map.iter_mut() {
-                if ["password", "passwd", "token", "secret"]
-                    .iter()
-                    .any(|word| key.to_ascii_lowercase().contains(word))
-                {
-                    *value = json!("<credential>");
-                } else {
-                    scrub_secrets(value);
-                }
-            }
-        }
-        Value::Array(values) => {
-            for value in values {
-                scrub_secrets(value);
-            }
-        }
-        _ => {}
-    }
+fn binding_identity(account: &AccountConfig, engine: Option<&dyn MailEngine>) -> Result<String> {
+    let source = match (account.engine_config(), engine) {
+        (None, _) => Value::Null,
+        (Some(_), Some(engine)) => engine.binding_identity()?,
+        (Some(EngineConfig::Himalaya(h)), None) => source_binding(&h)?,
+    };
+    Ok(hash(&serde_json::to_vec(
+        &json!({"identity":account.identity,"source":source}),
+    )?))
 }
 
-fn binding_identity(account: &AccountConfig) -> Result<String> {
-    Ok(hash(&serde_json::to_vec(
-        &json!({"identity":account.identity,"source":account.himalaya.as_ref().map(source_binding).transpose()?}),
-    )?))
+#[cfg(test)]
+mod golden {
+    use crate::domain::HimalayaConfig;
+
+    #[test]
+    fn binding_identity_is_unchanged_for_legacy_himalaya_accounts() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml = dir.path().join("himalaya.toml");
+        std::fs::write(&toml, "[accounts.work]\nimap.server='imaps://example.test'\nimap.sasl.plain.username='work@example.test'\nimap.sasl.plain.password.cmd='pass show work'\n").unwrap();
+        let mut cfg = crate::config::default_config();
+        let a = cfg.accounts.get_mut("work").unwrap();
+        a.identity = "work@example.test".into();
+        a.himalaya = Some(HimalayaConfig {
+            binary: "himalaya".into(),
+            config: toml,
+            account: "work".into(),
+            mailboxes: vec!["INBOX".into()],
+            expected_version: "2.1.0".into(),
+            timeout_seconds: 30,
+            max_output_bytes: 1_000_000,
+        });
+        crate::config::normalize(&mut cfg).unwrap();
+        let a = &cfg.accounts["work"];
+        assert_eq!(
+            super::binding_identity(a, None).unwrap(),
+            "c4a294832a82e8e274fb8bcdf9c2c0daa895f811efe13776ab60da3c7fd50aaa"
+        );
+    }
+
+    #[test]
+    fn generation_hash_is_unchanged_by_filing_and_folder_fields() {
+        let mut cfg = crate::config::default_config();
+        let expected = "6dfd7bf30e6bf1c0b27ee97af991ecf21dc5ac0400044c2f3adbda7f79d37514";
+        assert_eq!(
+            super::generation(&cfg, &cfg.accounts["work"]).unwrap(),
+            expected
+        );
+        let a = cfg.accounts.get_mut("work").unwrap();
+        a.filing.mode = crate::domain::FilingMode::Live;
+        a.categories[0].folder = Some("Mail".into());
+        assert_eq!(
+            super::generation(&cfg, &cfg.accounts["work"]).unwrap(),
+            expected
+        );
+    }
 }

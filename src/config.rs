@@ -1,4 +1,7 @@
-use crate::domain::{AccountConfig, AppConfig, Category, PolicyConfig, ProviderConfig};
+use crate::domain::{
+    AccountConfig, AppConfig, Category, EngineConfig, FilingConfig, FilingMode, PolicyConfig,
+    ProviderConfig,
+};
 use anyhow::{bail, Context, Result};
 use std::{
     collections::BTreeMap,
@@ -25,6 +28,7 @@ pub fn default_config() -> AppConfig {
                     description: "Direct conversations with people".into(),
                     examples: vec![],
                     catch_all: false,
+                    folder: None,
                 },
                 Category {
                     id: "transactions".into(),
@@ -32,6 +36,7 @@ pub fn default_config() -> AppConfig {
                     description: "Receipts, orders and account activity".into(),
                     examples: vec![],
                     catch_all: false,
+                    folder: None,
                 },
                 Category {
                     id: "updates".into(),
@@ -39,6 +44,7 @@ pub fn default_config() -> AppConfig {
                     description: "Status and service updates".into(),
                     examples: vec![],
                     catch_all: false,
+                    folder: None,
                 },
                 Category {
                     id: "newsletters".into(),
@@ -46,6 +52,7 @@ pub fn default_config() -> AppConfig {
                     description: "Editorial mail and subscriptions".into(),
                     examples: vec![],
                     catch_all: false,
+                    folder: None,
                 },
                 Category {
                     id: "promotions".into(),
@@ -53,6 +60,7 @@ pub fn default_config() -> AppConfig {
                     description: "Offers and marketing".into(),
                     examples: vec![],
                     catch_all: false,
+                    folder: None,
                 },
                 Category {
                     id: "other".into(),
@@ -60,13 +68,16 @@ pub fn default_config() -> AppConfig {
                     description: "Mail outside the other categories".into(),
                     examples: vec![],
                     catch_all: true,
+                    folder: None,
                 },
             ],
             himalaya: None,
+            engine: None,
+            filing: FilingConfig::default(),
         },
     );
     AppConfig {
-        schema_version: 1,
+        schema_version: 2,
         state_dir: "./mailtriage-state".into(),
         provider: ProviderConfig {
             kind: "fake".into(),
@@ -88,8 +99,22 @@ pub fn default_config() -> AppConfig {
     }
 }
 
+/// Moves the legacy `himalaya` block into `engine` and marks the config as schema 2.
+pub fn normalize(config: &mut AppConfig) -> Result<()> {
+    for (name, account) in config.accounts.iter_mut() {
+        if let Some(h) = account.himalaya.take() {
+            if account.engine.is_some() {
+                bail!("account {name}: configure either engine or the legacy himalaya block, not both");
+            }
+            account.engine = Some(EngineConfig::Himalaya(h));
+        }
+    }
+    config.schema_version = 2;
+    Ok(())
+}
+
 pub fn validate(config: &AppConfig) -> Result<()> {
-    if config.schema_version != 1 {
+    if !(1..=2).contains(&config.schema_version) {
         bail!(
             "unsupported config schema_version {}",
             config.schema_version
@@ -163,7 +188,10 @@ pub fn validate(config: &AppConfig) -> Result<()> {
         if catch_all != 1 {
             bail!("account {name}: exactly one catch_all category is required");
         }
-        if let Some(h) = &account.himalaya {
+        if account.himalaya.is_some() && account.engine.is_some() {
+            bail!("account {name}: configure either engine or the legacy himalaya block, not both");
+        }
+        if let Some(EngineConfig::Himalaya(h)) = &account.engine_config() {
             if h.binary.as_os_str().is_empty()
                 || h.config.as_os_str().is_empty()
                 || h.account.trim().is_empty()
@@ -178,8 +206,37 @@ pub fn validate(config: &AppConfig) -> Result<()> {
                 bail!("account {name}: Himalaya limits must be positive");
             }
         }
+        if !(1..=1000).contains(&account.filing.max_actions_per_pass) {
+            bail!("account {name}: filing.max_actions_per_pass must be 1..=1000");
+        }
+        if account.filing.mode != FilingMode::Off {
+            let mut folders = std::collections::BTreeSet::new();
+            for cat in &account.categories {
+                let folder = cat.effective_folder();
+                if !valid_folder_name(folder) {
+                    bail!("account {name}: category {:?} needs a valid folder", cat.id);
+                }
+                if folder != "INBOX" && !folders.insert(folder.to_ascii_lowercase()) {
+                    bail!(
+                        "account {name}: category {:?} reuses another category's folder",
+                        cat.id
+                    );
+                }
+            }
+        }
     }
     Ok(())
+}
+
+/// A single printable-ASCII path segment, or the literal `INBOX` (stay in the source folder).
+fn valid_folder_name(folder: &str) -> bool {
+    folder == "INBOX"
+        || (!folder.is_empty()
+            && folder.len() <= 200
+            && folder.trim() == folder
+            && !folder.eq_ignore_ascii_case("inbox")
+            && folder.chars().all(|c| (' '..='~').contains(&c))
+            && !folder.contains(['/', '.', '*', '%', '"', '\\']))
 }
 
 fn valid_id(id: &str) -> bool {
@@ -190,13 +247,16 @@ fn valid_id(id: &str) -> bool {
 }
 pub fn load(path: &Path) -> Result<AppConfig> {
     let data = fs::read(path).with_context(|| format!("read config {}", path.display()))?;
-    let config: AppConfig = serde_json::from_slice(&data).context("parse config JSON")?;
+    let mut config: AppConfig = serde_json::from_slice(&data).context("parse config JSON")?;
+    normalize(&mut config)?;
     validate(&config)?;
     Ok(config)
 }
 
 pub fn save(path: &Path, config: &AppConfig) -> Result<()> {
-    validate(config)?;
+    let mut config = config.clone();
+    normalize(&mut config)?;
+    validate(&config)?;
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -217,7 +277,7 @@ pub fn save(path: &Path, config: &AppConfig) -> Result<()> {
             options.mode(0o600);
         }
         let mut file = options.open(&tmp).context("create temporary config")?;
-        serde_json::to_writer_pretty(&mut file, config).context("serialize config")?;
+        serde_json::to_writer_pretty(&mut file, &config).context("serialize config")?;
         file.write_all(b"\n")?;
         file.sync_all().context("sync temporary config")?;
         fs::rename(&tmp, path).context("replace config atomically")?;
