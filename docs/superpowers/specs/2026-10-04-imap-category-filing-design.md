@@ -2,7 +2,7 @@
 
 Date: 2026-10-04
 Status: Design approved in conversation; written spec revised after review
-round 1.
+round 2.
 Scope: first of two projects. The system tray app is a separate, later spec
 that consumes this one.
 
@@ -26,7 +26,7 @@ read-only fetch, full-fingerprint identity) remains in force.
 | Importance | `\Flagged` only, set when the effective decision is action required or high urgency. No custom keywords. |
 | Existing mail | New mail only. Backfill over N days or the whole inbox is an explicit command. Every filing action has a dry run. |
 | Manual moves in a mail client | Moving into another category's folder is a category correction. Moving back to a source folder pins the message there. Archiving or deleting (leaving all watched folders) marks it done locally. |
-| Folder location | Top level, named after the category. An existing folder with that name is adopted. |
+| Folder location | Top level, named after the category. An existing folder with that name is adopted when its role can be verified, otherwise after explicit confirmation. |
 | Providers | Gmail / Google Workspace, Microsoft 365 / Outlook.com, iCloud, Fastmail / Dovecot. All first-class. |
 | Engine | Himalaya v2.1.0 now, behind a `MailEngine` trait so a native IMAP engine can replace it later. |
 
@@ -38,25 +38,30 @@ Each invariant has at least one dedicated test.
    flag removal, `\Seen` change, folder delete or folder rename.
 2. In filing modes `off` and `dry_run` the engine receives zero write calls
    (create, subscribe, move, store).
-3. Every move and flag is recorded as an intent in SQLite before the engine
-   call. A crash at any point converges on the next pass without a duplicate
-   move, a repeated flag, or a fabricated correction.
+3. Every move, revert and flag is journaled as an intent in SQLite before the
+   engine call, and every persisted intent state has a defined recovery. A
+   crash at any point converges without a duplicate move, a repeated flag, or
+   a fabricated correction.
 4. Automatic filing moves mail only out of configured source folders. Moves
-   from category folders happen only for an explicit correction, pin or unpin.
-5. Every write runs in one IMAP session that first SELECTs the folder; the
-   engine reports the UIDVALIDITY that session observed. Immediately before
-   each write batch, the service re-reads the batch's envelopes and drops any
-   UID whose identity no longer matches. A write whose session saw a different
-   epoch than expected is a detected epoch race: a move is reverted using
-   COPYUID when the server provides it; otherwise the folder pauses and the
-   affected arrivals are quarantined for review.
-6. Filing refuses to enable on a server without the MOVE extension. There is no
+   from other folders happen only for an explicit request (correction, pin,
+   unpin) or to revert an epoch race.
+5. Every write runs in one IMAP session that first SELECTs the folder, and the
+   engine reports the UIDVALIDITY that session observed. Because UIDVALIDITY
+   only increases, a session epoch equal to the epoch in which the batch was
+   verified proves the write addressed the verified messages. A different
+   session epoch is always detected and handled (see Accepted risks).
+6. Filing refuses to write on a server without the MOVE extension. There is no
    COPY + `\Deleted` + EXPUNGE fallback.
 7. A message is moved automatically at most once and receives at most one
    automatic flag attempt, ever. An ambiguous flag outcome is never retried, so
    a user's unflag is never overridden.
 8. Automatic moves and flags use only a classification produced under the
    current classification generation.
+9. Identity is established only by an epoch-bound COPYUID mapping or by the
+   full raw-content fingerprint. Message-ID, size and dates only narrow
+   candidates.
+10. Writes never touch a folder under a safety pause or a message under a
+    block or quarantine; both are lifted only by an explicit command.
 
 ## Architecture
 
@@ -70,31 +75,34 @@ for tests. A later native IMAP engine is a third implementation.
 ```rust
 pub struct EngineCapabilities {
     pub move_supported: bool,
-    pub uidplus: bool,                    // COPYUID available
+    pub uidplus: bool,                     // COPYUID available
+    pub special_use: bool,                 // RFC 6154 advertised
     pub delimiter: Option<char>,
-    pub personal_prefix: String,          // first personal namespace, e.g. "" or "INBOX."
+    pub personal_prefix: String,           // first personal namespace, "" if none
 }
 pub struct FolderInfo {
-    pub name: String,                     // native name, as LIST returns it
-    pub attributes: Vec<String>,          // as LIST returns them, e.g. "\\Sent", "\\Noselect"
-    pub subscribed: bool,                 // present in LSUB
+    pub name: String,                      // native name
+    pub attributes: Vec<String>,           // e.g. "\\Noselect", "\\HasChildren"
+    pub roles: Option<Vec<String>>,        // special-use roles; None = unknown
+    pub subscribed: bool,
 }
-pub struct SourceEnvelope {               // extended; new fields optional
+pub struct SourceEnvelope {                // extended; new fields optional
     pub uid: u64,
     pub subject: String,
     pub from: Vec<Address>,
     pub sent_at: Option<String>,
-    pub message_id: Option<String>,       // ENVELOPE message-id
-    pub internal_date: Option<String>,    // INTERNALDATE as RFC 3339 UTC
-    pub size: Option<u64>,                // RFC822.SIZE
+    pub message_id: Option<String>,
+    pub internal_date: Option<String>,     // INTERNALDATE as RFC 3339 UTC
+    pub size: Option<u64>,
     pub flags: Vec<String>,
 }
-pub struct MoveReport {
-    pub session_epoch: u64,               // UIDVALIDITY seen by the SELECT in the move session
-    pub copyuid: Option<CopyUid>,         // from the tagged/untagged COPYUID response
+pub struct CopyUid { pub target_epoch: u64, pub pairs: Vec<(u64, u64)> } // (source, target)
+pub struct WriteOutcome {
+    pub selected: bool,                    // a1 SELECT returned OK
+    pub session_epoch: Option<u64>,        // UIDVALIDITY seen by that SELECT
+    pub completed: bool,                   // a2 returned OK
+    pub copyuid: Option<CopyUid>,          // kept even when a2 returned NO
 }
-pub struct CopyUid { pub target_epoch: u64, pub pairs: Vec<(u64, u64)> } // (source uid, target uid)
-pub struct StoreReport { pub session_epoch: u64 }
 
 pub trait MailEngine {
     fn version(&self) -> Result<String>;
@@ -111,12 +119,17 @@ pub trait MailEngine {
     fn envelopes(&self, folder: &str, uids: &[u64]) -> Result<Vec<SourceEnvelope>>;
     /// Raw RFC 5322 bytes; never sets \Seen.
     fn fetch_raw(&self, folder: &str, uid: u64) -> Result<Vec<u8>>;
-    /// SELECT folder, then UID MOVE uids target, in one session.
-    fn move_messages(&self, folder: &str, uids: &[u64], target: &str) -> Result<MoveReport>;
-    /// SELECT folder, then UID STORE uids +FLAGS.SILENT (\Flagged), in one session.
-    fn add_flagged(&self, folder: &str, uids: &[u64]) -> Result<StoreReport>;
+    /// One session: SELECT folder; UID MOVE uids target.
+    fn move_messages(&self, folder: &str, uids: &[u64], target: &str) -> Result<WriteOutcome>;
+    /// One session: SELECT folder; UID STORE uids +FLAGS.SILENT (\Flagged).
+    fn add_flagged(&self, folder: &str, uids: &[u64]) -> Result<WriteOutcome>;
 }
 ```
+
+`Err` from a write means no usable response arrived (spawn failure, timeout,
+unparseable output); the outcome is then unknown. Any parsed response is an
+`Ok(WriteOutcome)`, including NO/BAD completions, so partial results such as a
+COPYUID on a failed MOVE are never lost.
 
 Engine construction is a single factory, `engine::open(&EngineConfig) ->
 Result<Box<dyn MailEngine>>`. The service never names `Himalaya` directly. All
@@ -131,47 +144,49 @@ UID mode (never `--seq`), never `--seen`.
 | Trait method | Himalaya v2.1.0 command |
 | --- | --- |
 | `version` | `--version` (unchanged) |
-| `capabilities` | `imap raw` with `CAPABILITY` and `NAMESPACE` pipelined; LIST delimiter |
-| `list_folders` | `--json imap list --all` (names, delimiter, attributes) and `--json imap list` (subscribed set) |
+| `capabilities` | `imap raw` with `CAPABILITY` and `NAMESPACE` pipelined; delimiter from LIST |
+| `list_folders` | `--json imap list --all` and `--json imap list` (subscribed); when SPECIAL-USE is advertised, also `imap raw` `LIST "" "*" RETURN (SPECIAL-USE)` for roles |
 | `create_folder` | `imap create NAME` |
 | `subscribe_folder` | `imap subscribe NAME` |
 | `snapshot` | `--json imap status FOLDER` (unchanged) |
 | `discover` / `envelopes` | `--json imap fetch --mailbox F --envelope --flags --internal-date --size UIDSET` |
-| `fetch_raw` | `message read --mailbox F --raw UID` (unchanged; see aliases below) |
+| `fetch_raw` | `message read --mailbox F --raw UID` (unchanged; see aliases) |
 | `move_messages` | `imap raw` with `a1 SELECT "F"` and `a2 UID MOVE UIDSET "T"` pipelined |
 | `add_flagged` | `imap raw` with `a1 SELECT "F"` and `a2 UID STORE UIDSET +FLAGS.SILENT (\Flagged)` pipelined |
 
-- **Raw responses.** A strict line parser reads only the tagged completions
-  (`a1`/`a2` `OK`/`NO`/`BAD`), `[UIDVALIDITY n]` from the SELECT, and
-  `[COPYUID epoch src-set dst-set]` from the MOVE. Any other content is
-  ignored. A non-`OK` `a1` means nothing was written; a non-`OK` `a2` is an
-  error. Missing `UIDVALIDITY` is an error.
-- **Quoting.** The engine quotes mailbox names as IMAP quoted strings,
-  escaping `"` and `\`. Names outside printable ASCII are encoded as modified
-  UTF-7 only if the provider check confirms Himalaya's LIST JSON returns
-  decoded names; otherwise validation restricts folder names to printable
-  ASCII.
+- **Raw responses.** A strict line parser reads tagged completions
+  (`OK`/`NO`/`BAD`), `[UIDVALIDITY n]` from SELECT, `[COPYUID epoch src dst]`
+  from MOVE, CAPABILITY and NAMESPACE data, and `* LIST (attrs) delim name`
+  lines. Literal-form names (`{n}`) in LIST are an error for that folder.
+  Everything else is ignored.
+- **Quoting.** The engine quotes mailbox names as IMAP quoted strings, escaping
+  `"` and `\`. Non-ASCII names are supported only if the provider check
+  confirms how Himalaya's LIST JSON represents them; otherwise validation
+  restricts folder names to printable ASCII.
 - **UID sets** are comma-joined and capped at 100 UIDs per call.
+- **Configuration binding.** At engine open the Himalaya TOML is read once,
+  its account binding and alias table validated, and its bytes hashed. Every
+  subprocess spawn re-hashes the file first and refuses with a binding error
+  (exit 5) if it changed. The account binding identity is also re-verified
+  immediately before each write batch and before each recovery observation.
 - **Folder aliases.** `message read --mailbox` resolves Himalaya's
   `[mailbox.alias]` table case-insensitively, while the `imap` commands use
-  native names. The engine reads that account's alias table from the Himalaya
-  TOML and fails `doctor`, discovery and filing when any watched folder name
-  case-insensitively equals an alias key that maps to a different native name.
-- **Special-use.** Himalaya's LIST is a plain LIST without
-  `RETURN (SPECIAL-USE)`, so attributes are used when the server sends them and
-  a name denylist applies regardless (see Folders).
+  native names. Discovery, fetch and filing stop for a watched folder whose
+  name case-insensitively equals an alias key mapping to a different native
+  name; `doctor` and `filing status` report the conflict.
 
 ### Module layout
 
 | Path | Responsibility |
 | --- | --- |
 | `src/engine/mod.rs` | Trait, engine types, factory |
-| `src/engine/himalaya.rs` | Himalaya implementation (moved from `src/himalaya.rs`), raw response parser |
-| `src/engine/fake.rs` | In-memory mailbox: folders, UIDs, epochs, flags, COPYUID on/off, call log, fault injection, simulated user moves and epoch resets |
+| `src/engine/himalaya.rs` | Himalaya implementation (moved from `src/himalaya.rs`) |
+| `src/engine/raw.rs` | Raw IMAP response parser |
+| `src/engine/fake.rs` | In-memory mailbox: folders, UIDs, epochs, flags, roles, COPYUID on/off, call log, fault injection, simulated client moves and epoch resets |
 | `src/filing/planner.rs` | Pure planner: state in, actions out |
-| `src/filing/mod.rs` | Pass orchestration: folder resolution, arrival resolution, intent application, placement re-evaluation, done inference |
-| `src/store.rs` | Schema v3 and filing persistence, filing-aware merge |
-| `src/service.rs` | Calls `filing` within `sync`; new filing commands; atomic placement transitions for `correct` |
+| `src/filing/mod.rs` | Pass orchestration |
+| `src/store.rs` | Schema v3, filing persistence, filing-aware merge |
+| `src/service.rs` | Calls `filing` within `sync`; filing commands; atomic transitions for `correct` |
 | `src/cli.rs` | `filing` subcommands |
 
 `mailtriage::himalaya` stays available as a re-export of
@@ -204,94 +219,118 @@ UID mode (never `--seq`), never `--seen`.
   `max_actions_per_pass` is 1..=1000.
 - `categories[].folder` is optional; absent means the category `name`. The
   literal `INBOX` means "stay in the source folder".
-- `filing` and `folder` are excluded from the classification generation hash,
-  so changing them never reclassifies mail. `filing` is not part of `policy`.
+- `filing` and `folder` are excluded from the classification generation hash.
+  `filing` is not part of `policy`.
 - The account binding identity for a Himalaya engine must hash to exactly the
-  value the current release produces from the legacy `himalaya` block, so
-  existing state directories keep working. A test asserts this.
+  value the current release produces from the legacy `himalaya` block. A test
+  asserts this.
 
 **Folder validation applies only when `filing.mode` is not `off`.** Configs
-that never enable filing load exactly as today, whatever their category names.
-`filing enable` validates first and refuses with the list of categories that
-need an explicit `folder`. With filing enabled, `config::validate` requires:
+that never enable filing load exactly as today. `filing enable` validates first
+and refuses with the list of categories that need an explicit `folder`. With
+filing enabled, `config::validate` requires:
 
 - each effective folder is trimmed, nonempty, at most 200 bytes, and a single
   path segment: no `/`, `.`, `*`, `%`, `"`, `\`, or control characters;
-  printable ASCII unless non-ASCII support was confirmed (see Himalaya
-  mapping);
+  printable ASCII unless non-ASCII support was confirmed;
 - every category whose folder is not `INBOX` has a unique folder, compared
   case-insensitively; any case variant of `inbox` other than the literal
   `INBOX` is rejected.
 
-Collisions with source folders are checked online on resolved native names
-(see Folders), because a personal namespace prefix can make distinct
-configured strings name the same mailbox.
+Collisions with source folders are checked online on resolved native names.
 
 ## State (SQLite schema v3)
 
-Migration from v2 runs in one transaction, like the existing migrations.
+Migration from v2 runs in one transaction. It adds columns and tables only;
+placements for existing messages are created by the bootstrap (below).
 
 - `messages` gains `match_key TEXT` and `internal_date TEXT`, with an index on
-  `(account, match_key)`. The extended envelope is kept in `envelope` JSON;
-  every writer of `envelope` (including `attach`) merges fields instead of
-  replacing transport metadata.
-- `filing_state(account PK, mode TEXT, enabled_at TEXT, last_pass TEXT)`.
-- `placements(account, message_id PK, source_folder TEXT, home_folder TEXT,
-  home_epoch INTEGER, home_uid INTEGER, filed_at TEXT, filed_by TEXT,
-  pinned INTEGER, eligible_once INTEGER, requested_target TEXT,
-  request_rev INTEGER, flag_attempted_at TEXT, flagged_at TEXT,
-  blocked_reason TEXT, absent_since TEXT, done_inferred INTEGER,
-  location_state TEXT)`.
-  - `source_folder`: the source folder the message was first discovered in
-    (the first configured source folder if it was first seen elsewhere).
-  - `home_*`: where the message is expected to live, retained even after the
-    occurrence row is removed.
-  - `requested_target`: an explicit target, either a category id or `@source`;
-    resolved to a native folder at plan time, so a category's folder change
-    retargets pending requests.
-  - `request_rev`: incremented by every placement transition.
-  - `location_state`: `known`, `ambiguous` or `absent`.
-- `folders(account, native PK, configured TEXT, category_id TEXT,
-  origin TEXT, state TEXT, subscribed INTEGER, watch_from_uid INTEGER,
-  epoch INTEGER, rescan_below_uid INTEGER, checked_at TEXT, error TEXT)`.
-  `origin` is `created` or `adopted`; `state` is `ok`, `missing`,
-  `special_use`, `noselect`, `retired`, `paused` or `error`.
-- `arrivals(id PK, account, folder, epoch, uid, message_id, candidate_id,
-  intent_id, state TEXT, kind TEXT, created_at, resolved_at)`: written in the
-  same transaction as the discovered occurrence. `state` is `pending` or
-  `resolved`; `kind` is `own_move`, `user_move`, `pinned`, `extra`,
-  `unknown_new`, `rescan` or `quarantined`.
-- `filing_intents(id PK, account, message_id, kind TEXT, folder TEXT,
-  epoch INTEGER, uid INTEGER, target TEXT, target_epoch INTEGER,
-  target_uid_next INTEGER, target_uid INTEGER, request_rev INTEGER,
-  batch TEXT, state TEXT, attempts INTEGER, next_after TEXT, created_at,
-  updated_at, error TEXT)`. `kind` is `move` or `flag`. `target_epoch` and
-  `target_uid_next` are the target's snapshot taken before dispatch;
-  `target_uid` comes from COPYUID when available.
-- `filing_events(id PK, account, message_id, at, kind TEXT, detail TEXT)`:
+  `(account, match_key)`. Every writer of `envelope` (including `attach`)
+  merges fields instead of replacing transport metadata.
+- `filing_state(account PK, mode, enabled_at, bootstrap_done INTEGER,
+  last_pass TEXT)`.
+- `placements(account, message_id PK, ...)`, one row per message with
+  established identity and at least one occurrence:
+  - observed: `home_folder`, `home_epoch`, `home_uid`, `location_state`
+    (`known`, `ambiguous`, `absent`), `absent_since`;
+  - desired: `desired_target` (category id, `@source`, or null for automatic),
+    `pinned`, `eligible_once`, `desired_rev` (incremented by every desired
+    change);
+  - history: `source_folder`, `filed_at`, `filed_by` (`mailtriage`/`user`),
+    `flag_attempted_at`, `flagged_at`, `done_inferred`;
+  - safety: `blocked_reason` (`move_failed`, `duplicate_copy`, `quarantined`,
+    `merge_conflict`).
+- `folders(account, native PK, configured, category_id, origin, state,
+  role_verified INTEGER, confirmed INTEGER, subscribed INTEGER, pause_reason,
+  epoch, watch_from_uid, checked_at, error)`. `origin`: `created`/`adopted`.
+  `state` (observed): `ok`, `missing`, `special_use`, `noselect`,
+  `needs_confirmation`, `retired`, `error`. `pause_reason` (safety, explicit
+  release only): null or `epoch_race`.
+- `arrivals(id PK, account, folder, epoch, uid, message_id, match_key, state,
+  kind, intent_id, created_at, resolved_at)`. `state`: `pending`, `resolved`,
+  `unresolved` (identity could not be established: terminal fetch failure, or
+  the occurrence vanished before fetch). `kind` on resolution: `own_move`,
+  `user_move`, `user_pin`, `extra`, `new`, `rescan`, `quarantined`.
+- `rescan_sets(account, folder, epoch, message_id)`: messages to look for when
+  a folder's epoch resets (see Folders).
+- `filing_intents(id PK, account, message_id, kind, folder, epoch, uid, target,
+  target_epoch, target_uid_next, target_uid, desired_rev, consumes_eligible
+  INTEGER, batch, state, attempts, next_after, dispatched_at, created_at,
+  updated_at, error)`. `kind`: `move`, `revert`, `flag`.
+- `filing_events(id PK, account, message_id, folder, at, kind, detail)`:
   append-only audit log. Kinds: `moved`, `flagged`, `client_correction`,
   `pinned`, `unpinned`, `relocated`, `archived_done`, `reopened`,
   `move_failed`, `flag_failed`, `duplicate_copy`, `epoch_race`,
   `epoch_race_reverted`, `folder_created`, `folder_adopted`,
   `folder_subscribed`, `folder_missing`, `folder_special_use`,
-  `location_ambiguous`.
+  `folder_needs_confirmation`, `location_ambiguous`, `arrival_unresolved`,
+  `merge_conflict`, `released`.
 
-## Identity
+## Identity and placements
 
 `match_key` = SHA-256 of `message_id` (trimmed, case-sensitive), `size`, and
-`internal_date` normalized to UTC RFC 3339 with seconds. It is null when any
-part is missing. It selects candidates; it is not proof of identity:
+`internal_date` normalized to UTC RFC 3339 with seconds; null when Message-ID
+is missing. It narrows candidates and checks batches before writes; it never
+establishes identity.
 
-| Situation | Identity established by |
-| --- | --- |
-| Arrival of our own move, COPYUID available | the COPYUID pair (exact) |
-| Arrival of our own move, no COPYUID | exactly one candidate, it has a `sent` or `uncertain` move intent to this folder, same `target_epoch`, and `uid >= target_uid_next` |
-| Rescan of a category folder after its epoch reset | exactly one candidate whose `home_folder` is this folder |
-| Anything else (user moves, server rules, ambiguous keys) | full raw-content fingerprint, as today |
+**Every** newly discovered occurrence in a watched folder is committed together
+with a `pending` arrival row, in the discovery transaction. Its identity is
+established in one of two ways:
 
-Every write batch re-reads its envelopes first; a UID whose `match_key` (or,
-when null, subject + sender + size) differs from the stored values is dropped
-from the batch and its placement is re-evaluated.
+1. **COPYUID.** The occurrence is the target of a recorded COPYUID pair from a
+   move whose session epoch equalled the source epoch and whose target epoch
+   equals this folder's epoch: it joins that intent's message.
+2. **Fingerprint.** Otherwise it becomes a provisional message (as today),
+   is fetched, and `Store::attach` decides by full raw fingerprint.
+
+Moves on servers without UIDPLUS therefore re-download each moved message once.
+
+**A placement is created** when a message with an established fingerprint has
+an occurrence and no placement yet: on first fetch of a newly discovered
+message, when a merge gives an offline-ingested (`classify`) record its first
+occurrence, and by the bootstrap. Provisional messages have no placement, so
+filing commands on them fail with "identity not yet established; retry after
+sync" (exit 5).
+
+**Filing-aware merge.** When `attach` merges a provisional message into an
+existing one, in one transaction it moves occurrences and arrivals to the
+canonical message, merges envelope metadata, and resolves the provisional's
+pending arrival against the canonical placement. A provisional message cannot
+own intents or placement state. If the provisional message carries local edits
+(overrides or Done), the existing refusal stands; the arrival becomes
+`unresolved` with event `merge_conflict`, the canonical placement gets
+`blocked_reason = merge_conflict`, and both stay listed in `filing status`
+until the user clears the provisional edits and runs `filing retry --arrival`.
+
+**Bootstrap.** On the first pass with mode not `off` (and until
+`bootstrap_done`), placements are created for existing source-managed messages
+with a fingerprint and occurrences: home = the occurrence in the first
+configured source folder by configuration order, then lowest UID; if none is in
+a source folder, the lowest (folder, UID). `source_folder` = that source folder,
+else the first configured source folder. Envelope metadata (internal date,
+size, flags, Message-ID) is hydrated with `envelopes()` in batches of 100 per
+folder per pass. A placement is not eligible for automatic moves or flags
+until hydrated; lacking an internal date it is never "new".
 
 ## Filing mode and "new mail"
 
@@ -299,302 +338,319 @@ from the batch and its placement is re-evaluated.
 `filing_state.mode`:
 
 - `off` → `dry_run` or `live`: set `enabled_at` to now.
-- `dry_run` ↔ `live`: keep `enabled_at`, so mail that arrived during a dry run
-  is filed when going live.
+- `dry_run` ↔ `live`: keep `enabled_at`.
 - anything → `off`: keep the old value; the next enable sets a new one.
 
-A message is **new** when its `internal_date` ≥ `enabled_at`. A message with no
-internal date is never new; only backfill, a correction, or an unpin makes it
-eligible.
+A message is **new** when its `internal_date` ≥ `enabled_at`.
 
 ## Sync pass order
 
-`sync` (and therefore each `watch` pass) runs, under the existing account lock:
+`sync` (and each `watch` pass) runs under the existing account lock:
 
-1. **Engine check.** Version; with mode not `off`, capabilities and the alias
-   check once per pass. Missing MOVE support in `live` stops filing writes for
-   the pass and is reported; discovery and classification continue.
+1. **Engine check.** Version; with mode not `off`, capabilities, alias check
+   and configuration binding once per pass. Without MOVE support, writes are
+   skipped and reported; discovery and classification continue.
 2. **Folder resolution** (mode not `off`; see Folders).
-3. **Discovery.** Source folders as today; with mode not `off`, also category
-   folders in state `ok`, and retired folders still referenced by open intents
-   or pending arrivals. Each new occurrence is committed together with an
-   `arrivals` row when it is a candidate match, a COPYUID target, or lands in a
-   non-source folder. Identity rules above decide whether the occurrence joins
-   an existing message or creates a provisional one.
-4. **Reconciliation.** Existing bounded windows for every watched folder. When
-   a removed occurrence is a placement's home, the placement is re-evaluated.
-5. **Arrival and intent resolution** (mode not `off`).
-6. **Fetch and classify** queued messages, then resolve arrivals whose identity
-   the fingerprint merge just established.
-7. **Plan** (mode not `off`). The pure planner computes actions.
-8. **Apply** (mode `live`). Flags first, in the message's current folder; then
-   moves, batched per (source folder, target folder). Total actions are capped
-   at `max_actions_per_pass`; the remainder waits.
-9. **Done inference** (mode not `off`).
-10. **Summary.** `sync` output gains `filing: {mode, planned, moved, flagged,
-    client_corrections, pinned, archived_done, quarantined, errors}`. Any
-    filing error makes the pass partial (exit 4).
+3. **Discovery** of source folders, and with mode not `off` of category folders
+   in state `ok` or `needs_confirmation`, plus retired or paused folders still
+   referenced by open intents, pending arrivals or rescan sets. Every new
+   occurrence gets a `pending` arrival.
+4. **Reconciliation.** Existing bounded windows for every watched folder.
+5. **Intent resolution** (mode not `off`), before any arrival inference.
+6. **Fetch and classify** queued messages; merges and new placements happen
+   here.
+7. **Arrival resolution and placement re-evaluation** (mode not `off`).
+8. **Bootstrap and hydration** batches (mode not `off`, until done).
+9. **Plan and apply.** The pure planner runs (mode not `off`); in `live`,
+   actions are claimed and applied (flags first, then moves, batched per
+   (folder, target)), capped at `max_actions_per_pass`.
+10. **Done inference** (mode not `off`).
+11. **Summary.** `sync` output gains `filing: {mode, planned, moved, flagged,
+    reverted, client_corrections, pinned, archived_done, quarantined,
+    unresolved, errors}`. Any filing error makes the pass partial (exit 4).
 
-With mode `off`, steps 2, 5, 7, 8 and 9 are skipped and only source folders are
-watched; category folder checkpoints resume where they stopped when filing is
-enabled again.
+With mode `off`, steps 2, 5, 7, 8, 9 and 10 are skipped and only source folders
+are watched; category folder checkpoints resume when filing is enabled again.
 
 ## Planner
 
 `plan(input) -> Plan` is a pure function in `src/filing/planner.rs`.
 `Plan { folders_to_create: Vec<String>, actions: Vec<Action> }`;
-`Action` is `Move { message_id, from: Locator, to: String, request_rev }` or
-`Flag { message_id, at: Locator }`. `filing plan` and `dry_run` passes call the
-same function as `live`. In a preview, a folder that would be created counts as
-resolvable, so the preview shows the moves a live pass would make.
+`Action` is `Move { message_id, from: Locator, to: String, desired_rev,
+consumes_eligible }` or `Flag { message_id, at: Locator }`. `filing plan` and
+`dry_run` passes call the same function as `live`. In a preview, a folder that
+would be created counts as resolvable.
 
 **Effective decision** = the model decision with per-field overrides applied,
-as `Service::item` does today. The `review_mode` reason does not block filing:
-filing has its own dry run. `review_state` (Done) does not affect filing.
+as `Service::item` does today. The `review_mode` reason does not block filing.
+`review_state` (Done) does not affect filing.
 
 **Current classification** = the message's `generation` equals the account's
 current generation and its status is `ready` or `uncertain`.
 
-**Every move requires:** mode is not `off`; `location_state = known`; the home
-folder is a source folder, a category folder in state `ok`, or (for explicit
-moves only) a retired folder that LIST still reports; a known home UID in the
-current epoch; no open move intent; `blocked_reason` empty; and a resolved
-target that differs from home and is resolvable.
+**Desired folder.** `desired_target` resolves to a category's folder, or to
+`source_folder` for `@source` and for a category whose folder is `INBOX`. With
+no `desired_target`, an unpinned message whose home is a source folder desires
+its effective category's folder when the automatic rules below hold; otherwise
+it desires its home.
 
-**Explicit moves** take precedence. When `requested_target` is set, it resolves
-to that category's folder, or to `source_folder` for `@source` or for a
-category whose folder is `INBOX`. If that equals the home folder, the request
-is cleared (rev-checked) without an action; otherwise the message gets a
-`Move` from a source, category or retired folder.
+**Every action requires:** mode not `off`; a placement with
+`location_state = known`, hydrated, not blocked; no open intent of the same
+kind; a known home UID in the current epoch; home folder and target folder
+without `pause_reason`; target folder in state `ok` (or would-create in a
+preview).
 
-**Automatic moves.** Otherwise a message gets a `Move` to its effective
-category's folder when all hold:
+**Moves.** A message gets a `Move` when its desired folder differs from its
+home and:
 
-- its home folder is a source folder and it is not pinned;
-- its classification is current and the effective category is set (model
-  confident, or corrected by the user); a category set by an override needs no
-  current classification;
-- the decision is not based on incomplete input (`input_incomplete`) unless the
-  category was corrected by the user;
-- the category's folder is not `INBOX`;
-- either (a) it is new and `filed_at` is empty, or (b) `eligible_once` is set.
+- for an explicit `desired_target`: the home folder is a source folder, a
+  category folder in state `ok`, or a retired folder that LIST still reports;
+- for an automatic move: the home folder is a source folder; the message is
+  not pinned; its classification is current and the effective category is set
+  (a category from an override needs no current classification); the decision
+  is not based on incomplete input unless the category came from an override;
+  the category's folder is not `INBOX`; and either it is new with `filed_at`
+  empty, or `eligible_once` is set (`consumes_eligible = true`).
 
-**Flags.** A message gets a `Flag` when `filing.flag` is true, mode is not
-`off`, `flag_attempted_at` is empty, no flag intent exists, its current envelope
-lacks `\Flagged`, and the effective decision has `action_required == true` or
-`urgency == high`, where each field comes from an override or a current
-classification. Flag eligibility does not depend on "new".
+**Flags.** A message gets a `Flag` when `filing.flag` is true,
+`flag_attempted_at` is empty, its current envelope lacks `\Flagged`, and the
+effective decision has `action_required == true` or `urgency == high`, where
+each field comes from an override or a current classification. Flags do not
+depend on "new".
 
-**Ordering and caps.** Actions are ordered by internal date, oldest first,
-flags before moves for the same message, and truncated at
-`max_actions_per_pass`.
+**Ordering and caps.** Oldest internal date first, flags before moves for the
+same message, truncated at `max_actions_per_pass`.
 
 ## Placement transitions
 
-Each transition is one SQLite transaction that bumps `request_rev`. Commands
-that change overrides do so with the existing compare-and-swap in that same
-transaction.
+Each transition is one SQLite transaction. Changes to the desired fields bump
+`desired_rev`. Commands that change overrides do so with the existing
+compare-and-swap in that same transaction.
 
 | Trigger | Change |
 | --- | --- |
-| `correct` sets or clears `category_id` (filing not `off`) | `requested_target` = new effective category id; `pinned = 0`; `blocked_reason` cleared |
+| `correct` sets or clears `category_id` (filing not `off`) | `desired_target` = new effective category id; `pinned = 0`; clears `move_failed` block |
 | `correct` of other fields | none |
-| `filing pin` | `pinned = 1`; `requested_target = @source` if home is not a source folder, else cleared; `blocked_reason` cleared |
-| `filing unpin` | `pinned = 0`; `eligible_once = 1`; `requested_target` cleared; `blocked_reason` cleared |
-| `filing retry` | `blocked_reason` cleared; `eligible_once = 1` |
-| Move intent applied | home updated; `filed_at`, `filed_by = mailtriage`; `eligible_once` cleared; `requested_target` cleared only if the intent's `request_rev` equals the current one |
-| Client correction (user move into category C) | override `category_id = C` unless already C; home updated; `filed_by = user`; `pinned = 0`; `requested_target` cleared |
-| User move into a source folder | home updated; `pinned = 1`; `requested_target` cleared |
-| Move fails terminally, or a duplicate copy is found | `blocked_reason` set |
+| `filing pin` | `pinned = 1`; `desired_target = @source` (a no-op only if home is a source folder and no move intent is open) |
+| `filing unpin` | `pinned = 0`; `desired_target` cleared; `eligible_once = 1` |
+| `filing retry --id` | clears `move_failed`, `duplicate_copy` or `quarantined`; `eligible_once = 1` |
+| Move applied | observed home updated; `filed_at`, `filed_by = mailtriage`; `desired_target` cleared only if the intent's `desired_rev` equals the current one; `eligible_once` cleared only if the intent has `consumes_eligible` and `desired_rev` still matches |
+| Client move into category C | override `category_id = C` unless already C; home updated; `filed_by = user`; `pinned = 0`; `desired_target` cleared |
+| Client move into a source folder | home updated; `pinned = 1`; `desired_target` cleared |
+| Move fails terminally / duplicate copy / quarantine | `blocked_reason` set |
 
-The planner never plans for a blocked message. Blocks are cleared only by an
-explicit transition above.
+**Claiming.** In `live`, each action is claimed by one transaction that
+re-reads the placement, checks the action's `desired_rev` equals the current
+one and no blocking condition appeared, and writes the intent `in_flight`. A
+stale action is dropped for this pass.
 
 ## Writes and recovery
 
 ### Moves
 
-For each batch (folder F at epoch E, target T):
+For each batch (folder F, verified epoch E, target T):
 
-1. Re-read the batch's envelopes in F and drop mismatches (see Identity).
-2. Snapshot T: `target_epoch`, `target_uid_next`.
-3. Write the intents `in_flight` with locators, target snapshot and
-   `request_rev`.
-4. Call `move_messages`.
-   - Success and `session_epoch == E`: intents → `sent`, source occurrences
-     removed, COPYUID target UIDs stored. Arrivals at those UIDs resolve as
-     `own_move` → `applied`.
-   - Success but `session_epoch != E` (epoch race): with COPYUID, move the
-     reported target UIDs back to F's new epoch the same way, event
-     `epoch_race_reverted`; without COPYUID, pause F, event `epoch_race`, and
-     quarantine every arrival in T at `uid >= target_uid_next` in
-     `target_epoch` that no intent explains (ingested, no correction, listed in
-     `filing status`). The batch's intents become `uncertain`.
-   - Error: intents → `uncertain`.
-5. Resolving `uncertain` on a later pass observes both endpoints:
-   - found in T (by the identity rules) and absent from F → `applied`;
-   - found in T and still in F → `failed`, `blocked_reason = duplicate_copy`,
-     event `duplicate_copy` (a partial MOVE may leave a copy; mailtriage never
-     deletes);
-   - still in F, not in T, and T is scanned through its current `UIDNEXT - 1`
-     in `target_epoch` → retry with the job backoff schedule up to
-     `policy.max_attempts`, then `failed` with `blocked_reason = move_failed`;
-   - absent from both → `sent`.
-   - If T's epoch changed since `target_epoch`, UID comparisons are invalid:
-     the intent waits until T is rescanned and then decides by identity rules.
-6. A `sent` intent becomes `lost` when T is scanned through the `UIDNEXT - 1`
-   observed after the move in `target_epoch`, every provisional message in that
-   range has been fetched or has failed terminally, and no arrival matched.
-   The placement's `location_state` becomes `absent`.
+1. Re-verify the binding; re-read the batch's envelopes in F with `envelopes()`
+   bracketed by `snapshot(F)` before and after. Drop UIDs that are absent or
+   whose `match_key` differs from the stored one (their placements are
+   re-evaluated); abort the batch if F's epoch is not E.
+2. `snapshot(T)` → `target_epoch`, `target_uid_next`.
+3. Claim the actions (intents `in_flight`, `dispatched_at = now`).
+4. `move_messages(F, uids, T)`:
+   - `selected` with `session_epoch == E`: record COPYUID pairs if any. If
+     `completed`: intents → `sent`, source occurrences removed. If not
+     completed: intents → `uncertain` (a partial MOVE may have happened).
+   - `selected` with `session_epoch != E`: **epoch race** (see below).
+   - not `selected`: nothing was written; intents → `uncertain`, resolved as
+     "still in F".
+   - `Err`: intents → `uncertain`.
+
+**Intent recovery** (step 5 of each pass, and after any crash):
+
+| State | Recovery |
+| --- | --- |
+| `in_flight` | Treated as `uncertain`. |
+| `sent` | Waits for its arrival. Becomes `lost` once T has been scanned, in `target_epoch`, through the `UIDNEXT - 1` of a snapshot taken after `dispatched_at`, and every arrival in T at `uid >= target_uid_next` is resolved or unresolved with a different `match_key`. A lost move sets `location_state = absent`. |
+| `uncertain` | Re-verify binding, then observe both ends: present in T (COPYUID or a resolved arrival at `uid >= target_uid_next`) and absent from F → `applied`. Present in both → `failed`, `blocked_reason = duplicate_copy`. Present in F only, with T scanned as for `lost` → retry with the job backoff up to `policy.max_attempts`, then `failed`, `blocked_reason = move_failed`. Absent from both → `sent`. |
+| any, T epoch changed | UID comparisons in T are invalid; the intent's message is added to T's rescan set and the intent waits until the rescan completes, then applies the rules above. |
+| any, F epoch changed | Presence in F is decided by the rescan of F the same way. |
+
+Arrivals at the target that belong to an open intent are resolved only as that
+intent's outcome; client-move inference never runs for a message with an open
+move or revert intent.
+
+### Epoch race
+
+The write session saw a different epoch than the batch was verified in, so it
+may have acted on other messages.
+
+- **Move with COPYUID**: journal a `revert` intent per reported pair, then move
+  the reported target UIDs from T back to F's session epoch with the same
+  procedure (verification step 1 uses the COPYUID target epoch). Event
+  `epoch_race_reverted`. A revert is never itself reverted: a race during a
+  revert falls through to the next case.
+- **Move without COPYUID, or a failed revert**: F gets
+  `pause_reason = epoch_race`; every arrival in T at `uid >= target_uid_next`
+  in `target_epoch` that no intent explains is resolved `quarantined`, and the
+  resulting placements get `blocked_reason = quarantined`. Event `epoch_race`.
+- **Flag**: F gets `pause_reason = epoch_race`; event `epoch_race` (another
+  message may now be flagged; flags are never removed).
+
+The batch's original intents become `uncertain` and resolve normally once F is
+released and rescanned.
 
 ### Flags
 
-1. Re-read the envelope; skip if it already has `\Flagged`.
-2. In one transaction: write the flag intent and set `flag_attempted_at`. This
-   consumes the message's only automatic flag attempt.
-3. Call `add_flagged`.
-   - Success and `session_epoch == E` → `applied`, `flagged_at`, event
-     `flagged`.
-   - Success but epoch race → `failed`, event `epoch_race`, folder paused for
-     review (another message may now be flagged).
-   - Error → `uncertain`. On the next pass, re-read flags: `\Flagged` present →
-     `applied`; absent → `failed`, event `flag_failed`. Never retried.
+1. Re-verify binding and re-read the envelope as for moves; skip if it already
+   has `\Flagged`.
+2. Claim: in one transaction write the flag intent and set
+   `flag_attempted_at`. This consumes the only automatic flag attempt.
+3. `add_flagged(F, [uid])`, batched per folder:
+   - `selected`, `session_epoch == E`, `completed` → `applied`, `flagged_at`,
+     event `flagged`;
+   - epoch race → as above, intent `failed`;
+   - anything else → `uncertain`. Next pass: re-read flags; `\Flagged` present
+     → `applied`; absent → `failed`, event `flag_failed`. Never retried.
 
-A crash between steps 2 and 3 leaves the message unflagged; that is the cost of
-never overriding a user's unflag.
+A crash between claim and dispatch leaves the message unflagged; that is the
+price of never overriding a user's unflag.
 
 ## Arrivals and location
 
-### Arrivals
+### Arrival resolution
 
-| Arrival | Home UID still present | Result |
+Step 7 resolves `pending` arrivals whose identity is established and whose
+message has no open intent:
+
+| Arrival | Home UID still present (`envelopes` on `home_folder`/`home_epoch`/`home_uid`) | Result |
 | --- | --- | --- |
-| Our move (identity per rules) | n/a | `own_move`: intent applied |
-| Category C's folder, identity established | no | `user_move`: client-correction transition |
-| A source folder, identity established | no | `pinned`: user-move-into-source transition |
-| Any folder, identity established | yes | `extra`: occurrence recorded, no change |
-| Category folder, fingerprint matches no known message | n/a | `unknown_new`: after classification, home = this folder, `filed_by = user`, client-correction override to C. Never moved automatically |
-| Rescan after epoch reset of a category folder | n/a | `rescan` (see Folders) |
+| Category C's folder | no | `user_move`: client move into category C |
+| A source folder | no | `user_pin`: client move into a source folder |
+| Any watched folder | yes | `extra`: occurrence recorded, no change |
+| Category C's folder, message had no placement | n/a | `new`: placement with home here, `filed_by = user`, client-correction override to C, never moved automatically |
+| Source folder, message had no placement | n/a | `new`: ordinary new mail |
 
-"Home UID still present" is checked with one batched `envelopes` call per home
-folder using `home_epoch`/`home_uid`, which survive reconciliation. Arrivals
-whose identity needs a fingerprint stay `pending` until the provisional message
-is fetched; a provisional message linked to a pending arrival gets no override
-until then, so the fingerprint merge can always run.
-
-The fingerprint merge (`Store::attach`) becomes filing-aware: in one
-transaction it moves occurrences, arrivals and intents from the provisional to
-the canonical message, merges envelope metadata, drops the provisional
-placement, and resolves the pending arrival against the canonical placement.
+An arrival whose provisional message failed to fetch terminally, or whose
+occurrence vanished before fetch, becomes `unresolved` (event
+`arrival_unresolved`). `filing retry --arrival ID` requeues its fetch if the
+occurrence still exists.
 
 ### Placement re-evaluation
 
-When the home occurrence disappears (reconciliation or a write-batch check):
+When a placement's home occurrence disappears (reconciliation, or a write-batch
+check), and its message has no open intent:
 
-- one surviving occurrence in a watched folder → home moves there; if it is a
-  category folder whose category differs, apply the client-correction
-  transition, otherwise event `relocated`;
-- several surviving category-folder occurrences → `location_state = ambiguous`,
-  event `location_ambiguous`, no automatic action until one remains or the user
-  issues an explicit transition;
+- exactly one surviving occurrence in a watched folder → the matching client
+  move transition (category folder → client move into that category; source
+  folder → client move into a source folder, which pins); a surviving
+  occurrence in the same category records only `relocated`;
+- several surviving occurrences → `location_state = ambiguous`, event
+  `location_ambiguous`;
 - none → `location_state = absent`, `absent_since = now`.
 
-Home and `location_state` always follow confirmed observations; only redundant
-override writes are suppressed.
+**Resolving ambiguity.** `filing pin`, `filing unpin`, `filing retry --id` and
+`correct --category` on an ambiguous placement first select a home
+deterministically: the occurrence in the newly desired folder if present, else
+an occurrence in a source folder (configuration order, lowest UID), else the
+lowest (folder, UID). The placement becomes `known`; other occurrences remain
+extras.
 
 ### Done inference
 
-A placement with `location_state = absent` is marked done locally
-(`review_state = done`, `done_inferred = 1`, event `archived_done`) on a later
-pass when all hold:
+An `absent` placement is marked done when all hold, checked and applied in one
+transaction with `UPDATE ... WHERE review_state = 'open'` (an explicitly done
+message is never touched and keeps `done_inferred = 0`):
 
-- the message is source-managed (it was discovered from a watched folder);
-  messages ingested with `classify` have no placement and are never inferred;
-- it still has no occurrence in any watched, retired or missing folder;
+- it is still absent from every watched, retired, paused or missing folder;
 - every watched folder's checkpoint is complete in an epoch unchanged since
-  `absent_since`;
-- no pending arrival exists in the account, no provisional message discovered
-  after `absent_since` is still awaiting a non-terminal fetch, and the message
-  has no `in_flight`, `sent` or `uncertain` intent.
+  `absent_since`, and no rescan is in progress;
+- no `pending` arrival exists in the account;
+- no `unresolved` arrival exists with the same `match_key` (null matches null);
+- it has no open intent.
 
-If the message later reappears, `location_state` returns to `known`; if
-`done_inferred = 1`, it is reopened (`review_state = open`, `done_inferred = 0`,
-event `reopened`). An explicit `done` sets `done_inferred = 0` and is never
-reversed by observation.
+On success: `review_state = done`, `done_inferred = 1`, event `archived_done`.
+If the message reappears, `location_state` returns to `known`, and when
+`done_inferred = 1` it is reopened (`review_state = open`, `done_inferred = 0`,
+event `reopened`). `done` and `reopen` commands set `done_inferred = 0`.
 
 ## Folders
 
 Each pass with mode not `off`:
 
-1. LIST and LSUB once.
+1. LIST and LSUB once; with SPECIAL-USE advertised, also the extended LIST for
+   roles.
 2. For each category whose folder is not `INBOX`, the native name is
-   `personal_prefix + folder` (the first personal namespace reported by
-   NAMESPACE, else empty). It is rejected if it equals a source folder's native
-   name, and recorded in `folders` with the configured name.
+   `personal_prefix + folder`. A native name equal to a source folder's native
+   name is rejected (category paused, reported).
 3. Present in LIST:
-   - with `\Noselect` or `\NonExistent` → state `noselect`;
-   - with a special-use attribute (`\Sent`, `\Trash`, `\Drafts`, `\Junk`,
-     `\Archive`, `\All`, `\Flagged`), or a name in the denylist (`Sent`,
+   - `\Noselect` or `\NonExistent` → `noselect`;
+   - any role (`\Sent`, `\Trash`, `\Drafts`, `\Junk`, `\Archive`, `\All`,
+     `\Flagged`) → `special_use`;
+   - roles known and empty (`role_verified = 1`) → `ok`, adopted;
+   - roles unknown (no SPECIAL-USE support) → `needs_confirmation` unless
+     `confirmed = 1`, event `folder_needs_confirmation`; `filing adopt
+     --folder NAME` sets `confirmed = 1`. A name on the denylist (`Sent`,
      `Sent Items`, `Sent Messages`, `Trash`, `Deleted Items`,
      `Deleted Messages`, `Bin`, `Drafts`, `Junk`, `Junk E-mail`, `Spam`,
-     `Archive`, `All Mail`, `Starred`, `Important`, and anything under
-     `[Gmail]` or `[Google Mail]`, compared case-insensitively) → state
-     `special_use`;
-   - otherwise state `ok`; recorded as `adopted` unless already recorded.
-4. Absent from LIST and never recorded → `create_folder` in `live` (state
-   `ok`, origin `created`); a preview reports it in `folders_to_create`.
-5. Absent from LIST but previously recorded → `missing`, event
-   `folder_missing`; never recreated automatically. Recreating it in a mail
-   client makes it `ok` again (adopted) on the next pass.
+     `Archive`, `All Mail`, `Starred`, `Important`, or under `[Gmail]` /
+     `[Google Mail]`, case-insensitive) is `special_use` regardless.
+4. Absent from LIST and never recorded → `create_folder` in `live` (state `ok`,
+   origin `created`, `role_verified = 1`); a preview lists it in
+   `folders_to_create`.
+5. Absent but previously recorded → `missing`, event `folder_missing`; never
+   recreated automatically. If it reappears it is re-resolved by rule 3.
 6. Every `ok` category folder not in LSUB → `subscribe_folder` in `live`;
-   `subscribed` is tracked separately from creation, so a crash between create
-   and subscribe is completed on the next pass.
+   `subscribed` is tracked separately, so a crash between create and subscribe
+   completes next pass.
 7. A recorded folder no longer referenced by any category → `retired`. It stays
-   watched while open intents or pending arrivals reference it; afterwards its
-   occurrences are frozen (kept, not rescanned) and still count as present for
-   done inference.
+   watched while open intents, pending arrivals or rescan sets reference it;
+   afterwards its occurrences are frozen and still count as present for done
+   inference.
 
-Filing into a category whose folder is not `ok` pauses; the pause and reason
-are listed in `filing status`. Folders are never deleted or renamed.
+`pause_reason` is independent of the observed state: rule 3 never clears it.
+`filing retry --folder NAME` clears it (event `released`) and schedules a
+rescan of that folder.
 
 **First watch.** A category folder's checkpoint starts at its current
-`UIDNEXT - 1`, so pre-existing content is never ingested.
+`UIDNEXT - 1`; pre-existing content is never ingested.
 
-**Epoch reset of a category folder.** Its occurrences are invalidated as today,
-and it is rescanned from UID 1. Below the `UIDNEXT` observed at the reset
-(`rescan_below_uid`), envelopes only re-attach to known messages whose home is
-this folder (`rescan` arrivals); unmatched content is not ingested. Above it,
-discovery proceeds normally.
+**Epoch reset of any watched folder.** Before the existing code deletes its
+occurrences, the message ids of those occurrences, of placements whose home is
+the folder, of open intents targeting it and of pending arrivals in it are
+written to `rescan_sets`. The folder is rescanned from UID 1. For a category
+folder, an envelope below the reset-time `UIDNEXT` becomes a provisional
+message only if its `match_key` equals that of a rescan-set member (null keys
+match null-key members); other pre-existing content is not ingested. Identity
+is then established by fingerprint as usual (arrival kind `rescan`). When the
+rescan completes, rescan-set members not found are re-evaluated.
 
 ## Commands
 
-All take `--account` and `--json`, keep the existing response envelope
-(`schema_version`, `error.code`/`error.message`) and exit codes, and are safe to
-retry.
+All take `--account` and `--json`, keep the existing response envelope and exit
+codes, and are safe to retry.
 
 | Command | Effect |
 | --- | --- |
-| `filing status` | Mode, `enabled_at`, MOVE/UIDPLUS support, folders with origin and state, paused categories, open/uncertain/failed intents, blocked, ambiguous, quarantined and eligible-but-unfiled counts, last pass summary. Read-only; no engine calls. |
-| `filing enable --mode dry-run\|live` | Validates folders, then writes `filing.mode` under the exclusive config lock (as `categories apply` does). Idempotent. |
+| `filing status` | Mode, `enabled_at`, bootstrap progress, MOVE/UIDPLUS/SPECIAL-USE support, folders (origin, state, pause, subscription), paused categories, intents by state, counts of blocked, quarantined, ambiguous, unresolved and eligible-but-unfiled messages, alias conflicts, last pass summary. Read-only; no engine calls. |
+| `filing enable --mode dry-run\|live` | Validates folders, then writes `filing.mode` under the exclusive config lock. Idempotent. |
 | `filing disable` | Writes `filing.mode = off`. Takes effect at the next pass. |
-| `filing plan [--limit N]` | Read-only. Runs the planner on local state and lists `folders_to_create` and actions. |
-| `filing backfill (--days N \| --all) [--apply]` | Without `--apply`: lists messages in source folders that would become eligible. With `--apply`: requires mode `live`, sets `eligible_once`; later passes file them in capped batches. |
-| `filing pin --id ID` / `filing unpin --id ID` | Placement transitions as above. |
-| `filing retry --id ID` | Clears a block. |
+| `filing plan [--limit N]` | Read-only planner output: `folders_to_create` and actions. |
+| `filing backfill (--days N \| --all) [--apply]` | Lists source-folder placements that would become eligible; `--apply` (requires `live`) sets `eligible_once` on them. `--days` uses the hydrated internal date. |
+| `filing pin --id ID` / `filing unpin --id ID` | Placement transitions. |
+| `filing retry --id ID \| --folder NAME \| --arrival ID` | Clears a message block or quarantine, releases a folder's safety pause, or requeues an unresolved arrival. |
+| `filing adopt --folder NAME` | Confirms adoption of an existing folder whose role could not be verified. |
 | `filing log [--id ID] [--limit N]` | Recent `filing_events`, newest first. |
 
 Changes to existing commands:
 
 - `list` / `read` items gain `placement: {folder, location_state, filed_by,
-  pinned, flagged, blocked_reason, pending_action}`. Existing fields are
-  unchanged.
-- `correct` performs the placement transition atomically with the override;
-  `placement.pending_action` shows the queued move. With filing `off` it changes
-  only the override, as today.
+  pinned, flagged, blocked_reason, pending_action}` (null without a placement).
+- `correct` performs the placement transition atomically with the override.
+  With filing `off` it changes only the override, as today.
 - `done` / `reopen` set `done_inferred = 0`.
-- `doctor` gains `filing: {mode, move_supported, uidplus, personal_prefix,
-  alias_conflicts, folders, problems}` when mode is not `off`. It performs
-  LIST, LSUB, CAPABILITY and NAMESPACE but no writes.
+- `doctor` gains `filing: {mode, move_supported, uidplus, special_use,
+  personal_prefix, alias_conflicts, folders, problems}` when mode is not `off`;
+  read-only engine calls only.
 - `categories validate` / `apply` enforce the folder rules when filing is on.
 - `init` writes the new config shape with `filing.mode = off`.
 
@@ -602,48 +658,63 @@ Changes to existing commands:
 
 | Failure | Behaviour |
 | --- | --- |
-| MOVE or STORE error | Intents `uncertain`; resolved by observation as above. |
+| MOVE or STORE error / partial | Intents `uncertain`; resolved by observation. |
 | Epoch race | Reverted with COPYUID, else folder paused and arrivals quarantined. |
-| Folder creation or subscription error | Folder state `error`; category pauses; retried next pass. |
-| Alias conflict | Discovery of the conflicting folder and all filing writes stop; reported by `doctor` and `filing status`. |
-| Authentication, throttling, network | Pass ends partial (exit 4); `watch` continues with its existing interval. |
-| Config changed during a pass | Existing `require_unchanged` check before applying writes. |
+| Folder creation or subscription error | Folder `error`; category pauses; retried next pass. |
+| Alias conflict | That folder's discovery and fetch stop; filing writes stop. |
+| Himalaya config changed during a pass | Engine refuses further calls; pass ends with exit 5. |
+| Authentication, throttling, network | Pass partial (exit 4); `watch` continues on its interval. |
+| mailtriage config changed during a pass | Existing `require_unchanged` check before claiming writes. |
 
 Error text never includes message bodies, subjects or credentials.
 
+## Accepted risks
+
+- **Verification-to-write window.** The Himalaya engine verifies a batch in one
+  subprocess and writes in another, so a mailbox recreated in the milliseconds
+  between them can be written to in its new epoch. Invariant 5 guarantees
+  detection; moves are reverted with COPYUID where available, otherwise the
+  folder pauses and arrivals are quarantined; a mistaken flag stays (flags are
+  never removed) and is reported. A native IMAP engine closes the window by
+  checking SELECT's UIDVALIDITY before sending the write.
+- **Re-download without UIDPLUS.** Identity of moved mail is established by
+  fingerprint, costing one extra download per moved message.
+- **Configuration change race.** The Himalaya TOML is re-hashed before every
+  spawn; a change within microseconds of a spawn is not detected.
+
 ## Testing
 
-- **Planner**: table-driven unit tests for every move and flag rule, explicit
-  versus automatic precedence, the new-mail boundary, pin, `eligible_once`,
-  blocks, `INBOX` targets, paused and retired folders, preview folders,
-  incomplete input, review mode, stale generation, ordering and the cap.
-- **Raw parser**: SELECT/MOVE/STORE responses with and without COPYUID,
-  NO/BAD at each tag, missing UIDVALIDITY, untagged noise.
-- **Service with `FakeEngine`**: new mail filed; `dry_run` and `off` make zero
-  write calls; user move becomes a correction only after fingerprint identity;
-  move back pins; archive becomes done only after the done conditions;
-  reappearance reopens an inferred done but not an explicit one; a second Gmail
-  label is ignored; copy-then-delete in a client relocates; several surviving
-  occurrences become ambiguous; crash injected before, during and after each
-  write converges; epoch race with and without COPYUID; duplicate copy blocks;
-  terminal move failure blocks until `retry`; a newer correction survives an
-  older intent's completion; stale-generation classifications are not acted
-  on; flag attempted once and never retried; retired folder with an in-flight
-  move resolves; missing folder freezes; epoch-reset rescan re-attaches without
-  ingesting; backfill applies in capped batches; adopted folder content is not
-  ingested; filing-aware merge preserves metadata and moves references.
-- **Config**: legacy `himalaya` configs load and save as `engine`; legacy
-  category names load with filing off; binding identity hash unchanged; folder
-  validation with filing on; generation hash unchanged by `filing` and
-  `folder`.
+- **Planner**: table-driven unit tests for every rule above, including explicit
+  versus automatic precedence, pin with an open intent, `eligible_once`
+  consumption, blocks, pauses, quarantine, `INBOX` targets, retired and
+  preview folders, incomplete input, review mode, stale generation,
+  unhydrated placements, ordering and the cap.
+- **Raw parser**: SELECT/MOVE/STORE/CAPABILITY/NAMESPACE/LIST responses, with
+  and without COPYUID, NO/BAD at each tag, partial COPYUID with NO, missing
+  UIDVALIDITY, literals, untagged noise.
+- **Service with `FakeEngine`**: every row of the transition, intent-recovery,
+  arrival and re-evaluation tables; zero write calls in `off`/`dry_run`;
+  crash injection before, during and after each write; epoch race with and
+  without COPYUID, during a revert, and for flags; duplicate copy; stale claim
+  dropped after a concurrent `correct` or `pin`; newer correction survives an
+  older intent; flag attempted once; done inference blocked by pending and
+  same-key unresolved arrivals, never applied to explicit done, reversed on
+  reappearance; target epoch reset during a `sent` move; bootstrap and
+  hydration on an existing database; offline-ingested record gaining an
+  occurrence; merge conflict; folder confirmation, pause release, missing and
+  retired folders; adopted content not ingested; backfill in capped batches.
+- **Config**: legacy configs load and save as `engine`; legacy category names
+  load with filing off; binding identity hash unchanged; folder validation
+  with filing on; generation hash unchanged by `filing` and `folder`;
+  Himalaya TOML change detection.
 - **Himalaya contract**: the fake-binary tests assert exact argument arrays and
-  raw command text for every operation, UID mode, quoting, and that
+  raw command text for every operation, quoting, UID mode, and that
   `expunge`, `delete`, `rename`, `-FLAGS`, `--action remove`, `--action set`,
   `--seq` and `--seen` never occur.
 - **Dovecot end to end**: a Linux CI job runs the real Himalaya v2.1.0 release
   binary (pinned by checksum) against a Dovecot container with seeded mail, in
   two namespace layouts (no prefix with `/`, and `INBOX.` prefix with `.`), and
-  exercises enable → live filing → client move → pin → archive.
+  exercises enable → live filing → client move → pin → archive → epoch reset.
 - **Live provider check** (below).
 
 ## Live provider check
@@ -653,11 +724,11 @@ needs one throwaway test account per provider, configured in Himalaya by the
 user; no credentials enter this repository. For Gmail, Microsoft 365, iCloud
 and Fastmail or a Dovecot host, record in `docs/verification.md`:
 
-- `imap raw` output for pipelined `CAPABILITY`/`NAMESPACE` and
-  `SELECT` + `UID MOVE` (UIDVALIDITY and COPYUID presence) and
-  `SELECT` + `UID STORE`;
+- `imap raw` output for pipelined `CAPABILITY`/`NAMESPACE`, `SELECT` +
+  `UID MOVE` (UIDVALIDITY, COPYUID), `SELECT` + `UID STORE`, and
+  `LIST "" "*" RETURN (SPECIAL-USE)`;
 - `imap list --all --json` and `imap list --json` shapes, delimiter,
-  attributes actually returned, name encoding for a non-ASCII folder;
+  attributes returned, and the representation of a non-ASCII folder name;
 - the alias table location in the Himalaya TOML;
 - create and subscribe for an ASCII and a non-ASCII name;
 - INTERNALDATE, size and Message-ID before and after a move;
@@ -666,12 +737,12 @@ and Fastmail or a Dovecot host, record in `docs/verification.md`:
 - Gmail: label semantics of MOVE from INBOX, archive, and a message carrying
   two category labels;
 - login rate: one `watch` with seven watched folders at a 60-second interval
-  for 30 minutes without throttling; if throttled, record whether pipelined
-  STATUS via `imap raw` resolves it.
+  for 30 minutes without throttling; if throttled, whether pipelined STATUS via
+  `imap raw` resolves it.
 
 Outcome per provider: go, go with noted differences, or no-go. A no-go blocks
-enabling `live` for that provider until resolved (for example by a native IMAP
-engine) and is documented in the README.
+enabling `live` for that provider until resolved and is documented in the
+README.
 
 ## Out of scope
 
