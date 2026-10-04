@@ -193,8 +193,12 @@ fn list_line(s: &str) -> Option<ListLine> {
 }
 
 pub fn quote_mailbox(name: &str) -> Result<String> {
-    if name.is_empty() || !name.chars().all(|c| (' '..='~').contains(&c)) || name.contains('&') {
-        bail!("mailbox names must be nonempty printable ASCII without '&'");
+    if name.is_empty()
+        || !name.chars().all(|c| (' '..='~').contains(&c))
+        || name.contains('&')
+        || name.starts_with('-')
+    {
+        bail!("mailbox names must be nonempty printable ASCII without '&' or a leading '-'");
     }
     Ok(format!(
         "\"{}\"",
@@ -315,6 +319,7 @@ mod tests {
         assert!(quote_mailbox("Grüße").is_err());
         assert!(quote_mailbox("a\r\nb").is_err());
         assert!(quote_mailbox("").is_err());
+        assert!(quote_mailbox("-x").is_err());
         assert_eq!(uid_set(&[4, 5, 9]), "4,5,9");
         assert_eq!(parse_uid_set("1:3,7").unwrap(), vec![1, 2, 3, 7]);
         assert_eq!(parse_uid_set("3:1").unwrap(), vec![1, 2, 3]);

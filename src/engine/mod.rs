@@ -88,6 +88,8 @@ pub trait MailEngine {
     fn move_messages(&self, folder: &str, uids: &[u64], target: &str) -> Result<WriteOutcome>;
     /// One session: SELECT folder; UID STORE uids +FLAGS.SILENT (\Flagged).
     fn add_flagged(&self, folder: &str, uids: &[u64]) -> Result<WriteOutcome>;
+    /// Folders beyond the configured sources this engine may touch this pass (category and referenced retired folders). Default: no restriction.
+    fn set_watch_scope(&self, _folders: &[String]) {}
     /// Watched folder names that a client-side alias would resolve elsewhere.
     fn alias_conflicts(&self, _folders: &[String]) -> Result<Vec<String>> {
         Ok(vec![])

@@ -91,6 +91,7 @@ fn folder_rules_apply_when_filing_is_on() {
         "Inbox",
         "inbox",
         "Grüße",
+        "-x",
     ] {
         c.accounts.get_mut("work").unwrap().categories[0].folder = Some(bad.into());
         assert!(config::validate(&c).is_err(), "accepted {bad:?}");

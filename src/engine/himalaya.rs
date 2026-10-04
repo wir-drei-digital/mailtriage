@@ -8,8 +8,8 @@ use crate::service::err;
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::cell::OnceCell;
-use std::collections::{HashMap, HashSet};
+use std::cell::{OnceCell, RefCell};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io::Read;
 use std::process::{Command, ExitStatus, Stdio};
@@ -28,6 +28,8 @@ pub struct Himalaya {
     /// SHA-256 of the TOML read at open; every spawn re-checks it.
     config_hash: String,
     caps: OnceCell<EngineCapabilities>,
+    /// Folders beyond `config.mailboxes` that this pass may touch.
+    scope: RefCell<BTreeSet<String>>,
 }
 
 /// How a Himalaya process ended.
@@ -80,6 +82,7 @@ impl Himalaya {
             config: config.clone(),
             config_hash: sha256_hex(&toml),
             caps: OnceCell::new(),
+            scope: RefCell::new(BTreeSet::new()),
         })
     }
 
@@ -186,8 +189,11 @@ impl Himalaya {
         Ok(raw)
     }
 
+    /// Passes for a configured source mailbox or a folder in the watch scope.
     fn check_mailbox(&self, mailbox: &str) -> Result<()> {
-        if !self.config.mailboxes.iter().any(|m| m == mailbox) {
+        if !self.config.mailboxes.iter().any(|m| m == mailbox)
+            && !self.scope.borrow().contains(mailbox)
+        {
             bail!("mailbox is not configured for this account");
         }
         Ok(())
@@ -501,17 +507,20 @@ impl MailEngine for Himalaya {
 
     fn create_folder(&self, native: &str) -> Result<()> {
         raw::quote_mailbox(native)?;
+        self.check_mailbox(native)?;
         self.run(&["imap", "create", native], false)?;
         Ok(())
     }
 
     fn subscribe_folder(&self, native: &str) -> Result<()> {
         raw::quote_mailbox(native)?;
+        self.check_mailbox(native)?;
         self.run(&["imap", "subscribe", native], false)?;
         Ok(())
     }
 
     fn envelopes(&self, folder: &str, uids: &[u64]) -> Result<Vec<SourceEnvelope>> {
+        self.check_mailbox(folder)?;
         if uids.contains(&0) {
             bail!("UID must be positive");
         }
@@ -525,6 +534,8 @@ impl MailEngine for Himalaya {
     }
 
     fn move_messages(&self, folder: &str, uids: &[u64], target: &str) -> Result<WriteOutcome> {
+        self.check_mailbox(folder)?;
+        self.check_mailbox(target)?;
         check_write_uids(uids)?;
         let text = format!(
             "a1 SELECT {}\r\na2 UID MOVE {} {}\r\n",
@@ -536,6 +547,7 @@ impl MailEngine for Himalaya {
     }
 
     fn add_flagged(&self, folder: &str, uids: &[u64]) -> Result<WriteOutcome> {
+        self.check_mailbox(folder)?;
         check_write_uids(uids)?;
         let text = format!(
             "a1 SELECT {}\r\na2 UID STORE {} +FLAGS.SILENT (\\Flagged)\r\n",
@@ -543,6 +555,10 @@ impl MailEngine for Himalaya {
             raw::uid_set(uids)
         );
         write_outcome(&self.raw_text(&text)?)
+    }
+
+    fn set_watch_scope(&self, folders: &[String]) {
+        *self.scope.borrow_mut() = folders.iter().cloned().collect();
     }
 
     fn alias_conflicts(&self, folders: &[String]) -> Result<Vec<String>> {
@@ -582,14 +598,15 @@ impl MailEngine for Himalaya {
 }
 
 /// Maps one SELECT-plus-command session. `Err` means the SELECT result was not
-/// captured, so the session's effect is unknown.
+/// captured (or SELECT succeeded without UIDVALIDITY), so the session's effect
+/// is unknown. A captured SELECT failure is `selected: false` even if the
+/// process was then killed.
 fn write_outcome(captured: &Captured) -> Result<WriteOutcome> {
     let r = raw::parse(&captured.stdout);
-    let select = r.completion("a1");
-    let selected = select == Some(raw::Completion::Ok);
-    if select.is_none() || (!selected && !captured.finished()) {
+    let Some(select) = r.completion("a1") else {
         bail!("mail engine write produced no usable response");
-    }
+    };
+    let selected = select == raw::Completion::Ok;
     if selected && r.uidvalidity.is_none() {
         bail!("SELECT response lacks UIDVALIDITY");
     }

@@ -241,6 +241,7 @@ fn valid_folder_name(folder: &str) -> bool {
             && folder.trim() == folder
             && !folder.eq_ignore_ascii_case("inbox")
             && folder.chars().all(|c| (' '..='~').contains(&c))
+            && !folder.starts_with('-')
             && !folder.contains(['/', '.', '*', '%', '"', '\\', '&']))
 }
 

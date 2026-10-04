@@ -29,6 +29,8 @@ elif cmd[:2] == ["imap", "raw"]:
         if mode == "crash": sys.exit(3)
         if mode == "noselect":
             out("a1 NO no such mailbox\r\na2 BAD no mailbox selected\r\n"); sys.exit(1)
+        if mode == "noselect_timeout":
+            out("a1 NO no such mailbox\r\n"); time.sleep(5)
         if mode == "timeout":
             out("* OK [UIDVALIDITY 7] ok\r\na1 OK done\r\n"); time.sleep(5)
         out("* OK [UIDVALIDITY 7] ok\r\na1 OK done\r\n* OK [COPYUID 9 4,5 20:21] moved\r\na2 OK done\r\n")
@@ -76,6 +78,7 @@ fn fixture(mode: &str, timeout: u64) -> Fixture {
         max_output_bytes: 100_000,
     })
     .unwrap();
+    engine.set_watch_scope(&["Bills and Receipts".into(), "News".into()]);
     Fixture {
         _dir: dir,
         log,
@@ -248,12 +251,15 @@ fn alias_conflicts_detected() {
     assert_eq!(conflicts, vec!["Newsletters".to_string()]);
 }
 
-// Beyond the brief: a session whose SELECT result was never captured is an
-// error (outcome unknown), while a captured SELECT failure is a definite
-// `selected: false`, even on a non-zero exit.
-fn write_without_select_result_is_an_error() {
+// A session whose SELECT result was never captured is an error (outcome
+// unknown). A captured SELECT failure is a definite `selected: false`, even on a
+// non-zero exit or when the process then had to be killed.
+fn write_errors_only_without_select_result() {
     let f = fixture("crash", 5);
     assert!(f.engine.move_messages("INBOX", &[4], "News").is_err());
+    let f = fixture("noselect_timeout", 1);
+    let out = f.engine.move_messages("INBOX", &[4], "News").unwrap();
+    assert!(!out.selected && !out.completed);
     let f = fixture("noselect", 5);
     let out = f.engine.move_messages("INBOX", &[4], "News").unwrap();
     assert!(!out.selected && !out.completed);
@@ -261,6 +267,34 @@ fn write_without_select_result_is_an_error() {
     let too_many: Vec<u64> = (1..=101).collect();
     assert!(f.engine.move_messages("INBOX", &too_many, "News").is_err());
     assert_eq!(calls(&f).len(), 1, "invalid UID lists must not spawn");
+}
+
+fn out_of_scope_folders_are_refused_without_spawning() {
+    let f = fixture("", 5);
+    assert!(f.engine.snapshot("Archive").is_err());
+    assert!(f.engine.discover("Archive", 0, 4).is_err());
+    assert!(f.engine.envelopes("Archive", &[4]).is_err());
+    assert!(f.engine.fetch_raw("Archive", 4).is_err());
+    assert!(f.engine.move_messages("INBOX", &[4], "Archive").is_err());
+    assert!(f.engine.move_messages("Archive", &[4], "News").is_err());
+    assert!(f.engine.add_flagged("Archive", &[4]).is_err());
+    assert!(f.engine.create_folder("Archive").is_err());
+    assert!(f.engine.subscribe_folder("Archive").is_err());
+    assert!(calls(&f).is_empty(), "out-of-scope folders must not spawn");
+    f.engine.set_watch_scope(&["Archive".into()]);
+    assert_eq!(f.engine.envelopes("Archive", &[4]).unwrap()[0].uid, 4);
+    assert!(
+        f.engine
+            .move_messages("INBOX", &[4], "Archive")
+            .unwrap()
+            .completed
+    );
+    assert_eq!(calls(&f).len(), 2);
+    // Each call replaces the previous scope.
+    f.engine.set_watch_scope(&[]);
+    assert!(f.engine.envelopes("Archive", &[4]).is_err());
+    assert!(f.engine.move_messages("INBOX", &[4], "News").is_err());
+    assert_eq!(calls(&f).len(), 2);
 }
 
 #[test]
@@ -274,5 +308,6 @@ fn contract() {
     envelopes_parse_new_fields_and_args();
     config_change_is_refused();
     alias_conflicts_detected();
-    write_without_select_result_is_an_error();
+    write_errors_only_without_select_result();
+    out_of_scope_folders_are_refused_without_spawning();
 }
