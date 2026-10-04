@@ -1,9 +1,10 @@
 use crate::domain::{MailboxSnapshot, NormalizedMessage, SourceEnvelope};
+use crate::filing::{open_states_sql, StageOptions};
 use anyhow::{bail, Result};
 use chrono::{Duration, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
-use std::{path::Path, time::Duration as StdDuration};
+use std::{collections::BTreeMap, path::Path, time::Duration as StdDuration};
 use uuid::Uuid;
 
 pub struct Store {
@@ -29,7 +30,7 @@ impl Store {
         db.busy_timeout(StdDuration::from_secs(5))?;
         db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;")?;
         let version: u32 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 2 {
+        if version > 3 {
             bail!("database schema is newer than this binary");
         }
         if version == 0 {
@@ -58,6 +59,47 @@ PRAGMA user_version=1; COMMIT;")?;
 ALTER TABLE messages ADD COLUMN source_managed INTEGER NOT NULL DEFAULT 0;
 CREATE TABLE reconciliation(account TEXT NOT NULL, mailbox TEXT NOT NULL, epoch INTEGER NOT NULL, cursor INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(account,mailbox));
 PRAGMA user_version=2; COMMIT;")?;
+        }
+        if version < 3 {
+            db.execute_batch("BEGIN IMMEDIATE;
+ALTER TABLE messages ADD COLUMN rfc_message_id TEXT;
+ALTER TABLE messages ADD COLUMN size INTEGER;
+ALTER TABLE messages ADD COLUMN internal_date TEXT;
+CREATE INDEX message_rfc_id ON messages(account, rfc_message_id);
+CREATE TABLE filing_state(account TEXT PRIMARY KEY, mode TEXT NOT NULL DEFAULT 'off', enabled_at TEXT,
+ bootstrap_done INTEGER NOT NULL DEFAULT 0, last_pass TEXT);
+CREATE TABLE placements(account TEXT NOT NULL, message_id TEXT PRIMARY KEY REFERENCES messages(id),
+ source_folder TEXT NOT NULL, home_folder TEXT, home_epoch INTEGER, home_uid INTEGER,
+ location_state TEXT NOT NULL DEFAULT 'known', absent_since TEXT, desired_target TEXT,
+ pinned INTEGER NOT NULL DEFAULT 0, eligible_once INTEGER NOT NULL DEFAULT 0, desired_rev INTEGER NOT NULL DEFAULT 0,
+ filed_at TEXT, filed_by TEXT, flag_attempted_at TEXT, flagged_at TEXT,
+ done_inferred INTEGER NOT NULL DEFAULT 0, blocked_reason TEXT);
+CREATE INDEX placement_account ON placements(account);
+CREATE TABLE folders(account TEXT NOT NULL, native TEXT NOT NULL, configured TEXT, category_id TEXT, origin TEXT,
+ state TEXT NOT NULL, role_verified INTEGER NOT NULL DEFAULT 0, confirmed INTEGER NOT NULL DEFAULT 0,
+ subscribed INTEGER NOT NULL DEFAULT 0, pause_reason TEXT, epoch INTEGER, watch_from_uid INTEGER,
+ rescan_epoch INTEGER, rescan_below_uid INTEGER, rescan_complete INTEGER NOT NULL DEFAULT 1,
+ checked_at TEXT, error TEXT, PRIMARY KEY(account, native));
+CREATE TABLE arrivals(id INTEGER PRIMARY KEY, account TEXT NOT NULL, folder TEXT NOT NULL, epoch INTEGER NOT NULL,
+ uid INTEGER NOT NULL, message_id TEXT NOT NULL, rfc_message_id TEXT, state TEXT NOT NULL DEFAULT 'pending',
+ kind TEXT, intent_id INTEGER, created_at TEXT NOT NULL, resolved_at TEXT, UNIQUE(account, folder, epoch, uid));
+CREATE INDEX arrival_state ON arrivals(account, state);
+CREATE TABLE rescan_sets(account TEXT NOT NULL, folder TEXT NOT NULL, epoch INTEGER NOT NULL, message_id TEXT NOT NULL,
+ PRIMARY KEY(account, folder, epoch, message_id));
+CREATE TABLE filing_intents(id INTEGER PRIMARY KEY, account TEXT NOT NULL, message_id TEXT NOT NULL, kind TEXT NOT NULL,
+ folder TEXT NOT NULL, epoch INTEGER NOT NULL, uid INTEGER NOT NULL, target TEXT, target_epoch INTEGER,
+ target_uid_next INTEGER, target_uid INTEGER, desired_rev INTEGER NOT NULL DEFAULT 0,
+ consumes_eligible INTEGER NOT NULL DEFAULT 0, batch TEXT, state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+ next_after TEXT, dispatched_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, error TEXT);
+CREATE INDEX intent_state ON filing_intents(account, state);
+CREATE TABLE filing_reverts(id INTEGER PRIMARY KEY, account TEXT NOT NULL, parent_intent INTEGER NOT NULL,
+ folder TEXT NOT NULL, folder_epoch INTEGER NOT NULL, uid INTEGER NOT NULL, target TEXT NOT NULL,
+ target_epoch INTEGER NOT NULL, state TEXT NOT NULL, target_uid INTEGER, created_at TEXT NOT NULL,
+ updated_at TEXT NOT NULL, error TEXT);
+CREATE TABLE filing_events(id INTEGER PRIMARY KEY, account TEXT NOT NULL, message_id TEXT, folder TEXT,
+ at TEXT NOT NULL, kind TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '{}');
+CREATE INDEX event_account ON filing_events(account, id);
+PRAGMA user_version=3; COMMIT;")?;
         }
         Ok(Self { db })
     }
@@ -282,6 +324,7 @@ PRAGMA user_version=2; COMMIT;")?;
             if epoch == snapshot.uid_validity {
                 return Ok(last_uid);
             }
+            capture_rescan_set(&tx, account, mailbox, snapshot)?;
             tx.execute(
                 "DELETE FROM occurrences WHERE account=? AND mailbox=?",
                 params![account, mailbox],
@@ -305,42 +348,14 @@ PRAGMA user_version=2; COMMIT;")?;
         generation: &str,
         complete: bool,
     ) -> Result<usize> {
-        let tx = self.db.transaction()?;
-        let mut inserted = 0;
-        let current: Option<u64> = tx
-            .query_row(
-                "SELECT epoch FROM checkpoints WHERE account=? AND mailbox=?",
-                params![account, mailbox],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if current != Some(epoch) {
-            bail!("mailbox epoch changed before checkpoint commit");
-        }
-        for env in envelopes {
-            if env.uid > through {
-                bail!("source returned UID beyond requested window");
-            }
-            let exists:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM occurrences WHERE account=? AND mailbox=? AND epoch=? AND uid=?)",params![account,mailbox,epoch,env.uid],|r|r.get(0))?;
-            if exists {
-                continue;
-            }
-            let id = format!("msg_{}", Uuid::new_v4().simple());
-            tx.execute("INSERT INTO messages(id,account,envelope,status,observed_at,generation,source_managed) VALUES(?,?,?,'pending',?,?,1)",params![id,account,serde_json::to_string(env)?,now(),generation])?;
-            tx.execute(
-                "INSERT INTO occurrences VALUES(?,?,?,?,?)",
-                params![account, mailbox, epoch, env.uid, id],
-            )?;
-            tx.execute(
-                "INSERT INTO jobs(message_id,state,next_after,generation) VALUES(?,'queued',?,?)",
-                params![id, now(), generation],
-            )?;
-            inserted += 1;
-        }
-        tx.execute("UPDATE checkpoints SET last_uid=?,scanned_at=?,complete=?,error=NULL WHERE account=? AND mailbox=? AND epoch=?",params![through,now(),complete,account,mailbox,epoch])?;
-        bump(&tx)?;
-        tx.commit()?;
-        Ok(inserted)
+        let opts = StageOptions {
+            record_arrivals: false,
+            known_targets: &BTreeMap::new(),
+            rescan_filter: None,
+        };
+        self.stage_with(
+            account, mailbox, epoch, through, envelopes, generation, complete, &opts,
+        )
     }
     pub fn scan_error(&mut self, account: &str, mailbox: &str) -> Result<()> {
         let tx = self.db.transaction()?;
@@ -380,6 +395,16 @@ PRAGMA user_version=2; COMMIT;")?;
                 [&existing],
             )?;
             tx.execute(
+                "UPDATE arrivals SET message_id=? WHERE account=? AND message_id=?",
+                params![existing, account, id],
+            )?;
+            tx.execute("INSERT OR IGNORE INTO rescan_sets SELECT account,folder,epoch,?1 FROM rescan_sets WHERE account=?2 AND message_id=?3",params![existing,account,id])?;
+            tx.execute(
+                "DELETE FROM rescan_sets WHERE account=? AND message_id=?",
+                params![account, id],
+            )?;
+            merge_transport(&tx, account, &existing, id)?;
+            tx.execute(
                 "UPDATE aliases SET canonical=? WHERE account=? AND canonical=?",
                 params![existing, account, id],
             )?;
@@ -400,12 +425,18 @@ PRAGMA user_version=2; COMMIT;")?;
             tx.commit()?;
             return Ok(existing);
         }
+        let mut envelope = envelope_of(&tx, account, id)?.unwrap_or_else(|| json!({}));
+        merge_envelope(
+            &mut envelope,
+            &json!({"subject":msg.subject,"from":msg.from,"sent_at":msg.sent_at}),
+            &["subject", "from", "sent_at"],
+        );
         tx.execute(
             "UPDATE messages SET fingerprint=?,normalized=?,envelope=? WHERE account=? AND id=?",
             params![
                 msg.raw_sha256,
                 serde_json::to_string(msg)?,
-                json!({"subject":msg.subject,"from":msg.from,"sent_at":msg.sent_at}).to_string(),
+                envelope.to_string(),
                 account,
                 id
             ],
@@ -440,47 +471,9 @@ PRAGMA user_version=2; COMMIT;")?;
         present: &[u64],
         finished: bool,
     ) -> Result<usize> {
-        let tx = self.db.transaction()?;
-        let actual: Option<u64> = tx
-            .query_row(
-                "SELECT epoch FROM checkpoints WHERE account=? AND mailbox=?",
-                params![account, mailbox],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if actual != Some(epoch) {
-            bail!("mailbox epoch changed during reconciliation");
-        }
-        if present.iter().any(|u| *u <= after || *u > through) {
-            bail!("invalid reconciliation UID");
-        }
-        let known = {
-            let mut stmt=tx.prepare("SELECT uid FROM occurrences WHERE account=? AND mailbox=? AND epoch=? AND uid>? AND uid<=?")?;
-            let rows = stmt
-                .query_map(params![account, mailbox, epoch, after, through], |r| {
-                    r.get::<_, u64>(0)
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            rows
-        };
-        let mut removed = 0;
-        for uid in known {
-            if !present.contains(&uid) {
-                removed += tx.execute(
-                    "DELETE FROM occurrences WHERE account=? AND mailbox=? AND epoch=? AND uid=?",
-                    params![account, mailbox, epoch, uid],
-                )?;
-            }
-        }
-        tx.execute("INSERT INTO reconciliation VALUES(?,?,?,?) ON CONFLICT(account,mailbox) DO UPDATE SET epoch=excluded.epoch,cursor=excluded.cursor",params![account,mailbox,epoch,if finished {0}else{through}])?;
-        // Locally retained messages remain readable, but vanished, unfetched sources cannot retry forever.
-        tx.execute("UPDATE jobs SET state='terminal',lease_until=NULL WHERE message_id IN (SELECT id FROM messages WHERE account=? AND source_managed=1 AND normalized IS NULL AND NOT EXISTS(SELECT 1 FROM occurrences WHERE message_id=messages.id))",[account])?;
-        if removed > 0 {
-            tx.execute("UPDATE messages SET status='failed',error='message left watched source before content was fetched' WHERE account=? AND source_managed=1 AND normalized IS NULL AND NOT EXISTS(SELECT 1 FROM occurrences WHERE message_id=messages.id)",[account])?;
-            bump(&tx)?;
-        }
-        tx.commit()?;
-        Ok(removed)
+        Ok(self
+            .reconcile_range_ids(account, mailbox, epoch, after, through, present, finished)?
+            .len())
     }
     pub fn coverage(&self, account: &str) -> Result<Value> {
         let mut stmt=self.db.prepare("SELECT mailbox,epoch,last_uid,scanned_at,complete,error FROM checkpoints WHERE account=? ORDER BY mailbox")?;
@@ -522,7 +515,87 @@ fn row_record(r: &rusqlite::Row<'_>) -> rusqlite::Result<Record> {
         generation: r.get(10)?,
     })
 }
-fn bump(db: &Connection) -> Result<()> {
+/// Epoch reset of a watched folder (spec "Folders"): remember which messages
+/// to look for in the new epoch before its occurrences are deleted.
+fn capture_rescan_set(
+    tx: &Connection,
+    account: &str,
+    mailbox: &str,
+    snapshot: &MailboxSnapshot,
+) -> Result<()> {
+    let new = snapshot.uid_validity;
+    let intents = format!("INSERT OR IGNORE INTO rescan_sets SELECT account,target,?3,message_id FROM filing_intents WHERE account=?1 AND target=?2 AND state IN {}", open_states_sql());
+    for sql in [
+        "INSERT OR IGNORE INTO rescan_sets SELECT account,mailbox,?3,message_id FROM occurrences WHERE account=?1 AND mailbox=?2",
+        "INSERT OR IGNORE INTO rescan_sets SELECT account,home_folder,?3,message_id FROM placements WHERE account=?1 AND home_folder=?2",
+        &intents,
+        "INSERT OR IGNORE INTO rescan_sets SELECT account,folder,?3,message_id FROM arrivals WHERE account=?1 AND folder=?2 AND state='pending'",
+    ] {
+        tx.execute(sql, params![account, mailbox, new])?;
+    }
+    tx.execute(
+        "UPDATE arrivals SET state='vanished',resolved_at=?3 WHERE account=?1 AND folder=?2 AND state='pending'",
+        params![account, mailbox, now()],
+    )?;
+    tx.execute(
+        "UPDATE folders SET rescan_epoch=?3,rescan_below_uid=?4,rescan_complete=0,epoch=?3 WHERE account=?1 AND native=?2",
+        params![account, mailbox, new, snapshot.uid_next],
+    )?;
+    Ok(())
+}
+/// Filing-aware merge of transport metadata into the canonical row: it keeps
+/// what it has and fills gaps from the provisional row, whose flags are newer.
+fn merge_transport(
+    tx: &Connection,
+    account: &str,
+    existing: &str,
+    provisional: &str,
+) -> Result<()> {
+    tx.execute("UPDATE messages SET rfc_message_id=COALESCE(rfc_message_id,(SELECT rfc_message_id FROM messages WHERE id=?2)),size=COALESCE(size,(SELECT size FROM messages WHERE id=?2)),internal_date=COALESCE(internal_date,(SELECT internal_date FROM messages WHERE id=?2)) WHERE account=?3 AND id=?1",params![existing,provisional,account])?;
+    let (Some(mut envelope), Some(from)) = (
+        envelope_of(tx, account, existing)?,
+        envelope_of(tx, account, provisional)?,
+    ) else {
+        return Ok(());
+    };
+    let keys: Vec<&str> = ["message_id", "internal_date", "size"]
+        .into_iter()
+        .filter(|k| envelope.get(*k).is_none_or(Value::is_null))
+        .chain(["flags"])
+        .filter(|k| from.get(*k).is_some_and(|v| !v.is_null()))
+        .collect();
+    merge_envelope(&mut envelope, &from, &keys);
+    tx.execute(
+        "UPDATE messages SET envelope=? WHERE account=? AND id=?",
+        params![envelope.to_string(), account, existing],
+    )?;
+    Ok(())
+}
+/// The stored envelope JSON of a message, if the message exists.
+pub(crate) fn envelope_of(db: &Connection, account: &str, id: &str) -> Result<Option<Value>> {
+    let raw: Option<String> = db
+        .query_row(
+            "SELECT envelope FROM messages WHERE account=? AND id=?",
+            params![account, id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(raw.map(|s| serde_json::from_str(&s)).transpose()?)
+}
+/// Copies `keys` present in `from` into the envelope object, keeping every other key.
+pub(crate) fn merge_envelope(envelope: &mut Value, from: &Value, keys: &[&str]) {
+    if !envelope.is_object() {
+        *envelope = json!({});
+    }
+    if let (Some(obj), Some(src)) = (envelope.as_object_mut(), from.as_object()) {
+        for key in keys {
+            if let Some(v) = src.get(*key) {
+                obj.insert((*key).to_string(), v.clone());
+            }
+        }
+    }
+}
+pub(crate) fn bump(db: &Connection) -> Result<()> {
     db.execute("UPDATE metadata SET value=value+1 WHERE key='revision'", [])?;
     Ok(())
 }
