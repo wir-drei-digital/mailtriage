@@ -634,3 +634,156 @@ fn cli_enable_and_disable_keep_the_file_as_written() {
         "filing off: no block"
     );
 }
+
+// Fix round 1: ids behind the status counts, `categories validate --account`
+// and open move intents.
+
+#[test]
+fn status_lists_the_ids_behind_its_counts() {
+    let h = Harness::new(FilingMode::Live);
+    h.sync();
+    for mid in ["a", "b", "c"] {
+        h.fake.deliver_at(
+            "INBOX",
+            &mail(mid, &format!("Old newsletter {mid}"), "newsletter"),
+            "2026-01-01T00:00:00+00:00",
+        );
+    }
+    h.sync();
+    let (a, b, c) = (id_of(&h, "a"), id_of(&h, "b"), id_of(&h, "c"));
+    let mut s = h.service();
+    for (id, block) in [
+        (&a, Some("move_failed")),
+        (&b, Some("quarantined")),
+        (&c, None),
+    ] {
+        let mut p = s.store.placement("work", id).unwrap().unwrap();
+        p.blocked_reason = block.map(str::to_string);
+        if block.is_none() {
+            p.location_state = mailtriage::filing::LocationState::Ambiguous;
+        }
+        s.store.save_placement(&p, None).unwrap();
+    }
+    let status = s.filing_status("work").unwrap();
+    assert_eq!(
+        (
+            status["blocked"].clone(),
+            status["quarantined"].clone(),
+            status["ambiguous"].clone()
+        ),
+        (1.into(), 1.into(), 1.into())
+    );
+    assert_eq!(
+        status["blocked_ids"],
+        serde_json::json!([{"id": a, "blocked_reason": "move_failed"}])
+    );
+    assert_eq!(status["quarantined_ids"], serde_json::json!([b]));
+    assert_eq!(status["ambiguous_ids"], serde_json::json!([c]));
+}
+
+#[test]
+fn a_moved_but_unobserved_message_is_neither_backfilled_nor_eligible() {
+    let h = Harness::new(FilingMode::Live);
+    h.sync();
+    h.fake
+        .deliver("INBOX", &mail("n", "Weekly newsletter", "Our newsletter"));
+    h.sync(); // moved; the intent stays `sent` until the next pass sees the arrival
+    assert_eq!(h.fake.locate("<n@test>")[0].0, "Newsletters");
+    let id = id_of(&h, "n");
+    let mut s = h.service();
+    assert!(s
+        .store
+        .intents("work", true)
+        .unwrap()
+        .iter()
+        .any(|i| i.message_id == id && i.kind == "move"));
+    let b = s.filing_backfill("work", Backfill::All, false).unwrap();
+    assert_eq!(b["matched"], 0, "{b}");
+    assert_eq!(s.filing_status("work").unwrap()["eligible_unfiled"], 0);
+}
+
+#[test]
+fn cli_categories_validate_with_an_account_applies_the_folder_rules() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    assert_eq!(run(d, &["init", "--json"]).0, 0);
+    std::fs::write(
+        d.join("h.toml"),
+        "[accounts.work]\nimap.server='imaps://x.test'\n",
+    )
+    .unwrap();
+    let path = d.join("mailtriage.json");
+    let mut c: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    c["accounts"]["work"]["engine"] = serde_json::json!({"kind":"himalaya","binary":"/nonexistent/himalaya","config":"h.toml","account":"work","mailboxes":["INBOX"],"expected_version":"2.1.0","timeout_seconds":5,"max_output_bytes":100000});
+    std::fs::write(&path, c.to_string()).unwrap();
+    let validate = |file: &str, account: bool| {
+        let mut args = vec!["categories", "validate", "--file", file, "--json"];
+        if account {
+            args.extend(["--account", "work"]);
+        }
+        run(d, &args)
+    };
+    let mut cats = c["accounts"]["work"]["categories"].clone();
+    for cat in cats.as_array_mut().unwrap() {
+        if cat["id"] == "newsletters" {
+            cat["folder"] = "A&B".into();
+        }
+    }
+    std::fs::write(d.join("bad.json"), cats.to_string()).unwrap();
+    let mut renamed = c["accounts"]["work"]["categories"].clone();
+    for cat in renamed.as_array_mut().unwrap() {
+        if cat["id"] == "newsletters" {
+            cat["name"] = "News & Views".into();
+        }
+    }
+    std::fs::write(d.join("renamed.json"), renamed.to_string()).unwrap();
+
+    // Filing off: folders are not checked, with or without the account.
+    assert_eq!(validate("bad.json", false).0, 0);
+    assert_eq!(validate("bad.json", true).0, 0);
+    assert_eq!(
+        run(
+            d,
+            &[
+                "filing",
+                "enable",
+                "--account",
+                "work",
+                "--mode",
+                "dry-run",
+                "--json"
+            ]
+        )
+        .0,
+        0
+    );
+    let (code, v) = validate("bad.json", false);
+    assert_eq!(code, 0, "without --account the rules stay as before: {v}");
+    let (code, v) = validate("bad.json", true);
+    assert_eq!(code, 2);
+    assert_eq!(
+        v["error"]["message"],
+        "categories need a valid folder: newsletters"
+    );
+    let (code, v) = validate("renamed.json", true);
+    assert_eq!(
+        (code, v["valid"].clone()),
+        (0, Value::from(true)),
+        "a renamed category keeps its folder: {v}"
+    );
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(
+        saved["accounts"]["work"]["categories"],
+        c["accounts"]["work"]["categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|cat| {
+                let mut cat = cat.clone();
+                cat["folder"] = cat["name"].clone();
+                cat
+            })
+            .collect::<Value>(),
+        "validate writes nothing"
+    );
+}

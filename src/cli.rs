@@ -140,6 +140,10 @@ enum CategoriesCommand {
     Validate {
         #[arg(long)]
         file: PathBuf,
+        /// Validate against this account's configuration, including the
+        /// folder rules when its filing is on.
+        #[arg(long)]
+        account: Option<String>,
     },
     Apply {
         #[arg(long)]
@@ -449,8 +453,13 @@ fn execute(cli: &Cli) -> Result<Value, CliError> {
             CategoriesCommand::Export(arg) => open(&cli.config)?
                 .categories(&arg.account)
                 .map_err(service_error),
-            CategoriesCommand::Validate { file } => {
+            CategoriesCommand::Validate { file, account } => {
                 let categories = read_categories(file)?;
+                if let Some(account) = account {
+                    return open(&cli.config)?
+                        .validate_categories(account, categories)
+                        .map_err(service_error);
+                }
                 validate_categories(&categories)?;
                 Ok(json!({"schema_version":1,"valid":true,"categories":categories.len()}))
             }

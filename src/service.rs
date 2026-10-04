@@ -1178,19 +1178,21 @@ impl Service {
         for intent in self.store.intents(name, false)? {
             *intents.entry(intent.state).or_default() += 1;
         }
-        let (mut blocked, mut quarantined, mut ambiguous, mut eligible) = (0, 0, 0, 0);
-        let mut stale = Vec::new();
+        let moving = open_moves(&self.store, name)?;
+        let (mut blocked, mut quarantined, mut ambiguous) = (vec![], vec![], vec![]);
+        let (mut eligible, mut stale) = (0, vec![]);
         for (_, p, meta) in self.store.records_for_planning(name)? {
             match p.blocked_reason.as_deref() {
-                Some("quarantined") => quarantined += 1,
-                Some(_) => blocked += 1,
+                Some("quarantined") => quarantined.push(p.message_id.clone()),
+                Some(reason) => blocked.push(json!({"id": p.message_id, "blocked_reason": reason})),
                 None => {}
             }
             if p.location_state == LocationState::Ambiguous {
-                ambiguous += 1;
+                ambiguous.push(p.message_id.clone());
             }
             if unfiled_in_source(&p, &sources)
                 && !p.pinned
+                && !moving.contains(&p.message_id)
                 && (p.eligible_once || inputs::is_new(&p, &meta, state.enabled_at.as_deref()))
             {
                 eligible += 1;
@@ -1217,13 +1219,16 @@ impl Service {
             "folders": folders,
             "paused_categories": paused_categories(&account, &map, &folders),
             "intents": intents,
-            "blocked": blocked,
-            "quarantined": quarantined,
-            "ambiguous": ambiguous,
+            "blocked": blocked.len(),
+            "blocked_ids": listed(&blocked),
+            "quarantined": quarantined.len(),
+            "quarantined_ids": listed(&quarantined),
+            "ambiguous": ambiguous.len(),
+            "ambiguous_ids": listed(&ambiguous),
             "unresolved_arrivals": unresolved.len(),
-            "unresolved_arrival_items": &unresolved[..unresolved.len().min(LISTED)],
+            "unresolved_arrival_items": listed(&unresolved),
             "eligible_unfiled": eligible,
-            "stale_requests": {"count": stale.len(), "ids": &stale[..stale.len().min(LISTED)]},
+            "stale_requests": {"count": stale.len(), "ids": listed(&stale)},
             "alias_conflicts": map.alias_conflicts,
             "problems": last_pass.get("problems").cloned().unwrap_or(json!([])),
             "last_pass": last_pass,
@@ -1278,7 +1283,7 @@ impl Service {
                     .map(|p| p.message_id)
                     .collect();
             return Ok(
-                json!({"schema_version":1,"account":name,"matched":ids.len(),"items":&ids[..ids.len().min(LISTED)]}),
+                json!({"schema_version":1,"account":name,"matched":ids.len(),"items":listed(&ids)}),
             );
         }
         let _config_lock = self.shared_config_lock()?;
@@ -1357,17 +1362,6 @@ impl Service {
         let _lock = self.exclusive_config_lock()?;
         self.require_unchanged()?;
         self.ensure(name)?;
-        let previous = self.account(name)?;
-        let mut categories = categories;
-        if previous.filing.mode != FilingMode::Off {
-            for c in categories.iter_mut().filter(|c| c.folder.is_none()) {
-                let folder = match previous.categories.iter().find(|p| p.id == c.id) {
-                    Some(before) => before.effective_folder().to_string(),
-                    None => c.name.clone(),
-                };
-                c.folder = Some(folder);
-            }
-        }
         let ids: BTreeSet<_> = categories.iter().map(|c| c.id.as_str()).collect();
         for row in self.store.metadata_records(name)? {
             if let Some(id) = row.overrides["category_id"].as_str() {
@@ -1377,6 +1371,36 @@ impl Service {
                         "category has manual corrections; remap or clear them before removal",
                     ));
                 }
+            }
+        }
+        let updated = self.categories_candidate(name, categories)?;
+        config::save(&self.path, &updated)?;
+        self.config_bytes_hash = hash(&fs::read(&self.path)?);
+        self.config = updated;
+        self.ensure(name)?;
+        self.categories(name)
+    }
+    /// `categories validate --account`: the configuration checks of `apply`
+    /// against the account's current configuration and filing mode, folder
+    /// inheritance included. Writes nothing.
+    pub fn validate_categories(&self, name: &str, categories: Vec<Category>) -> Result<Value> {
+        let count = categories.len();
+        self.categories_candidate(name, categories)?;
+        Ok(json!({"schema_version":1,"account":name,"valid":true,"categories":count}))
+    }
+    /// The validated configuration with `categories` applied to account
+    /// `name`: folders inherited with filing on, and the taxonomy revision
+    /// advanced when the category semantics change.
+    fn categories_candidate(&self, name: &str, categories: Vec<Category>) -> Result<AppConfig> {
+        let previous = self.account(name)?;
+        let mut categories = categories;
+        if previous.filing.mode != FilingMode::Off {
+            for c in categories.iter_mut().filter(|c| c.folder.is_none()) {
+                let folder = match previous.categories.iter().find(|p| p.id == c.id) {
+                    Some(before) => before.effective_folder().to_string(),
+                    None => c.name.clone(),
+                };
+                c.folder = Some(folder);
             }
         }
         let semantic_changed =
@@ -1391,11 +1415,7 @@ impl Service {
                 .ok_or_else(|| err(2, "taxonomy revision overflow"))?;
         }
         validate_edit(&updated, name)?;
-        config::save(&self.path, &updated)?;
-        self.config_bytes_hash = hash(&fs::read(&self.path)?);
-        self.config = updated;
-        self.ensure(name)?;
-        self.categories(name)
+        Ok(updated)
     }
     pub fn reclassify(
         &mut self,
@@ -1592,6 +1612,22 @@ fn sources_of(account: &AccountConfig) -> Vec<String> {
 /// At most this many ids or rows in a filing listing (`status`, `backfill`).
 const LISTED: usize = 50;
 
+/// The first `LISTED` entries.
+fn listed<T>(all: &[T]) -> &[T] {
+    &all[..all.len().min(LISTED)]
+}
+
+/// Messages with an open move intent: moved or being moved, but not yet
+/// confirmed, so their placement still names the old home.
+fn open_moves(store: &Store, name: &str) -> Result<BTreeSet<String>> {
+    Ok(store
+        .intents(name, true)?
+        .into_iter()
+        .filter(|i| i.kind == "move")
+        .map(|i| i.message_id)
+        .collect())
+}
+
 /// The filing mode a pass would run: the configured one, `off` without an engine.
 fn filing_mode(account: &AccountConfig) -> FilingMode {
     match account.engine_config() {
@@ -1632,15 +1668,16 @@ fn unfiled_in_source(p: &Placement, sources: &[String]) -> bool {
 }
 
 /// What `filing backfill` would make eligible: unfiled placements in a source
-/// folder, not pinned, not blocked and not already eligible once (so a repeated
-/// apply changes nothing); with `since`, only mail whose hydrated internal
-/// date is at or after it. In message id order.
+/// folder, not pinned, not blocked, without an open move intent and not
+/// already eligible once (so a repeated apply changes nothing); with `since`,
+/// only mail whose hydrated internal date is at or after it. In message id order.
 fn backfill_candidates(
     store: &Store,
     name: &str,
     sources: &[String],
     since: Option<DateTime<Utc>>,
 ) -> Result<Vec<Placement>> {
+    let moving = open_moves(store, name)?;
     Ok(store
         .records_for_planning(name)?
         .into_iter()
@@ -1649,6 +1686,7 @@ fn backfill_candidates(
                 && !p.pinned
                 && p.blocked_reason.is_none()
                 && !p.eligible_once
+                && !moving.contains(&p.message_id)
                 && since.is_none_or(|since| inputs::dated_since(meta, since))
         })
         .map(|(_, p, _)| p)
