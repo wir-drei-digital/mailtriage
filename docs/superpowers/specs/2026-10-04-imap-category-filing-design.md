@@ -500,7 +500,7 @@ folder is established only by an occurrence whose identity is established
 | `in_flight` | Treated as `uncertain`. |
 | `uncertain`, F or T epoch now differs from the one recorded | **Suspected epoch race** (see Epoch race). Then `awaiting_rescan`. |
 | `uncertain`, epochs unchanged | Re-verify binding, observe both ends. In T (COPYUID, or an identity-established arrival at `uid >= target_uid_next`) and not in F → `applied`. In both → `failed`, `blocked_reason = duplicate_copy`. In F only, with T scanned as for `lost` → if the intent's `desired_rev` still matches, retry (re-claimed, job backoff, up to `policy.max_attempts`, then `failed`, `blocked_reason = move_failed`); otherwise `superseded`. In neither → `sent`. |
-| `sent` | Waits for its arrival. Becomes `lost` once T has been scanned, in `target_epoch`, through the `UIDNEXT - 1` of a snapshot taken after `dispatched_at`, and every arrival in T at `uid >= target_uid_next` is `resolved` or `vanished`; an `unresolved` arrival in that range keeps it `sent` until retried or dismissed. A lost move sets `location_state = absent`. |
+| `sent` | Waits for its arrival. Becomes `lost` once T has been scanned, in `target_epoch`, through the `UIDNEXT - 1` of a snapshot taken after `dispatched_at`, and every arrival in T at `uid >= target_uid_next` is `resolved` or `vanished`, ignoring arrivals whose known Message-ID differs from the moved message's (identical bytes always share it); an `unresolved` arrival in that range keeps it `sent` until retried or dismissed. A lost move sets `location_state = absent`. |
 | `sent`, T epoch changed | `awaiting_rescan`. |
 | `awaiting_rescan` | Waits until every folder whose epoch changed (F, T, or both) has a complete reset rescan. Then old-epoch UIDs and bounds are discarded and the outcome is decided by identity-established occurrences in the current epochs only: in T only → `applied`; in both → `failed`, `duplicate_copy`; in F only → retry if `desired_rev` matches, else `superseded`; in neither → `lost`. |
 
@@ -544,8 +544,9 @@ The race batch's original move intents become `awaiting_rescan`.
 
 ### Flags
 
-1. Re-verify binding and re-read the envelope as for moves; skip if it already
-   has `\Flagged`.
+1. Re-verify binding and re-read the envelope as for moves; if it already has
+   `\Flagged`, record `flag_attempted_at` without an engine call (the user's
+   own flag satisfies it, so a later unflag is never overridden).
 2. Claim: in one transaction write the flag intent and set
    `flag_attempted_at`. This consumes the only automatic flag attempt.
 3. `add_flagged(F, [uid])`, batched per folder:
