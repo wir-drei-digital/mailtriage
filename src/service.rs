@@ -1,7 +1,7 @@
 use crate::{
     config,
     domain::*,
-    engine::{self, himalaya::source_binding, MailEngine},
+    engine::{self, MailEngine},
     filing::{
         self, arrivals, inputs,
         observe::{self, FolderMap, OfflineEngine, WatchRole, WatchSpec},
@@ -1788,7 +1788,7 @@ fn binding_identity(account: &AccountConfig, engine: Option<&dyn MailEngine>) ->
     let source = match (account.engine_config(), engine) {
         (None, _) => Value::Null,
         (Some(_), Some(engine)) => engine.binding_identity()?,
-        (Some(EngineConfig::Himalaya(h)), None) => source_binding(&h)?,
+        (Some(cfg), None) => engine::binding_source(&cfg)?,
     };
     Ok(hash(&serde_json::to_vec(
         &json!({"identity":account.identity,"source":source}),

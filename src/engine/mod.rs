@@ -102,3 +102,12 @@ pub fn open(config: &EngineConfig) -> Result<Rc<dyn MailEngine>> {
         EngineConfig::Himalaya(h) => Ok(Rc::new(himalaya::Himalaya::new(h)?)),
     }
 }
+
+/// The binding source of an engine configuration without opening the
+/// engine: stable JSON describing server and login identity, never secrets.
+/// It is what `MailEngine::binding_identity` reports for that configuration.
+pub fn binding_source(config: &EngineConfig) -> Result<serde_json::Value> {
+    match config {
+        EngineConfig::Himalaya(h) => himalaya::source_binding(h),
+    }
+}
