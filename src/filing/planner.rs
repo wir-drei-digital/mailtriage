@@ -122,22 +122,24 @@ pub fn plan(input: &PlanInput) -> Plan {
     if input.mode == FilingMode::Off {
         return out;
     }
-    out.folders_to_create = input
-        .folders
-        .iter()
-        .filter(|(_, f)| f.is_category && f.usable == FolderUse::WouldCreate)
-        .map(|(name, _)| name.clone())
-        .collect();
+    if input.preview {
+        out.folders_to_create = input
+            .folders
+            .iter()
+            .filter(|(_, f)| f.is_category && f.usable == FolderUse::WouldCreate)
+            .map(|(name, _)| name.clone())
+            .collect();
+    }
     let mut per_message = Vec::new();
     for m in &input.messages {
-        let Some(home) = eligible_home(input, m) else {
+        let Some((home, home_view)) = eligible_home(input, m) else {
             continue;
         };
         let mut actions = Vec::new();
-        if let Some(flag) = flag_action(input, m, home) {
+        if let Some(flag) = flag_action(input, m, home, home_view) {
             actions.push(flag);
         }
-        match move_action(input, m, home) {
+        match move_action(input, m, home, home_view) {
             MoveDecision::Move(a) => actions.push(a),
             MoveDecision::Clear => out
                 .cleared_requests
@@ -165,7 +167,11 @@ pub fn plan(input: &PlanInput) -> Plan {
     out
 }
 
-fn eligible_home<'a>(input: &PlanInput, m: &'a PlanMessage) -> Option<&'a Locator> {
+/// The message's home and its folder view, when any action may touch it.
+fn eligible_home<'i, 'm>(
+    input: &'i PlanInput,
+    m: &'m PlanMessage,
+) -> Option<(&'m Locator, &'i FolderView)> {
     if !m.location_known || !m.hydrated || m.blocked {
         return None;
     }
@@ -174,7 +180,7 @@ fn eligible_home<'a>(input: &PlanInput, m: &'a PlanMessage) -> Option<&'a Locato
     if view.paused || view.epoch != Some(home.epoch) {
         return None;
     }
-    Some(home)
+    Some((home, view))
 }
 
 fn is_new(input: &PlanInput, m: &PlanMessage) -> bool {
@@ -182,8 +188,17 @@ fn is_new(input: &PlanInput, m: &PlanMessage) -> bool {
         && matches!((m.internal_date, input.enabled_at), (Some(d), Some(on)) if d >= on)
 }
 
-fn flag_action(input: &PlanInput, m: &PlanMessage, home: &Locator) -> Option<Action> {
+fn flag_action(
+    input: &PlanInput,
+    m: &PlanMessage,
+    home: &Locator,
+    home_view: &FolderView,
+) -> Option<Action> {
     if !input.flag_enabled || m.flag_attempted || m.open_flag_intent {
+        return None;
+    }
+    // Flags only touch a source folder or a category folder in state `ok`.
+    if !(home_view.is_source || (home_view.is_category && home_view.usable == FolderUse::Ok)) {
         return None;
     }
     if !(is_new(input, m) || m.eligible_once || m.filed_at.is_some()) {
@@ -225,11 +240,15 @@ fn target_usable(input: &PlanInput, folder: &str) -> bool {
     }
 }
 
-fn move_action(input: &PlanInput, m: &PlanMessage, home: &Locator) -> MoveDecision {
+fn move_action(
+    input: &PlanInput,
+    m: &PlanMessage,
+    home: &Locator,
+    home_view: &FolderView,
+) -> MoveDecision {
     if m.open_move_intent {
         return MoveDecision::Nothing;
     }
-    let home_view = &input.folders[&home.folder];
     if let Some(target) = &m.desired_target {
         let Some(to) = resolve_target(input, m, target) else {
             return MoveDecision::Nothing;
@@ -595,5 +614,161 @@ mod tests {
         assert_eq!(order, vec!["m:b", "f:a", "m:a"]);
         i.max_actions = 2;
         assert_eq!(plan(&i).actions.len(), 2);
+    }
+
+    /// A non-source folder view: a category folder, or a retired one.
+    fn view(usable: FolderUse, is_category: bool, retired_listed: bool, epoch: u64) -> FolderView {
+        FolderView {
+            usable,
+            paused: false,
+            is_source: false,
+            is_category,
+            retired_listed,
+            epoch: Some(epoch),
+        }
+    }
+    fn homed(mut m: PlanMessage, folder: &str, epoch: u64) -> PlanMessage {
+        m.home = Some(Locator {
+            folder: folder.into(),
+            epoch,
+            uid: 1,
+        });
+        m
+    }
+
+    #[test]
+    fn flags_require_a_source_or_ok_category_home() {
+        let mut i = input(vec![]);
+        i.folders
+            .insert("Broken".into(), view(FolderUse::Unusable, true, false, 4));
+        // Retired (not a category): no flag even though LIST reports it and `usable` says Ok.
+        i.folders
+            .insert("Old".into(), view(FolderUse::Ok, false, true, 5));
+        for (id, folder, epoch) in [
+            ("ok", "Newsletters", 2),
+            ("broken", "Broken", 4),
+            ("old", "Old", 5),
+        ] {
+            let mut m = homed(msg(id, "correspondence"), folder, epoch);
+            m.filed_at = Some("x".into());
+            m.effective.action_required = Some(true);
+            i.messages.push(m);
+        }
+        assert_eq!(flags(&plan(&i)), vec!["ok".to_string()]);
+    }
+
+    #[test]
+    fn automatic_moves_only_leave_source_folders() {
+        let new = homed(msg("new", "transactions"), "Newsletters", 2);
+        let mut backfill = homed(msg("backfill", "transactions"), "Newsletters", 2);
+        backfill.internal_date = Some(t(7));
+        backfill.eligible_once = true;
+        let p = plan(&input(vec![new, backfill]));
+        assert!(p.actions.is_empty());
+        assert!(p.cleared_requests.is_empty());
+    }
+
+    #[test]
+    fn explicit_request_home_gate() {
+        let mut i = input(vec![]);
+        i.folders
+            .insert("Broken".into(), view(FolderUse::Unusable, true, false, 4));
+        // Retired folders: only `retired_listed` admits them, whatever `usable` says.
+        i.folders
+            .insert("Listed".into(), view(FolderUse::Unusable, false, true, 5));
+        i.folders
+            .insert("Unlisted".into(), view(FolderUse::Ok, false, false, 6));
+        for (id, folder, epoch) in [
+            ("broken", "Broken", 4),
+            ("listed", "Listed", 5),
+            ("unlisted", "Unlisted", 6),
+        ] {
+            let mut m = homed(msg(id, "newsletters"), folder, epoch);
+            m.filed_at = Some("x".into());
+            m.desired_target = Some("transactions".into());
+            i.messages.push(m);
+        }
+        let p = plan(&i);
+        assert_eq!(moves(&p), vec![("listed".into(), "Transactions".into())]);
+        assert!(p.cleared_requests.is_empty());
+    }
+
+    #[test]
+    fn open_move_intent_blocks_explicit_move_and_clear() {
+        let mut busy_move = msg("busy_move", "newsletters");
+        busy_move.pinned = true;
+        busy_move.desired_target = Some("transactions".into());
+        busy_move.open_move_intent = true;
+        let mut busy_clear = homed(msg("busy_clear", "newsletters"), "Transactions", 3);
+        busy_clear.pinned = true;
+        busy_clear.desired_target = Some("transactions".into());
+        busy_clear.open_move_intent = true;
+        let p = plan(&input(vec![busy_move, busy_clear]));
+        assert!(moves(&p).is_empty());
+        assert!(p.cleared_requests.is_empty());
+    }
+
+    #[test]
+    fn explicit_inbox_category_resolves_to_source_folder() {
+        let mut i = input(vec![]);
+        i.folders.insert(
+            "Lists".into(),
+            FolderView {
+                usable: FolderUse::Ok,
+                paused: false,
+                is_source: true,
+                is_category: false,
+                retired_listed: false,
+                epoch: Some(7),
+            },
+        );
+        let mut back = homed(msg("back", "newsletters"), "Newsletters", 2);
+        back.filed_at = Some("x".into());
+        back.desired_target = Some("correspondence".into());
+        back.desired_rev = 5;
+        let mut back_lists = back.clone();
+        back_lists.message_id = "back_lists".into();
+        back_lists.source_folder = "Lists".into();
+        let mut stay = msg("stay", "newsletters");
+        stay.desired_target = Some("correspondence".into());
+        stay.desired_rev = 6;
+        i.messages = vec![back, back_lists, stay];
+        let p = plan(&i);
+        assert_eq!(
+            moves(&p),
+            vec![
+                ("back".into(), "INBOX".into()),
+                ("back_lists".into(), "Lists".into())
+            ]
+        );
+        assert_eq!(p.cleared_requests, vec![("stay".to_string(), 6)]);
+    }
+
+    #[test]
+    fn explicit_request_overrides_automatic_from_source_home() {
+        let mut m = msg("m", "newsletters");
+        m.desired_target = Some("transactions".into());
+        m.desired_rev = 2;
+        let p = plan(&input(vec![m]));
+        assert_eq!(moves(&p), vec![("m".into(), "Transactions".into())]);
+        assert!(matches!(
+            &p.actions[0],
+            Action::Move {
+                desired_rev: 2,
+                consumes_eligible: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn folders_to_create_are_listed_only_in_preview() {
+        let mut i = input(vec![msg("a", "newsletters")]);
+        i.folders.get_mut("Newsletters").unwrap().usable = FolderUse::WouldCreate;
+        assert!(plan(&i).folders_to_create.is_empty());
+        i.mode = FilingMode::DryRun;
+        assert!(plan(&i).folders_to_create.is_empty());
+        i.preview = true;
+        assert_eq!(plan(&i).folders_to_create, vec!["Newsletters".to_string()]);
     }
 }
