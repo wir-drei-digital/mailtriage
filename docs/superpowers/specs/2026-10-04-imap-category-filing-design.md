@@ -233,8 +233,10 @@ and refuses with the list of categories that need an explicit `folder`. With
 filing enabled, `config::validate` requires:
 
 - each effective folder is trimmed, nonempty, at most 200 bytes, and a single
-  path segment: no `/`, `.`, `*`, `%`, `"`, `\`, or control characters;
-  printable ASCII unless non-ASCII support was confirmed;
+  path segment: no `/`, `.`, `*`, `%`, `"`, `\`, `&`, or control characters;
+  printable ASCII unless non-ASCII support was confirmed. `&` is the
+  modified UTF-7 shift character; it stays forbidden until the provider check
+  confirms how Himalaya encodes mailbox names;
 - every category whose folder is not `INBOX` has a unique folder, compared
   case-insensitively; any case variant of `inbox` other than the literal
   `INBOX` is rejected.

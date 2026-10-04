@@ -33,7 +33,7 @@ These are the inputs most likely to hurt a real user that no task would otherwis
 1. **Enabling filing on an account with a large existing mailbox** (hundreds of already-synced messages): no message is moved or flagged on the first passes; placements are bootstrapped and hydrated at most 100 UIDs per folder per pass. Test: Task 6, `enabling_on_large_existing_mailbox_moves_nothing_and_hydrates_in_batches`.
 2. **Renaming a category's display name while filing is on**: the folder stays the same. `filing enable` and `categories apply` write an explicit `folder` for every category, so a later rename does not move mail into a new folder. Test: Task 9, `rename_keeps_folder_after_enable`.
 3. **Himalaya `--json imap list` output shape** (an object with `mailboxes`, or a bare array): both parse. Test: Task 2, `list_folders_accepts_object_or_array_json`.
-4. **Folder names with spaces and ampersands** (`Bills & Receipts`): quoted correctly in raw IMAP text and accepted by validation. Test: Task 2, `move_quotes_names_with_spaces_and_ampersand`.
+4. **Folder names with spaces** (`Bills and Receipts`): quoted correctly in raw IMAP text and accepted by validation; `&` (the modified UTF-7 shift character) is rejected by validation and by `quote_mailbox` until the provider check confirms Himalaya's encoding. Test: Task 2, `move_quotes_names_with_spaces`.
 5. **Mail that arrives during `dry_run` and is then switched to `live`**: filed on the first live pass, because `enabled_at` is kept. Test: Task 7, `dry_run_then_live_files_mail_that_arrived_during_dry_run`.
 
 ---
@@ -215,7 +215,7 @@ fn folder_rules_apply_when_filing_is_on() {
     let mut c = config::default_config();
     let a = c.accounts.get_mut("work").unwrap();
     a.filing.mode = FilingMode::Live;
-    for bad in ["", " News", "a/b", "a.b", "x*", "x%", "q\"", "b\\s", "Inbox", "inbox", "Grüße"] {
+    for bad in ["", " News", "News ", "a/b", "a.b", "x*", "x%", "q\"", "b\\s", "a&b", "tab\there", "Inbox", "inbox", "Grüße"] {
         c.accounts.get_mut("work").unwrap().categories[0].folder = Some(bad.into());
         assert!(config::validate(&c).is_err(), "accepted {bad:?}");
     }
@@ -225,8 +225,8 @@ fn folder_rules_apply_when_filing_is_on() {
     a.categories[1].folder = Some("INBOX".into());
     config::validate(&c).unwrap();
     let a = c.accounts.get_mut("work").unwrap();
-    a.categories[2].folder = Some("Bills & Receipts".into());
-    a.categories[3].folder = Some("bills & receipts".into());
+    a.categories[2].folder = Some("Bills and Receipts".into());
+    a.categories[3].folder = Some("bills and receipts".into());
     assert!(config::validate(&c).is_err(), "case-insensitive duplicate accepted");
     c.accounts.get_mut("work").unwrap().categories[3].folder = Some("Newsletters".into());
     config::validate(&c).unwrap();
@@ -380,7 +380,7 @@ fn valid_folder_name(folder: &str) -> bool {
             && folder.trim() == folder
             && !folder.eq_ignore_ascii_case("inbox")
             && folder.chars().all(|c| (' '..='~').contains(&c))
-            && !folder.contains(['/', '.', '*', '%', '"', '\\']))
+            && !folder.contains(['/', '.', '*', '%', '"', '\\', '&']))
 }
 ```
 
@@ -620,7 +620,8 @@ mod tests {
 
     #[test]
     fn quoting_and_uid_sets() {
-        assert_eq!(quote_mailbox("Bills & Receipts").unwrap(), "\"Bills & Receipts\"");
+        assert_eq!(quote_mailbox("Bills and Receipts").unwrap(), "\"Bills and Receipts\"");
+        assert!(quote_mailbox("A&B").is_err(), "& is the modified UTF-7 shift character");
         assert!(quote_mailbox("Grüße").is_err());
         assert!(quote_mailbox("a\r\nb").is_err());
         assert!(quote_mailbox("").is_err());
@@ -816,8 +817,8 @@ fn list_line(s: &str) -> Option<ListLine> {
 }
 
 pub fn quote_mailbox(name: &str) -> Result<String> {
-    if name.is_empty() || !name.chars().all(|c| (' '..='~').contains(&c)) {
-        bail!("mailbox names must be nonempty printable ASCII");
+    if name.is_empty() || !name.chars().all(|c| (' '..='~').contains(&c)) || name.contains('&') {
+        bail!("mailbox names must be nonempty printable ASCII without '&'");
     }
     Ok(format!("\"{}\"", name.replace('\\', "\\\\").replace('"', "\\\"")))
 }
@@ -947,14 +948,14 @@ fn assert_no_forbidden(f: &Fixture) {
 The fixtures set process-wide environment variables, so run this file's tests serially: put them in one `#[test] fn contract()` that calls helper functions in sequence, or add `--test-threads=1` to the file's run command and document it in the file header. **Use the single-test approach**, so a plain `cargo test` works. Test bodies (each is a function called from `contract()`):
 
 ```rust
-fn move_quotes_names_with_spaces_and_ampersand() {
+fn move_quotes_names_with_spaces() {
     let f = fixture("", 5);
-    let out = f.engine.move_messages("INBOX", &[4, 5], "Bills & Receipts").unwrap();
+    let out = f.engine.move_messages("INBOX", &[4, 5], "Bills and Receipts").unwrap();
     assert!(out.selected && out.completed);
     assert_eq!(out.session_epoch, Some(7));
     assert_eq!(out.copyuid.unwrap().pairs, vec![(4, 20), (5, 21)]);
     let last = calls(&f).pop().unwrap();
-    assert_eq!(tail(&last), vec!["imap", "raw", "--", "a1 SELECT \"INBOX\"\r\na2 UID MOVE 4,5 \"Bills & Receipts\"\r\n"]);
+    assert_eq!(tail(&last), vec!["imap", "raw", "--", "a1 SELECT \"INBOX\"\r\na2 UID MOVE 4,5 \"Bills and Receipts\"\r\n"]);
     assert_no_forbidden(&f);
 }
 
@@ -1000,11 +1001,12 @@ fn list_folders_accepts_object_or_array_json() {
 
 fn create_and_subscribe_args() {
     let f = fixture("", 5);
-    f.engine.create_folder("Bills & Receipts").unwrap();
-    f.engine.subscribe_folder("Bills & Receipts").unwrap();
+    f.engine.create_folder("Bills and Receipts").unwrap();
+    f.engine.subscribe_folder("Bills and Receipts").unwrap();
+    assert!(f.engine.create_folder("A&B").is_err());
     let c = calls(&f);
-    assert_eq!(tail(&c[c.len() - 2]), vec!["imap", "create", "Bills & Receipts"]);
-    assert_eq!(tail(&c[c.len() - 1]), vec!["imap", "subscribe", "Bills & Receipts"]);
+    assert_eq!(tail(&c[c.len() - 2]), vec!["imap", "create", "Bills and Receipts"]);
+    assert_eq!(tail(&c[c.len() - 1]), vec!["imap", "subscribe", "Bills and Receipts"]);
 }
 
 fn envelopes_parse_new_fields_and_args() {
@@ -1035,7 +1037,7 @@ fn alias_conflicts_detected() {
 
 #[test]
 fn contract() {
-    move_quotes_names_with_spaces_and_ampersand();
+    move_quotes_names_with_spaces();
     flag_store_text();
     timeout_keeps_partial_select_result();
     capabilities_and_namespace();
