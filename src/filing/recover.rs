@@ -3,12 +3,12 @@
 //! assuming an outcome. Presence counts only for occurrences whose identity is
 //! established (COPYUID or fingerprint) in the folder's current epoch.
 use super::apply::{
-    dispatch_moves, dispatch_reverts, error_patch, flag_applied, flag_raced, has_flagged,
-    matches_meta, modify_placement, pause, paused, race_problem, revert_failed, write_failed,
+    close, commit, commit_with_placement, dispatch_moves, dispatch_reverts, event, flag_applied,
+    flag_raced, has_flagged, matches_meta, paused, race_problem, revert_failed, write_failed,
 };
 use super::observe::FolderMap;
 use super::planner::{CategoryFolder, Locator};
-use super::{FilingSummary, Intent, IntentPatch, LocationState, PassContext};
+use super::{FilingSummary, FilingWrite, Intent, IntentPatch, LocationState, PassContext};
 use crate::domain::{FilingMode, SourceEnvelope};
 use crate::store::{now, Store};
 use anyhow::{anyhow, Result};
@@ -91,9 +91,9 @@ fn observe_in_source(
     Ok(Seen::Present(env))
 }
 
-/// "In T": the intent's message occurs in `target` in its current epoch
-/// `epoch` (when `bounded`, at `uid >= target_uid_next` or `== target_uid`), or
-/// an arrival there carries the intent. Prefers the COPYUID target UID.
+/// "In T": a live occurrence of the intent's message in `target` in its
+/// current epoch `epoch`; when `bounded`, at `uid >= target_uid_next` or at the
+/// COPYUID `target_uid`. Prefers the COPYUID target UID.
 fn observe_in_target(
     store: &Store,
     ctx: &PassContext,
@@ -102,20 +102,14 @@ fn observe_in_target(
     bounded: bool,
 ) -> Result<Option<u64>> {
     let bound = intent.target_uid_next.filter(|_| bounded).unwrap_or(0);
-    let in_window = |uid: u64| uid >= bound || intent.target_uid == Some(uid);
-    let mut uids: Vec<u64> = store
+    let uids: Vec<u64> = store
         .occurrences_of(ctx.account, &intent.message_id)?
         .into_iter()
-        .filter(|(f, e, u)| f == target && *e == epoch && in_window(*u))
+        .filter(|(f, e, u)| {
+            f == target && *e == epoch && (*u >= bound || intent.target_uid == Some(*u))
+        })
         .map(|(_, _, u)| u)
         .collect();
-    uids.extend(
-        store
-            .arrivals_at(ctx.account, target, epoch, bound)?
-            .into_iter()
-            .filter(|a| a.intent_id == Some(intent.id))
-            .map(|a| a.uid),
-    );
     if let Some(uid) = intent.target_uid.filter(|u| uids.contains(u)) {
         return Ok(Some(uid));
     }
@@ -124,7 +118,10 @@ fn observe_in_target(
 
 /// "T scanned as for lost": T's checkpoint is complete in `target_epoch`,
 /// scanned after `dispatched_at`, and no arrival in T at
-/// `uid >= target_uid_next` is still `pending` or `unresolved`.
+/// `uid >= target_uid_next` that could be the moved message is still
+/// `pending` or `unresolved`. An arrival cannot be it when its known
+/// Message-ID differs from the moved message's (identical bytes share it), or
+/// when its occurrence is already gone from T.
 fn target_scanned(store: &Store, ctx: &PassContext, intent: &Intent, target: &str) -> Result<bool> {
     let (Some(epoch), Some(bound)) = (intent.target_epoch, intent.target_uid_next) else {
         return Ok(false);
@@ -140,11 +137,22 @@ fn target_scanned(store: &Store, ctx: &PassContext, intent: &Intent, target: &st
     if at_epoch != epoch || !complete || !later(scanned_at.as_deref(), dispatched) {
         return Ok(false);
     }
-    let waiting = store
-        .arrivals_at(ctx.account, target, epoch, bound)?
-        .iter()
-        .any(|a| matches!(a.state.as_str(), "pending" | "unresolved"));
-    Ok(!waiting)
+    let ours = store
+        .message_meta(ctx.account, &intent.message_id)?
+        .and_then(|m| m.rfc_message_id);
+    for a in store.arrivals_at(ctx.account, target, epoch, bound)? {
+        if !matches!(a.state.as_str(), "pending" | "unresolved") {
+            continue;
+        }
+        let other = matches!((&a.rfc_message_id, &ours), (Some(x), Some(y)) if x != y);
+        let gone = store
+            .occurrence_at(ctx.account, target, epoch, a.uid)?
+            .is_none();
+        if !other && !gone {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn time(s: &str) -> Option<DateTime<Utc>> {
@@ -185,22 +193,19 @@ fn recover_flag(
         Seen::Present(env) if has_flagged(&env.flags) => {
             flag_applied(store, ctx, intent.id, &intent.message_id, &intent.folder)
         }
-        _ => {
-            store.update_intent(
-                intent.id,
-                "failed",
-                error_patch("flag_not_observed"),
-                &ctx.now,
-            )?;
-            store.record_event(
-                ctx.account,
-                Some(&intent.message_id),
-                Some(&intent.folder),
-                "flag_failed",
-                json!({"intent_id": intent.id}),
-                &ctx.now,
-            )
-        }
+        _ => commit(
+            store,
+            ctx,
+            &[
+                close(intent.id, "failed", Some("flag_not_observed")),
+                event(
+                    Some(&intent.message_id),
+                    Some(&intent.folder),
+                    "flag_failed",
+                    json!({"intent_id": intent.id}),
+                ),
+            ],
+        ),
     }
 }
 
@@ -311,10 +316,18 @@ fn recover_uncertain(
             retry_or_supersede(store, ctx, map, intent, from, summary)
         }
         (None, true) => Ok(()),
-        (None, false) => {
-            store.update_intent(intent.id, "sent", IntentPatch::default(), &ctx.now)?;
-            store.remove_occurrence(ctx.account, &from.folder, from.epoch, from.uid)
-        }
+        (None, false) => commit(
+            store,
+            ctx,
+            &[
+                FilingWrite::RemoveOccurrence {
+                    folder: &from.folder,
+                    epoch: from.epoch,
+                    uid: from.uid,
+                },
+                close(intent.id, "sent", None),
+            ],
+        ),
     }
 }
 
@@ -387,55 +400,84 @@ fn rescanned(store: &Store, ctx: &PassContext, folder: &str, epoch: u64) -> Resu
 }
 
 /// Spec "Epoch race", suspected (no session outcome captured): F pauses with
-/// `epoch_race_suspected` and the intent awaits the rescans.
+/// `epoch_race_suspected` and the intent awaits the rescans, in one transaction.
 fn suspect_race(
     store: &mut Store,
     ctx: &PassContext,
     intent: &Intent,
     summary: &mut FilingSummary,
 ) -> Result<()> {
-    pause(store, ctx.account, &intent.folder, "epoch_race_suspected")?;
-    store.update_intent(
-        intent.id,
-        "awaiting_rescan",
-        error_patch("epoch_race_suspected"),
-        &ctx.now,
-    )?;
-    store.record_event(
-        ctx.account,
-        Some(&intent.message_id),
-        Some(&intent.folder),
-        "epoch_race",
-        json!({"intent_id": intent.id, "kind": "move", "error": "epoch_race_suspected"}),
-        &ctx.now,
+    let reason = "epoch_race_suspected";
+    let detail = json!({"intent_id": intent.id, "kind": "move", "error": reason});
+    commit(
+        store,
+        ctx,
+        &[
+            FilingWrite::Pause {
+                folder: &intent.folder,
+                reason,
+            },
+            close(intent.id, "awaiting_rescan", Some(reason)),
+            event(
+                Some(&intent.message_id),
+                Some(&intent.folder),
+                "epoch_race",
+                detail,
+            ),
+        ],
     )?;
     race_problem(&intent.folder, summary);
     Ok(())
 }
 
-/// In both F and T: the move left a duplicate copy; blocked until released.
+/// In both F and T: the move left a duplicate copy. The block and the failed
+/// intent are one transaction, so the message is never unblocked and re-moved.
 fn mark_duplicate(store: &mut Store, ctx: &PassContext, intent: &Intent) -> Result<()> {
-    store.update_intent(intent.id, "failed", error_patch("duplicate_copy"), &ctx.now)?;
-    modify_placement(store, ctx.account, &intent.message_id, |p| {
-        p.blocked_reason = Some("duplicate_copy".into())
-    })?;
-    store.record_event(
-        ctx.account,
-        Some(&intent.message_id),
-        intent.target.as_deref(),
+    block(
+        store,
+        ctx,
+        intent,
         "duplicate_copy",
-        json!({"intent_id": intent.id}),
-        &ctx.now,
+        "duplicate_copy",
+        intent.target.as_deref(),
     )
 }
 
-/// In neither end once T settled: the message left both; it is absent.
+/// Fails a move intent and blocks its placement, with an event, atomically.
+fn block(
+    store: &mut Store,
+    ctx: &PassContext,
+    intent: &Intent,
+    reason: &str,
+    kind: &str,
+    folder: Option<&str>,
+) -> Result<()> {
+    let detail = json!({"intent_id": intent.id, "attempts": intent.attempts});
+    commit_with_placement(
+        store,
+        ctx,
+        &intent.message_id,
+        |p| p.blocked_reason = Some(reason.into()),
+        &[
+            close(intent.id, "failed", Some(reason)),
+            event(Some(&intent.message_id), folder, kind, detail),
+        ],
+    )
+}
+
+/// In neither end once T settled: the message left both; it is absent. The
+/// placement and the intent change together.
 fn mark_lost(store: &mut Store, ctx: &PassContext, intent: &Intent) -> Result<()> {
-    store.update_intent(intent.id, "lost", IntentPatch::default(), &ctx.now)?;
-    modify_placement(store, ctx.account, &intent.message_id, |p| {
-        p.location_state = LocationState::Absent;
-        p.absent_since = Some(ctx.now.clone());
-    })
+    commit_with_placement(
+        store,
+        ctx,
+        &intent.message_id,
+        |p| {
+            p.location_state = LocationState::Absent;
+            p.absent_since = Some(ctx.now.clone());
+        },
+        &[close(intent.id, "lost", None)],
+    )
 }
 
 /// In F only with T settled: retried (re-claimed with job backoff) while the
@@ -460,17 +502,13 @@ fn retry_or_supersede(
         return store.update_intent(intent.id, "superseded", IntentPatch::default(), &ctx.now);
     }
     if intent.attempts >= ctx.max_attempts {
-        store.update_intent(intent.id, "failed", error_patch("move_failed"), &ctx.now)?;
-        modify_placement(store, ctx.account, &intent.message_id, |p| {
-            p.blocked_reason = Some("move_failed".into())
-        })?;
-        return store.record_event(
-            ctx.account,
-            Some(&intent.message_id),
-            Some(&intent.folder),
+        return block(
+            store,
+            ctx,
+            intent,
             "move_failed",
-            json!({"intent_id": intent.id, "attempts": intent.attempts}),
-            &ctx.now,
+            "move_failed",
+            Some(&intent.folder),
         );
     }
     // Without a resolved folder map (resolution failed) nothing is decided.
@@ -553,8 +591,9 @@ fn writable(
 /// Spec "Placement transitions", Move applied: home becomes the target
 /// occurrence, `filed_by = mailtriage`; the desired fields are cleared (with a
 /// revision bump) only while the intent's revision is current, so a newer
-/// request is never consumed. Arrivals of the intent or at the new home
-/// resolve as `own_move`.
+/// request is never consumed. In the same transaction the intent is
+/// `applied`, event `moved` is recorded, and arrivals of the intent or at the
+/// new home resolve as `own_move`.
 pub(crate) fn mark_move_applied(
     store: &mut Store,
     ctx: &PassContext,
@@ -563,7 +602,29 @@ pub(crate) fn mark_move_applied(
     _summary: &mut FilingSummary,
 ) -> Result<()> {
     let (folder, epoch, uid) = home;
-    modify_placement(store, ctx.account, &intent.message_id, |p| {
+    let arrivals: Vec<i64> = store
+        .arrivals_at(ctx.account, &folder, epoch, 0)?
+        .into_iter()
+        .filter(|a| a.state == "pending")
+        .filter(|a| {
+            a.intent_id == Some(intent.id) || (a.uid == uid && a.message_id == intent.message_id)
+        })
+        .map(|a| a.id)
+        .collect();
+    let mut writes = vec![close(intent.id, "applied", None)];
+    let detail = json!({"intent_id": intent.id, "from": intent.folder});
+    writes.push(event(
+        Some(&intent.message_id),
+        Some(&folder),
+        "moved",
+        detail,
+    ));
+    writes.extend(arrivals.iter().map(|id| FilingWrite::Arrival {
+        id: *id,
+        state: "resolved",
+        kind: Some("own_move"),
+    }));
+    let apply_home = |p: &mut super::Placement| {
         p.home_folder = Some(folder.clone());
         p.home_epoch = Some(epoch);
         p.home_uid = Some(uid);
@@ -581,22 +642,6 @@ pub(crate) fn mark_move_applied(
                 p.desired_rev += 1;
             }
         }
-    })?;
-    store.update_intent(intent.id, "applied", IntentPatch::default(), &ctx.now)?;
-    store.record_event(
-        ctx.account,
-        Some(&intent.message_id),
-        Some(&folder),
-        "moved",
-        json!({"intent_id": intent.id, "from": intent.folder}),
-        &ctx.now,
-    )?;
-    for a in store.arrivals_at(ctx.account, &folder, epoch, 0)? {
-        let ours =
-            a.intent_id == Some(intent.id) || (a.uid == uid && a.message_id == intent.message_id);
-        if a.state == "pending" && ours {
-            store.resolve_arrival(a.id, "resolved", Some("own_move"), &ctx.now)?;
-        }
-    }
-    Ok(())
+    };
+    commit_with_placement(store, ctx, &intent.message_id, apply_home, &writes)
 }

@@ -5,39 +5,48 @@
 use super::observe::FolderMap;
 use super::planner::{Action, Locator, Plan};
 use super::{
-    is_config_changed, rfc_message_id, FilingSummary, IntentPatch, PassContext, Placement, Revert,
+    is_config_changed, rfc_message_id, FilingSummary, FilingWrite, IntentPatch, PassContext,
+    Placement, Revert,
 };
 use crate::domain::{FilingMode, SourceEnvelope};
 use crate::engine::WriteOutcome;
 use crate::store::{now, Store};
 use anyhow::{bail, Result};
-use serde_json::json;
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 /// UIDs per write call (spec "Himalaya command mapping").
 const BATCH: usize = 100;
 
-/// Step 9 in `live`: clears satisfied explicit requests, then claims and
-/// applies flags (per folder and epoch) and moves (per folder, epoch and
-/// target) in batches of at most 100. Nothing happens unless writes are allowed.
+/// Step 9 in `live`: clears satisfied explicit requests, consumes the flag
+/// attempt of already-flagged messages, then claims and applies flags (per
+/// folder and epoch) and moves (per folder, epoch and target) in batches of
+/// at most 100. Nothing happens unless writes are allowed. Returns the
+/// messages whose UID batch verification dropped (absent, or another
+/// Message-ID or size), for placement re-evaluation.
 pub fn apply(
     store: &mut Store,
     ctx: &PassContext,
     map: &FolderMap,
     plan: &Plan,
     summary: &mut FilingSummary,
-) -> Result<()> {
+) -> Result<Vec<String>> {
+    let mut dropped = Vec::new();
     if ctx.mode != FilingMode::Live || !map.writes_allowed {
-        return Ok(());
+        return Ok(dropped);
     }
     clear_requests(store, ctx, plan)?;
+    for id in &plan.satisfied_flags {
+        consume_flag_attempt(store, ctx, id)?;
+    }
     let flags = group(plan, |a| match a {
         Action::Flag { at, .. } => Some((at.folder.clone(), at.epoch, String::new())),
         Action::Move { .. } => None,
     });
     for ((folder, epoch, _), actions) in &flags {
         for chunk in actions.chunks(BATCH) {
-            if let Err(e) = flag_batch(store, ctx, folder, *epoch, chunk, summary) {
+            let batch = flag_batch(store, ctx, (folder, *epoch), chunk, &mut dropped, summary);
+            if let Err(e) = batch {
                 write_failed(e, "flag_batch_failed", folder, summary)?;
             }
         }
@@ -48,12 +57,20 @@ pub fn apply(
     });
     for ((folder, epoch, to), actions) in &moves {
         for chunk in actions.chunks(BATCH) {
-            if let Err(e) = move_batch(store, ctx, (folder, *epoch, to), chunk, summary) {
+            let batch = move_batch(
+                store,
+                ctx,
+                (folder, *epoch, to),
+                chunk,
+                &mut dropped,
+                summary,
+            );
+            if let Err(e) = batch {
                 write_failed(e, "move_batch_failed", folder, summary)?;
             }
         }
     }
-    Ok(())
+    Ok(dropped)
 }
 
 type BatchKey = (String, u64, String);
@@ -117,38 +134,85 @@ pub(crate) fn paused(store: &Store, account: &str, folder: &str) -> Result<bool>
         .is_some_and(|r| r.pause_reason.is_some()))
 }
 
-/// Sets a safety pause; an existing pause keeps its reason.
-pub(crate) fn pause(store: &mut Store, account: &str, folder: &str, reason: &str) -> Result<()> {
-    let Some(mut rec) = store.folder_record(account, folder)? else {
-        bail!("no folder record to pause");
-    };
-    if rec.pause_reason.is_none() {
-        rec.pause_reason = Some(reason.into());
-        store.save_folder(&rec)?;
+/// Commits writes that change no placement.
+pub(crate) fn commit(
+    store: &mut Store,
+    ctx: &PassContext,
+    writes: &[FilingWrite<'_>],
+) -> Result<()> {
+    if !store.commit_filing(ctx.account, writes, &ctx.now)? {
+        bail!("filing commit refused");
     }
     Ok(())
 }
 
-/// Re-reads a placement, lets `f` change it and writes it back only while its
-/// `desired_rev` is unchanged, re-reading after a concurrent change. `f` may
-/// bump `desired_rev` itself.
-pub(crate) fn modify_placement(
+/// Re-reads the message's placement, lets `f` change it and commits it
+/// together with `extra` in one transaction while its `desired_rev` is
+/// unchanged, re-reading after a concurrent change. `f` may bump
+/// `desired_rev` itself.
+pub(crate) fn commit_with_placement(
     store: &mut Store,
-    account: &str,
-    id: &str,
+    ctx: &PassContext,
+    message_id: &str,
     mut f: impl FnMut(&mut Placement),
+    extra: &[FilingWrite<'_>],
 ) -> Result<()> {
     for _ in 0..5 {
-        let Some(mut p) = store.placement(account, id)? else {
+        let Some(mut p) = store.placement(ctx.account, message_id)? else {
             bail!("message has no placement");
         };
-        let rev = p.desired_rev;
+        let expected_rev = p.desired_rev;
         f(&mut p);
-        if store.save_placement(&p, Some(rev))? {
+        let mut writes = vec![FilingWrite::Placement {
+            placement: &p,
+            expected_rev,
+        }];
+        writes.extend(extra.iter().cloned());
+        if store.commit_filing(ctx.account, &writes, &ctx.now)? {
             return Ok(());
         }
     }
     bail!("placement kept changing concurrently")
+}
+
+pub(crate) fn event<'a>(
+    message_id: Option<&'a str>,
+    folder: Option<&'a str>,
+    kind: &'a str,
+    detail: Value,
+) -> FilingWrite<'a> {
+    FilingWrite::Event {
+        message_id,
+        folder,
+        kind,
+        detail,
+    }
+}
+
+pub(crate) fn close<'a>(id: i64, state: &'a str, error: Option<&str>) -> FilingWrite<'a> {
+    FilingWrite::Intent {
+        id,
+        state,
+        patch: IntentPatch {
+            error: error.map(str::to_string),
+            ..Default::default()
+        },
+    }
+}
+
+/// Spec "Flags" step 1: a message that already carries `\Flagged` consumes its
+/// one flag attempt without an engine call, so a later unflag is never
+/// overridden.
+fn consume_flag_attempt(store: &mut Store, ctx: &PassContext, message_id: &str) -> Result<()> {
+    commit_with_placement(
+        store,
+        ctx,
+        message_id,
+        |p| {
+            p.flag_attempted_at.get_or_insert_with(now);
+        },
+        &[],
+    )
 }
 
 pub(crate) fn has_flagged(flags: &[String]) -> bool {
@@ -168,19 +232,25 @@ pub(crate) fn matches_meta(
     Ok(rfc_message_id(env) == meta.rfc_message_id && env.size == meta.size)
 }
 
+/// What batch verification keeps of a batch.
+struct Verified<'a> {
+    /// Present with the stored Message-ID and size (and, for flags, unflagged).
+    kept: Vec<&'a Action>,
+    /// For flags: present but already `\Flagged`.
+    flagged: Vec<&'a Action>,
+}
+
 /// Spec "Moves" step 1 and "Flags" step 1: re-verifies the binding and re-reads
 /// the batch with `envelopes()` bracketed by `snapshot()`. `None` aborts the
-/// batch (the folder is not in `epoch`); otherwise the actions whose UID is
-/// present with the stored Message-ID and size and, for flags, lacks
-/// `\Flagged`. A message found already flagged gets its stored envelope
-/// refreshed, so it is not planned again.
+/// batch (the folder is not in `epoch`). Messages whose UID is absent or shows
+/// another Message-ID or size are appended to `dropped`.
 fn verify_batch<'a>(
-    store: &mut Store,
+    store: &Store,
     ctx: &PassContext,
     (folder, epoch): (&str, u64),
     actions: &[&'a Action],
-    for_flags: bool,
-) -> Result<Option<Vec<&'a Action>>> {
+    dropped: &mut Vec<String>,
+) -> Result<Option<Verified<'a>>> {
     (ctx.verify_binding)()?;
     let uids: Vec<u64> = actions.iter().map(|a| locator(a).uid).collect();
     let before = ctx.engine.snapshot(folder)?;
@@ -189,21 +259,26 @@ fn verify_batch<'a>(
     if before.uid_validity != epoch || after.uid_validity != epoch {
         return Ok(None);
     }
-    let mut kept = Vec::new();
+    let mut out = Verified {
+        kept: Vec::new(),
+        flagged: Vec::new(),
+    };
     for action in actions {
-        let Some(env) = envelopes.iter().find(|e| e.uid == locator(action).uid) else {
-            continue;
+        let env = envelopes.iter().find(|e| e.uid == locator(action).uid);
+        let env = match env {
+            Some(e) if matches_meta(store, ctx.account, action.message_id(), e)? => e,
+            _ => {
+                dropped.push(action.message_id().to_string());
+                continue;
+            }
         };
-        if !matches_meta(store, ctx.account, action.message_id(), env)? {
-            continue;
+        if matches!(action, Action::Flag { .. }) && has_flagged(&env.flags) {
+            out.flagged.push(*action);
+        } else {
+            out.kept.push(*action);
         }
-        if for_flags && has_flagged(&env.flags) {
-            store.hydrate(ctx.account, action.message_id(), env)?;
-            continue;
-        }
-        kept.push(*action);
     }
-    Ok(Some(kept))
+    Ok(Some(out))
 }
 
 fn new_batch() -> String {
@@ -215,20 +290,23 @@ fn new_batch() -> String {
 fn flag_batch(
     store: &mut Store,
     ctx: &PassContext,
-    folder: &str,
-    epoch: u64,
+    (folder, epoch): (&str, u64),
     actions: &[&Action],
+    dropped: &mut Vec<String>,
     summary: &mut FilingSummary,
 ) -> Result<()> {
     if paused(store, ctx.account, folder)? {
         return Ok(());
     }
-    let Some(kept) = verify_batch(store, ctx, (folder, epoch), actions, true)? else {
+    let Some(verified) = verify_batch(store, ctx, (folder, epoch), actions, dropped)? else {
         return Ok(());
     };
+    for action in verified.flagged {
+        consume_flag_attempt(store, ctx, action.message_id())?;
+    }
     let (batch, at) = (new_batch(), now());
     let mut claimed = Vec::new();
-    for action in kept {
+    for action in verified.kept {
         if let Some(id) = store.claim_flag(ctx.account, action, &batch, &at)? {
             claimed.push((id, locator(action).uid, action.message_id().to_string()));
         }
@@ -282,6 +360,8 @@ fn flag_outcome(
     }
 }
 
+/// The flag is on the message: placement `flagged_at`, intent `applied` and
+/// event `flagged`, in one transaction.
 pub(crate) fn flag_applied(
     store: &mut Store,
     ctx: &PassContext,
@@ -289,22 +369,21 @@ pub(crate) fn flag_applied(
     message_id: &str,
     folder: &str,
 ) -> Result<()> {
-    store.update_intent(id, "applied", IntentPatch::default(), &ctx.now)?;
-    modify_placement(store, ctx.account, message_id, |p| {
-        p.flagged_at = Some(ctx.now.clone())
-    })?;
-    store.record_event(
-        ctx.account,
-        Some(message_id),
-        Some(folder),
-        "flagged",
-        json!({"intent_id": id}),
-        &ctx.now,
+    let detail = json!({"intent_id": id});
+    commit_with_placement(
+        store,
+        ctx,
+        message_id,
+        |p| p.flagged_at = Some(ctx.now.clone()),
+        &[
+            close(id, "applied", None),
+            event(Some(message_id), Some(folder), "flagged", detail),
+        ],
     )
 }
 
-/// Spec "Epoch race", flag race (detected or suspected): the folder pauses,
-/// the flag intent fails; flags are never removed.
+/// Spec "Epoch race", flag race (detected or suspected): the folder pauses
+/// and the flag intent fails, in one transaction; flags are never removed.
 pub(crate) fn flag_raced(
     store: &mut Store,
     ctx: &PassContext,
@@ -314,15 +393,18 @@ pub(crate) fn flag_raced(
     error: &str,
     summary: &mut FilingSummary,
 ) -> Result<()> {
-    store.update_intent(id, "failed", error_patch(error), &ctx.now)?;
-    pause(store, ctx.account, folder, "epoch_race")?;
-    store.record_event(
-        ctx.account,
-        Some(message_id),
-        Some(folder),
-        "epoch_race",
-        json!({"intent_id": id, "kind": "flag", "error": error}),
-        &ctx.now,
+    let detail = json!({"intent_id": id, "kind": "flag", "error": error});
+    commit(
+        store,
+        ctx,
+        &[
+            FilingWrite::Pause {
+                folder,
+                reason: "epoch_race",
+            },
+            close(id, "failed", Some(error)),
+            event(Some(message_id), Some(folder), "epoch_race", detail),
+        ],
     )?;
     race_problem(folder, summary);
     Ok(())
@@ -350,21 +432,22 @@ fn move_batch(
     ctx: &PassContext,
     (folder, epoch, to): (&str, u64, &str),
     actions: &[&Action],
+    dropped: &mut Vec<String>,
     summary: &mut FilingSummary,
 ) -> Result<()> {
     if paused(store, ctx.account, folder)? || paused(store, ctx.account, to)? {
         return Ok(());
     }
-    let Some(kept) = verify_batch(store, ctx, (folder, epoch), actions, false)? else {
+    let Some(verified) = verify_batch(store, ctx, (folder, epoch), actions, dropped)? else {
         return Ok(());
     };
-    if kept.is_empty() {
+    if verified.kept.is_empty() {
         return Ok(());
     }
     let target = ctx.engine.snapshot(to)?;
     let (batch, at) = (new_batch(), now());
     let mut claimed = Vec::new();
-    for action in kept {
+    for action in verified.kept {
         let id = store.claim_move(
             ctx.account,
             action,
@@ -427,12 +510,21 @@ pub(crate) fn dispatch_moves(
             error: (!outcome.completed).then(|| "incomplete".to_string()),
             ..Default::default()
         };
-        if outcome.completed {
-            store.update_intent(*id, "sent", patch, &ctx.now)?;
-            store.remove_occurrence(ctx.account, folder, epoch, *uid)?;
+        let (state, removed) = if outcome.completed {
+            ("sent", Some((folder, epoch, *uid)))
         } else {
-            store.update_intent(*id, "uncertain", patch, &ctx.now)?;
-        }
+            ("uncertain", None)
+        };
+        let mut writes: Vec<FilingWrite<'_>> = removed
+            .map(|(folder, epoch, uid)| FilingWrite::RemoveOccurrence { folder, epoch, uid })
+            .into_iter()
+            .collect();
+        writes.push(FilingWrite::Intent {
+            id: *id,
+            state,
+            patch,
+        });
+        commit(store, ctx, &writes)?;
     }
     if outcome.completed {
         summary.moved += claimed.len();
@@ -457,8 +549,10 @@ fn set_all(
 }
 
 /// Spec "Epoch race" for a move session that ran in another epoch: with
-/// COPYUID every moved message is journaled for a revert and the reverts are
-/// dispatched; without it the source folder pauses. The intents await rescans.
+/// COPYUID every moved message is journaled for a revert, in the same
+/// transaction that sets the intents `awaiting_rescan`, and the reverts are
+/// dispatched; without it the source folder pauses in that transaction
+/// (`epoch_race_suspected` when the session reported no epoch).
 fn move_raced(
     store: &mut Store,
     ctx: &PassContext,
@@ -468,12 +562,13 @@ fn move_raced(
     outcome: &WriteOutcome,
     summary: &mut FilingSummary,
 ) -> Result<()> {
-    set_all(store, ctx, claimed, "awaiting_rescan", "epoch_race")?;
     let copyuid = outcome.copyuid.as_ref().filter(|c| !c.pairs.is_empty());
     if let (Some(copyuid), Some(session)) = (copyuid, outcome.session_epoch) {
         let at = now();
-        for (_, dst) in &copyuid.pairs {
-            store.insert_revert(&Revert {
+        let reverts: Vec<Revert> = copyuid
+            .pairs
+            .iter()
+            .map(|(_, dst)| Revert {
                 id: 0,
                 account: ctx.account.into(),
                 parent_intent: claimed[0].0,
@@ -487,24 +582,35 @@ fn move_raced(
                 created_at: at.clone(),
                 updated_at: at.clone(),
                 error: None,
-            })?;
-        }
+            })
+            .collect();
+        let mut writes: Vec<FilingWrite<'_>> = reverts.iter().map(FilingWrite::NewRevert).collect();
+        writes.extend(
+            claimed
+                .iter()
+                .map(|(id, _)| close(*id, "awaiting_rescan", Some("epoch_race"))),
+        );
+        commit(store, ctx, &writes)?;
         return dispatch_reverts(store, ctx, summary);
     }
-    pause(store, ctx.account, folder, "epoch_race")?;
+    let reason = if outcome.session_epoch.is_some() {
+        "epoch_race"
+    } else {
+        "epoch_race_suspected"
+    };
+    let mut messages = Vec::new();
     for (id, _) in claimed {
-        let Some(intent) = store.intent(*id)? else {
-            continue;
-        };
-        store.record_event(
-            ctx.account,
-            Some(&intent.message_id),
-            Some(folder),
-            "epoch_race",
-            json!({"intent_id": id, "kind": "move", "error": "epoch_race"}),
-            &ctx.now,
-        )?;
+        if let Some(intent) = store.intent(*id)? {
+            messages.push((*id, intent.message_id));
+        }
     }
+    let mut writes = vec![FilingWrite::Pause { folder, reason }];
+    for (id, message_id) in &messages {
+        writes.push(close(*id, "awaiting_rescan", Some(reason)));
+        let detail = json!({"intent_id": id, "kind": "move", "error": reason});
+        writes.push(event(Some(message_id), Some(folder), "epoch_race", detail));
+    }
+    commit(store, ctx, &writes)?;
     race_problem(folder, summary);
     Ok(())
 }
@@ -568,33 +674,51 @@ fn revert_one(
         .filter(|c| c.target_epoch == r.target_epoch)
         .and_then(|c| c.pairs.iter().find(|(src, _)| *src == r.uid))
         .map(|(_, dst)| *dst);
-    store.update_revert(r.id, "applied", target_uid, None, &ctx.now)?;
-    close_reverted_arrival(store, ctx, r)?;
+    revert_applied(store, ctx, r, target_uid)?;
     summary.reverted += 1;
-    store.record_event(
-        ctx.account,
-        None,
-        Some(&r.target),
-        "epoch_race_reverted",
-        json!({"revert_id": r.id, "parent_intent": r.parent_intent, "from": r.folder}),
-        &ctx.now,
-    )
+    Ok(())
 }
 
-/// A completed revert closes the raced message's arrival in the destination
-/// (kind `reverted`) and removes that occurrence; it changes no placement.
-fn close_reverted_arrival(store: &mut Store, ctx: &PassContext, r: &Revert) -> Result<()> {
-    for a in store.arrivals_at(ctx.account, &r.folder, r.folder_epoch, r.uid)? {
-        let open = a.state == "pending" || a.kind.as_deref() == Some("quarantined");
-        if a.uid == r.uid && open {
-            store.resolve_arrival(a.id, "resolved", Some("reverted"), &ctx.now)?;
-        }
-    }
-    store.remove_occurrence(ctx.account, &r.folder, r.folder_epoch, r.uid)
+/// A completed revert, in one transaction: the revert `applied` with its own
+/// COPYUID target UID, the raced message's arrival in the destination closed
+/// (kind `reverted`) and that occurrence removed, event `epoch_race_reverted`.
+/// It changes no placement.
+fn revert_applied(
+    store: &mut Store,
+    ctx: &PassContext,
+    r: &Revert,
+    target_uid: Option<u64>,
+) -> Result<()> {
+    let arrivals: Vec<i64> = store
+        .arrivals_at(ctx.account, &r.folder, r.folder_epoch, r.uid)?
+        .into_iter()
+        .filter(|a| a.uid == r.uid)
+        .filter(|a| a.state == "pending" || a.kind.as_deref() == Some("quarantined"))
+        .map(|a| a.id)
+        .collect();
+    let mut writes = vec![FilingWrite::Revert {
+        id: r.id,
+        state: "applied",
+        target_uid,
+        error: None,
+    }];
+    writes.extend(arrivals.iter().map(|id| FilingWrite::Arrival {
+        id: *id,
+        state: "resolved",
+        kind: Some("reverted"),
+    }));
+    writes.push(FilingWrite::RemoveOccurrence {
+        folder: &r.folder,
+        epoch: r.folder_epoch,
+        uid: r.uid,
+    });
+    let detail = json!({"revert_id": r.id, "parent_intent": r.parent_intent, "from": r.folder});
+    writes.push(event(None, Some(&r.target), "epoch_race_reverted", detail));
+    commit(store, ctx, &writes)
 }
 
 /// Spec "Epoch race": a failed revert pauses its target folder (the original
-/// source) with event `epoch_race`.
+/// source) with event `epoch_race`, in the transaction that fails it.
 pub(crate) fn revert_failed(
     store: &mut Store,
     ctx: &PassContext,
@@ -602,15 +726,23 @@ pub(crate) fn revert_failed(
     code: &str,
     summary: &mut FilingSummary,
 ) -> Result<()> {
-    store.update_revert(r.id, "failed", None, Some(code), &ctx.now)?;
-    pause(store, ctx.account, &r.target, "epoch_race")?;
-    store.record_event(
-        ctx.account,
-        None,
-        Some(&r.target),
-        "epoch_race",
-        json!({"revert_id": r.id, "parent_intent": r.parent_intent, "error": code}),
-        &ctx.now,
+    let detail = json!({"revert_id": r.id, "parent_intent": r.parent_intent, "error": code});
+    commit(
+        store,
+        ctx,
+        &[
+            FilingWrite::Pause {
+                folder: &r.target,
+                reason: "epoch_race",
+            },
+            FilingWrite::Revert {
+                id: r.id,
+                state: "failed",
+                target_uid: None,
+                error: Some(code),
+            },
+            event(None, Some(&r.target), "epoch_race", detail),
+        ],
     )?;
     race_problem(&r.target, summary);
     Ok(())

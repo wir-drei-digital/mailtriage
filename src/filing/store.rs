@@ -1,8 +1,8 @@
 //! Filing persistence (schema v3): the store API every filing step uses.
 use super::{
     mode_str, open_states_sql, planner::Action, rfc_message_id, Arrival, CheckpointState,
-    FilingStateRow, FolderRecord, HydrationBatch, Intent, IntentPatch, LocationState, MessageMeta,
-    NewIntent, Placement, Revert, StageOptions,
+    FilingStateRow, FilingWrite, FolderRecord, HydrationBatch, Intent, IntentPatch, LocationState,
+    MessageMeta, NewIntent, Placement, Revert, StageOptions,
 };
 use crate::domain::{FilingMode, MailboxSnapshot, SourceEnvelope};
 use crate::store::{bump, envelope_of, merge_envelope, now, row_record, Record, Store};
@@ -276,35 +276,75 @@ impl Store {
     /// the stored `desired_rev` still equals `rev`. Returns whether it wrote.
     pub fn save_placement(&mut self, p: &Placement, expected_rev: Option<i64>) -> Result<bool> {
         let tx = self.db.transaction()?;
-        let n = tx.execute(
-            "UPDATE placements SET source_folder=?3,home_folder=?4,home_epoch=?5,home_uid=?6,location_state=?7,absent_since=?8,desired_target=?9,pinned=?10,eligible_once=?11,desired_rev=?12,filed_at=?13,filed_by=?14,flag_attempted_at=?15,flagged_at=?16,done_inferred=?17,blocked_reason=?18 WHERE account=?1 AND message_id=?2 AND (?19 IS NULL OR desired_rev=?19)",
-            params![
-                p.account,
-                p.message_id,
-                p.source_folder,
-                p.home_folder,
-                p.home_epoch,
-                p.home_uid,
-                p.location_state.as_str(),
-                p.absent_since,
-                p.desired_target,
-                p.pinned,
-                p.eligible_once,
-                p.desired_rev,
-                p.filed_at,
-                p.filed_by,
-                p.flag_attempted_at,
-                p.flagged_at,
-                p.done_inferred,
-                p.blocked_reason,
-                expected_rev
-            ],
-        )?;
-        if n == 1 {
+        let wrote = write_placement(&tx, p, expected_rev)?;
+        if wrote {
             bump(&tx)?;
         }
         tx.commit()?;
-        Ok(n == 1)
+        Ok(wrote)
+    }
+
+    /// Applies `writes` in order in one immediate transaction, so a crash
+    /// never separates an intent's closing state from its side effects.
+    /// Returns `false`, writing nothing, when a placement's `desired_rev` no
+    /// longer equals its `expected_rev`.
+    pub fn commit_filing(
+        &mut self,
+        account: &str,
+        writes: &[FilingWrite<'_>],
+        now: &str,
+    ) -> Result<bool> {
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for w in writes {
+            match w {
+                FilingWrite::Placement {
+                    placement,
+                    expected_rev,
+                } => {
+                    if !write_placement(&tx, placement, Some(*expected_rev))? {
+                        return Ok(false);
+                    }
+                }
+                FilingWrite::Intent { id, state, patch } => {
+                    write_intent(&tx, *id, state, patch, now)?
+                }
+                FilingWrite::Pause { folder, reason } => {
+                    let n = tx.execute(
+                        "UPDATE folders SET pause_reason=COALESCE(pause_reason,?3) WHERE account=?1 AND native=?2",
+                        params![account, folder, reason],
+                    )?;
+                    if n == 0 {
+                        bail!("no folder record to pause");
+                    }
+                }
+                FilingWrite::NewRevert(r) => {
+                    insert_revert_row(&tx, r)?;
+                }
+                FilingWrite::Revert {
+                    id,
+                    state,
+                    target_uid,
+                    error,
+                } => write_revert(&tx, *id, state, *target_uid, *error, now)?,
+                FilingWrite::Arrival { id, state, kind } => {
+                    write_arrival(&tx, *id, state, *kind, now)?
+                }
+                FilingWrite::RemoveOccurrence { folder, epoch, uid } => {
+                    delete_occurrence(&tx, account, folder, *epoch, *uid)?;
+                }
+                FilingWrite::Event {
+                    message_id,
+                    folder,
+                    kind,
+                    detail,
+                } => insert_event(&tx, account, *message_id, *folder, kind, detail, now)?,
+            }
+        }
+        bump(&tx)?;
+        tx.commit()?;
+        Ok(true)
     }
 
     pub fn folder_record(&self, account: &str, native: &str) -> Result<Option<FolderRecord>> {
@@ -470,14 +510,7 @@ impl Store {
         kind: Option<&str>,
         now: &str,
     ) -> Result<()> {
-        let n = self.db.execute(
-            "UPDATE arrivals SET state=?2,kind=?3,resolved_at=CASE ?2 WHEN 'pending' THEN NULL ELSE ?4 END WHERE id=?1",
-            params![id, state, kind, now],
-        )?;
-        if n == 0 {
-            bail!("unknown arrival");
-        }
-        Ok(())
+        write_arrival(&self.db, id, state, kind, now)
     }
 
     pub fn insert_intent(&mut self, i: &NewIntent<'_>) -> Result<i64> {
@@ -657,23 +690,7 @@ impl Store {
         patch: IntentPatch,
         now: &str,
     ) -> Result<()> {
-        let n = self.db.execute(
-            "UPDATE filing_intents SET state=?2,updated_at=?3,target_uid=COALESCE(?4,target_uid),attempts=COALESCE(?5,attempts),next_after=COALESCE(?6,next_after),dispatched_at=COALESCE(?7,dispatched_at),error=COALESCE(?8,error) WHERE id=?1",
-            params![
-                id,
-                state,
-                now,
-                patch.target_uid,
-                patch.attempts,
-                patch.next_after,
-                patch.dispatched_at,
-                patch.error
-            ],
-        )?;
-        if n == 0 {
-            bail!("unknown filing intent");
-        }
-        Ok(())
+        write_intent(&self.db, id, state, &patch, now)
     }
 
     /// Claims a move in one transaction: refused (`None`) when the placement's
@@ -768,24 +785,7 @@ impl Store {
 
     /// Inserts every field of `r` except `id`; returns the new id.
     pub fn insert_revert(&mut self, r: &Revert) -> Result<i64> {
-        self.db.execute(
-            "INSERT INTO filing_reverts(account,parent_intent,folder,folder_epoch,uid,target,target_epoch,state,target_uid,created_at,updated_at,error) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-            params![
-                r.account,
-                r.parent_intent,
-                r.folder,
-                r.folder_epoch,
-                r.uid,
-                r.target,
-                r.target_epoch,
-                r.state,
-                r.target_uid,
-                r.created_at,
-                r.updated_at,
-                r.error
-            ],
-        )?;
-        Ok(self.db.last_insert_rowid())
+        insert_revert_row(&self.db, r)
     }
 
     /// Reverts oldest first; `open_only` keeps `pending` and `in_flight`.
@@ -808,14 +808,7 @@ impl Store {
         error: Option<&str>,
         now: &str,
     ) -> Result<()> {
-        let n = self.db.execute(
-            "UPDATE filing_reverts SET state=?2,target_uid=COALESCE(?3,target_uid),error=COALESCE(?4,error),updated_at=?5 WHERE id=?1",
-            params![id, state, target_uid, error, now],
-        )?;
-        if n == 0 {
-            bail!("unknown filing revert");
-        }
-        Ok(())
+        write_revert(&self.db, id, state, target_uid, error, now)
     }
 
     /// Appends one audit event.
@@ -828,11 +821,7 @@ impl Store {
         detail: Value,
         now: &str,
     ) -> Result<()> {
-        self.db.execute(
-            "INSERT INTO filing_events(account,message_id,folder,at,kind,detail) VALUES(?,?,?,?,?,?)",
-            params![account, message_id, folder, now, kind, detail.to_string()],
-        )?;
-        Ok(())
+        insert_event(&self.db, account, message_id, folder, kind, &detail, now)
     }
 
     /// Events newest first, optionally only those of one message.
@@ -895,15 +884,29 @@ impl Store {
         uid: u64,
     ) -> Result<()> {
         let tx = self.db.transaction()?;
-        let n = tx.execute(
-            "DELETE FROM occurrences WHERE account=? AND mailbox=? AND epoch=? AND uid=?",
-            params![account, folder, epoch, uid],
-        )?;
-        if n > 0 {
+        if delete_occurrence(&tx, account, folder, epoch, uid)? {
             bump(&tx)?;
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// The message occurring at a locator, if any.
+    pub fn occurrence_at(
+        &self,
+        account: &str,
+        folder: &str,
+        epoch: u64,
+        uid: u64,
+    ) -> Result<Option<String>> {
+        Ok(self
+            .db
+            .query_row(
+                "SELECT message_id FROM occurrences WHERE account=? AND mailbox=? AND epoch=? AND uid=?",
+                params![account, folder, epoch, uid],
+                |r| r.get(0),
+            )
+            .optional()?)
     }
 
     /// Transport metadata columns plus `flags` from the envelope JSON.
@@ -1021,6 +1024,146 @@ impl Store {
         tx.commit()?;
         Ok(removed)
     }
+}
+
+/// `save_placement` inside a caller's transaction; does not bump the revision.
+fn write_placement(tx: &Connection, p: &Placement, expected_rev: Option<i64>) -> Result<bool> {
+    let n = tx.execute(
+        "UPDATE placements SET source_folder=?3,home_folder=?4,home_epoch=?5,home_uid=?6,location_state=?7,absent_since=?8,desired_target=?9,pinned=?10,eligible_once=?11,desired_rev=?12,filed_at=?13,filed_by=?14,flag_attempted_at=?15,flagged_at=?16,done_inferred=?17,blocked_reason=?18 WHERE account=?1 AND message_id=?2 AND (?19 IS NULL OR desired_rev=?19)",
+        params![
+            p.account,
+            p.message_id,
+            p.source_folder,
+            p.home_folder,
+            p.home_epoch,
+            p.home_uid,
+            p.location_state.as_str(),
+            p.absent_since,
+            p.desired_target,
+            p.pinned,
+            p.eligible_once,
+            p.desired_rev,
+            p.filed_at,
+            p.filed_by,
+            p.flag_attempted_at,
+            p.flagged_at,
+            p.done_inferred,
+            p.blocked_reason,
+            expected_rev
+        ],
+    )?;
+    Ok(n == 1)
+}
+
+fn write_intent(
+    db: &Connection,
+    id: i64,
+    state: &str,
+    patch: &IntentPatch,
+    now: &str,
+) -> Result<()> {
+    let n = db.execute(
+        "UPDATE filing_intents SET state=?2,updated_at=?3,target_uid=COALESCE(?4,target_uid),attempts=COALESCE(?5,attempts),next_after=COALESCE(?6,next_after),dispatched_at=COALESCE(?7,dispatched_at),error=COALESCE(?8,error) WHERE id=?1",
+        params![
+            id,
+            state,
+            now,
+            patch.target_uid,
+            patch.attempts,
+            patch.next_after,
+            patch.dispatched_at,
+            patch.error
+        ],
+    )?;
+    if n == 0 {
+        bail!("unknown filing intent");
+    }
+    Ok(())
+}
+
+fn insert_revert_row(db: &Connection, r: &Revert) -> Result<i64> {
+    db.execute(
+        "INSERT INTO filing_reverts(account,parent_intent,folder,folder_epoch,uid,target,target_epoch,state,target_uid,created_at,updated_at,error) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        params![
+            r.account,
+            r.parent_intent,
+            r.folder,
+            r.folder_epoch,
+            r.uid,
+            r.target,
+            r.target_epoch,
+            r.state,
+            r.target_uid,
+            r.created_at,
+            r.updated_at,
+            r.error
+        ],
+    )?;
+    Ok(db.last_insert_rowid())
+}
+
+fn write_revert(
+    db: &Connection,
+    id: i64,
+    state: &str,
+    target_uid: Option<u64>,
+    error: Option<&str>,
+    now: &str,
+) -> Result<()> {
+    let n = db.execute(
+        "UPDATE filing_reverts SET state=?2,target_uid=COALESCE(?3,target_uid),error=COALESCE(?4,error),updated_at=?5 WHERE id=?1",
+        params![id, state, target_uid, error, now],
+    )?;
+    if n == 0 {
+        bail!("unknown filing revert");
+    }
+    Ok(())
+}
+
+fn write_arrival(
+    db: &Connection,
+    id: i64,
+    state: &str,
+    kind: Option<&str>,
+    now: &str,
+) -> Result<()> {
+    let n = db.execute(
+        "UPDATE arrivals SET state=?2,kind=?3,resolved_at=CASE ?2 WHEN 'pending' THEN NULL ELSE ?4 END WHERE id=?1",
+        params![id, state, kind, now],
+    )?;
+    if n == 0 {
+        bail!("unknown arrival");
+    }
+    Ok(())
+}
+
+fn delete_occurrence(
+    db: &Connection,
+    account: &str,
+    folder: &str,
+    epoch: u64,
+    uid: u64,
+) -> Result<bool> {
+    Ok(db.execute(
+        "DELETE FROM occurrences WHERE account=? AND mailbox=? AND epoch=? AND uid=?",
+        params![account, folder, epoch, uid],
+    )? > 0)
+}
+
+fn insert_event(
+    db: &Connection,
+    account: &str,
+    message_id: Option<&str>,
+    folder: Option<&str>,
+    kind: &str,
+    detail: &Value,
+    now: &str,
+) -> Result<()> {
+    db.execute(
+        "INSERT INTO filing_events(account,message_id,folder,at,kind,detail) VALUES(?,?,?,?,?,?)",
+        params![account, message_id, folder, now, kind, detail.to_string()],
+    )?;
+    Ok(())
 }
 
 /// `ensure_placement` inside a caller's transaction; does not bump the revision.

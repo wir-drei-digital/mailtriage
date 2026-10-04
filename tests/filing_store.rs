@@ -686,3 +686,90 @@ fn hydrate_never_nulls_known_transport_metadata() {
         (Some("<a@t>"), Some(100), Some("2026-10-04T10:00:00+00:00"))
     );
 }
+
+#[test]
+fn filing_commits_are_all_or_nothing() {
+    use mailtriage::filing::{
+        planner::{Action, Locator},
+        FilingWrite, IntentPatch,
+    };
+    let (_d, mut s) = store();
+    s.ensure_account("work", "id", "g1").unwrap();
+    let raw = b"Message-ID: <a@t>\r\nSubject: s\r\n\r\nbody";
+    let msg = normalize::rfc822(raw, 1000).unwrap();
+    s.checkpoint("work", "INBOX", &snap(5, 5)).unwrap();
+    let none = BTreeMap::new();
+    s.stage_with(
+        "work",
+        "INBOX",
+        5,
+        1,
+        &[env(1, "a")],
+        "g1",
+        true,
+        &opts(&none),
+    )
+    .unwrap();
+    let id = s.arrivals("work", None).unwrap()[0].message_id.clone();
+    s.attach("work", &id, &msg).unwrap();
+    s.ensure_placement("work", &id, &["INBOX".to_string()])
+        .unwrap();
+    let action = Action::Move {
+        message_id: id.clone(),
+        from: Locator {
+            folder: "INBOX".into(),
+            epoch: 5,
+            uid: 1,
+        },
+        to: "News".into(),
+        desired_rev: 0,
+        consumes_eligible: false,
+    };
+    let intent = s
+        .claim_move("work", &action, 1, 1, "b1", NOW)
+        .unwrap()
+        .unwrap();
+    let mut blocked = s.placement("work", &id).unwrap().unwrap();
+    blocked.blocked_reason = Some("duplicate_copy".into());
+    let close = FilingWrite::Intent {
+        id: intent,
+        state: "failed",
+        patch: IntentPatch::default(),
+    };
+    let stale = [
+        FilingWrite::Placement {
+            placement: &blocked,
+            expected_rev: 7,
+        },
+        close.clone(),
+    ];
+    assert!(!s.commit_filing("work", &stale, NOW).unwrap());
+    assert_eq!(s.intent(intent).unwrap().unwrap().state, "in_flight");
+    // A failing write later in the list rolls back the earlier ones too.
+    let unknown_folder = [
+        close.clone(),
+        FilingWrite::Pause {
+            folder: "Nowhere",
+            reason: "epoch_race",
+        },
+    ];
+    assert!(s.commit_filing("work", &unknown_folder, NOW).is_err());
+    assert_eq!(s.intent(intent).unwrap().unwrap().state, "in_flight");
+    let current = [
+        FilingWrite::Placement {
+            placement: &blocked,
+            expected_rev: 0,
+        },
+        close,
+    ];
+    assert!(s.commit_filing("work", &current, NOW).unwrap());
+    assert_eq!(s.intent(intent).unwrap().unwrap().state, "failed");
+    assert_eq!(
+        s.placement("work", &id)
+            .unwrap()
+            .unwrap()
+            .blocked_reason
+            .as_deref(),
+        Some("duplicate_copy")
+    );
+}

@@ -222,6 +222,52 @@ pub struct IntentPatch {
     pub error: Option<String>,
 }
 
+/// One write of an atomic filing commit (`Store::commit_filing`).
+#[derive(Debug, Clone)]
+pub enum FilingWrite<'a> {
+    /// Every field of an existing placement, only while its stored
+    /// `desired_rev` equals `expected_rev` (else the whole commit is refused).
+    Placement {
+        placement: &'a Placement,
+        expected_rev: i64,
+    },
+    /// An intent's state; patch fields that are `Some` overwrite.
+    Intent {
+        id: i64,
+        state: &'a str,
+        patch: IntentPatch,
+    },
+    /// A safety pause; an existing pause keeps its reason.
+    Pause { folder: &'a str, reason: &'a str },
+    /// A new revert row (every field but `id`).
+    NewRevert(&'a Revert),
+    /// A revert's state; `target_uid` and `error` overwrite when `Some`.
+    Revert {
+        id: i64,
+        state: &'a str,
+        target_uid: Option<u64>,
+        error: Option<&'a str>,
+    },
+    /// An arrival's state and kind, as `Store::resolve_arrival`.
+    Arrival {
+        id: i64,
+        state: &'a str,
+        kind: Option<&'a str>,
+    },
+    RemoveOccurrence {
+        folder: &'a str,
+        epoch: u64,
+        uid: u64,
+    },
+    /// One audit event.
+    Event {
+        message_id: Option<&'a str>,
+        folder: Option<&'a str>,
+        kind: &'a str,
+        detail: serde_json::Value,
+    },
+}
+
 /// The stored form of an envelope's Message-ID: trimmed, case-sensitive,
 /// `None` when missing or blank (spec "Identity and placements").
 pub fn rfc_message_id(env: &SourceEnvelope) -> Option<String> {

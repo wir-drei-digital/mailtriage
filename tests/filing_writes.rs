@@ -50,6 +50,7 @@ fn live_files_new_mail_and_flags_actionable_mail() {
 #[test]
 fn dry_run_then_live_files_mail_that_arrived_during_dry_run() {
     let h = Harness::new(DryRun);
+    h.sync();
     h.fake
         .deliver("INBOX", &mail("n", "Weekly newsletter", "Our newsletter"));
     h.sync();
@@ -495,16 +496,452 @@ fn changed_configuration_stops_writes_for_the_pass() {
     // Rewrite the configuration: its bytes change, its meaning does not.
     let bytes = std::fs::read(&h.path).unwrap();
     std::fs::write(&h.path, [bytes.as_slice(), b"\n"].concat()).unwrap();
-    let out = s.sync("work", 100).unwrap();
-    assert_eq!(out["partial"], true);
-    assert_eq!(out["filing"]["planned"], 1);
-    assert!(out["filing"]["problems"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|p| p == "config_changed"));
+    let e = s.sync("work", 100).unwrap_err();
+    let code = e
+        .downcast_ref::<mailtriage::service::ServiceError>()
+        .map(|e| e.code);
+    assert_eq!(code, Some(5), "the existing require_unchanged error");
     assert_eq!(move_calls(&h), 0);
     assert!(h.service().store.intents("work", false).unwrap().is_empty());
     h.sync();
     assert_eq!(place(&h, "n")[0].0, "Newsletters");
+}
+
+fn placement_of(h: &Harness, subject: &str) -> mailtriage::filing::Placement {
+    let s = h.service();
+    let id = s
+        .store
+        .records("work")
+        .unwrap()
+        .into_iter()
+        .find(|r| r.envelope["subject"] == subject)
+        .unwrap()
+        .id;
+    s.store.placement("work", &id).unwrap().unwrap()
+}
+
+fn event_kinds(h: &Harness) -> Vec<String> {
+    h.service()
+        .store
+        .events("work", None, 200)
+        .unwrap()
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap().to_string())
+        .collect()
+}
+
+fn flag_calls(h: &Harness) -> usize {
+    h.fake
+        .calls()
+        .iter()
+        .filter(|c| c.starts_with("flag "))
+        .count()
+}
+
+#[test]
+fn crash_after_the_block_before_the_intent_closed_converges() {
+    let h = Harness::new(Live);
+    h.sync();
+    h.fake
+        .deliver("INBOX", &mail("n", "Weekly newsletter", "Our newsletter"));
+    h.fake.inject(FakeOp::Move, Fault::PartialCopy);
+    h.sync();
+    // A crash right after the block was written, before the intent closed.
+    {
+        let mut s = h.service();
+        let mut p = s.store.placements("work").unwrap().remove(0);
+        let rev = p.desired_rev;
+        p.blocked_reason = Some("duplicate_copy".into());
+        assert!(s.store.save_placement(&p, Some(rev)).unwrap());
+    }
+    assert_eq!(
+        intent_states(&h),
+        vec![("move".to_string(), "uncertain".to_string())]
+    );
+    h.sync();
+    h.sync();
+    assert_eq!(
+        intent_states(&h),
+        vec![("move".to_string(), "failed".to_string())]
+    );
+    let p = h.service().store.placements("work").unwrap().remove(0);
+    assert_eq!(p.blocked_reason.as_deref(), Some("duplicate_copy"));
+    assert_eq!(move_calls(&h), 1, "never a second move");
+}
+
+#[test]
+fn verification_drops_are_reported_and_existing_flags_consume_the_attempt() {
+    use mailtriage::filing::{apply, inputs, observe, planner, FilingSummary, PassContext};
+    let h = Harness::new(Live);
+    h.sync();
+    let n = h
+        .fake
+        .deliver("INBOX", &mail("n", "Weekly newsletter", "Our newsletter"));
+    let c = h
+        .fake
+        .deliver("INBOX", &mail("c", "Lunch", "Can you join us?"));
+    // Placed and classified without writes.
+    h.set_mode(DryRun);
+    h.sync();
+    h.set_mode(Live);
+    let n_id = placement_of(&h, "Weekly newsletter").message_id;
+    let mut s = h.service();
+    let cfg = s.config.accounts["work"].clone();
+    let generation = s.store.records("work").unwrap()[0].generation.clone();
+    let verify = || -> anyhow::Result<()> { Ok(()) };
+    let ctx = PassContext {
+        account: "work",
+        cfg: &cfg,
+        engine: &h.fake,
+        mode: Live,
+        generation: &generation,
+        now: mailtriage::store::now(),
+        max_attempts: 5,
+        verify_binding: &verify,
+    };
+    let mut summary = FilingSummary::default();
+    let map = observe::resolve_folders(&mut s.store, &ctx, &mut summary).unwrap();
+    let plan = planner::plan(&inputs::plan_input(&s.store, &ctx, &map, false).unwrap());
+    assert_eq!(plan.actions.len(), 2, "a flag for c, a move for n");
+    // Between planning and applying, n leaves INBOX and the user flags c.
+    h.fake.client_delete("INBOX", n);
+    h.fake.client_set_flag("INBOX", c, "\\Flagged", true);
+    let dropped = apply::apply(&mut s.store, &ctx, &map, &plan, &mut summary).unwrap();
+    assert_eq!(dropped, vec![n_id]);
+    assert_eq!(move_calls(&h) + flag_calls(&h), 0);
+    let p = placement_of(&h, "Lunch");
+    assert!(
+        p.flag_attempted_at.is_some(),
+        "the user's flag consumed the attempt"
+    );
+    assert!(s.store.intents("work", false).unwrap().is_empty());
+}
+
+#[test]
+fn a_user_flag_satisfies_the_flag_attempt_and_a_later_unflag_is_kept() {
+    let h = Harness::new(Live);
+    h.sync();
+    let c = h
+        .fake
+        .deliver("INBOX", &mail("c", "Lunch", "Can you join us?"));
+    h.fake.client_set_flag("INBOX", c, "\\Flagged", true);
+    h.sync();
+    assert_eq!(flag_calls(&h), 0);
+    assert!(placement_of(&h, "Lunch").flag_attempted_at.is_some());
+    assert!(h.service().store.intents("work", false).unwrap().is_empty());
+    h.fake.client_set_flag("INBOX", c, "\\Flagged", false);
+    h.sync();
+    h.sync();
+    assert_eq!(flag_calls(&h), 0, "the unflag is never overridden");
+    assert!(h.fake.flags("INBOX", c).is_empty());
+}
+
+/// Delivers a (then deleted), n and the backlog message b, so that an epoch
+/// reset renumbers n to 1 and b to 2: the raced session moves b, not n.
+fn deliver_race_victims(h: &Harness) {
+    let a = h.fake.deliver("INBOX", &mail("a", "Hello", "hello there"));
+    let n = h
+        .fake
+        .deliver("INBOX", &mail("n", "Weekly newsletter", "Our newsletter"));
+    let b = h.fake.deliver_at(
+        "INBOX",
+        &mail("b", "Old newsletter", "newsletter"),
+        "2026-01-01T00:00:00+00:00",
+    );
+    assert_eq!((a, n, b), (1, 2, 3));
+    h.fake.client_delete("INBOX", a);
+    h.fake.inject(FakeOp::Move, Fault::EpochRaceBefore);
+}
+
+fn assert_untouched(p: &mailtriage::filing::Placement) {
+    assert_eq!(p.filed_at, None);
+    assert_eq!(p.filed_by, None);
+    assert_eq!(p.desired_target, None);
+    assert_eq!(p.desired_rev, 0);
+    assert_eq!(p.blocked_reason, None);
+}
+
+#[test]
+fn epoch_race_that_moved_another_message_reverts_it_without_placement_changes() {
+    let h = Harness::new(Live);
+    h.sync();
+    deliver_race_victims(&h);
+    let out = h.sync();
+    let calls = h.fake.calls();
+    assert!(calls.contains(&"move INBOX 2 -> Newsletters".to_string()));
+    assert!(
+        calls.contains(&"move Newsletters 1 -> INBOX".to_string()),
+        "the revert moved the raced message back"
+    );
+    assert_eq!(out["filing"]["reverted"], 1);
+    assert_eq!(place(&h, "b")[0].0, "INBOX");
+    assert_eq!(place(&h, "n")[0].0, "INBOX");
+    let b = placement_of(&h, "Old newsletter");
+    assert_untouched(&b);
+    assert_eq!(b.home_uid, Some(3));
+    assert_untouched(&placement_of(&h, "Weekly newsletter"));
+    assert_eq!(
+        intent_states(&h),
+        vec![("move".to_string(), "awaiting_rescan".to_string())]
+    );
+    h.sync();
+    h.sync();
+    h.sync();
+    assert_eq!(
+        place(&h, "n")[0].0,
+        "Newsletters",
+        "n is filed by its retry"
+    );
+    assert_eq!(place(&h, "b")[0].0, "INBOX");
+    assert_untouched(&placement_of(&h, "Old newsletter"));
+    let kinds = event_kinds(&h);
+    assert!(kinds.iter().all(|k| k != "client_correction"));
+    assert_eq!(kinds.iter().filter(|k| *k == "moved").count(), 1);
+}
+
+#[test]
+fn epoch_race_that_moved_another_message_without_uidplus_only_pauses() {
+    let h = Harness::new(Live);
+    h.fake.set_capabilities(true, false, true);
+    h.sync();
+    deliver_race_victims(&h);
+    h.sync();
+    assert_eq!(pause_of(&h, "INBOX").as_deref(), Some("epoch_race"));
+    assert_eq!(move_calls(&h), 1, "no revert without COPYUID");
+    assert!(h.service().store.reverts("work", false).unwrap().is_empty());
+    assert_eq!(place(&h, "b")[0].0, "Newsletters");
+    assert_eq!(place(&h, "n")[0].0, "INBOX");
+    assert_untouched(&placement_of(&h, "Weekly newsletter"));
+    h.sync();
+    h.sync();
+    assert_eq!(move_calls(&h), 1, "the paused source is not written");
+    assert_untouched(&placement_of(&h, "Old newsletter"));
+    assert_untouched(&placement_of(&h, "Weekly newsletter"));
+    assert!(event_kinds(&h).iter().all(|k| k != "client_correction"));
+}
+
+#[test]
+fn applied_move_with_a_stale_revision_does_not_consume_a_newer_request() {
+    let h = Harness::new(Live);
+    h.sync();
+    h.fake
+        .deliver("INBOX", &mail("n", "Weekly newsletter", "Our newsletter"));
+    h.fake.inject(FakeOp::Move, Fault::ErrorAfter);
+    h.sync();
+    {
+        let mut s = h.service();
+        let mut p = s.store.placements("work").unwrap().remove(0);
+        let rev = p.desired_rev;
+        p.desired_target = Some("transactions".into());
+        p.desired_rev += 1;
+        assert!(s.store.save_placement(&p, Some(rev)).unwrap());
+    }
+    h.sync(); // the copy is not identified yet: sent
+    h.sync(); // identified: the old intent applies; the newer request stays and is dispatched
+    let p = h.service().store.placements("work").unwrap().remove(0);
+    assert_eq!(p.home_folder.as_deref(), Some("Newsletters"));
+    assert_eq!(p.filed_by.as_deref(), Some("mailtriage"));
+    assert_eq!(p.desired_target.as_deref(), Some("transactions"));
+    assert_eq!(p.desired_rev, 1);
+    h.sync();
+    assert_eq!(place(&h, "n")[0].0, "Transactions");
+    let intents = h.service().store.intents("work", false).unwrap();
+    let states: Vec<_> = intents
+        .iter()
+        .map(|i| (i.state.as_str(), i.desired_rev))
+        .collect();
+    assert_eq!(states, vec![("applied", 0), ("applied", 1)]);
+    let p = h.service().store.placements("work").unwrap().remove(0);
+    assert_eq!(p.desired_target, None, "consumed by its own move");
+}
+
+#[test]
+fn claims_without_dispatch_are_recovered() {
+    use mailtriage::filing::planner::{Action, Locator};
+    let h = Harness::new(Live);
+    h.sync();
+    h.fake
+        .deliver("INBOX", &mail("i", "Invoice", "Payment due today"));
+    h.set_mode(DryRun);
+    h.sync();
+    h.set_mode(Live);
+    {
+        let mut s = h.service();
+        let p = s.store.placements("work").unwrap().remove(0);
+        let at = Locator {
+            folder: "INBOX".into(),
+            epoch: p.home_epoch.unwrap(),
+            uid: p.home_uid.unwrap(),
+        };
+        let now = mailtriage::store::now();
+        let flag = Action::Flag {
+            message_id: p.message_id.clone(),
+            at: at.clone(),
+        };
+        assert!(s
+            .store
+            .claim_flag("work", &flag, "crash", &now)
+            .unwrap()
+            .is_some());
+        let mv = Action::Move {
+            message_id: p.message_id.clone(),
+            from: at,
+            to: "Transactions".into(),
+            desired_rev: p.desired_rev,
+            consumes_eligible: false,
+        };
+        let epoch = h.fake.epoch("Transactions");
+        assert!(s
+            .store
+            .claim_move("work", &mv, epoch, 1, "crash", &now)
+            .unwrap()
+            .is_some());
+    }
+    h.sync();
+    assert_eq!(
+        flag_calls(&h),
+        0,
+        "an interrupted flag claim is never dispatched later"
+    );
+    assert_eq!(move_calls(&h), 1, "the unsent move is retried once");
+    assert_eq!(
+        intent_states(&h),
+        vec![
+            ("flag".to_string(), "failed".to_string()),
+            ("move".to_string(), "sent".to_string())
+        ]
+    );
+    assert!(event_kinds(&h).iter().any(|k| k == "flag_failed"));
+    h.sync();
+    let (folder, uid) = place(&h, "i")[0].clone();
+    assert_eq!(folder, "Transactions");
+    assert!(h.fake.flags(&folder, uid).is_empty());
+    assert_eq!(flag_calls(&h), 0);
+}
+
+#[test]
+fn flag_with_a_lost_response_is_applied_by_observation() {
+    let h = Harness::new(Live);
+    h.sync();
+    h.fake
+        .deliver("INBOX", &mail("c", "Lunch", "Can you join us?"));
+    h.fake.inject(FakeOp::Flag, Fault::ErrorAfter);
+    h.sync();
+    assert_eq!(
+        intent_states(&h),
+        vec![("flag".to_string(), "uncertain".to_string())]
+    );
+    h.sync();
+    assert_eq!(
+        intent_states(&h),
+        vec![("flag".to_string(), "applied".to_string())]
+    );
+    assert!(placement_of(&h, "Lunch").flagged_at.is_some());
+    assert!(event_kinds(&h).iter().any(|k| k == "flagged"));
+    assert_eq!(flag_calls(&h), 1);
+}
+
+#[test]
+fn suspected_flag_race_pauses_and_is_never_retried() {
+    let h = Harness::new(Live);
+    h.sync();
+    h.fake
+        .deliver("INBOX", &mail("c", "Lunch", "Can you join us?"));
+    h.fake.inject(FakeOp::Flag, Fault::ErrorBefore);
+    h.sync();
+    h.fake.reset_epoch("INBOX");
+    h.sync();
+    assert_eq!(pause_of(&h, "INBOX").as_deref(), Some("epoch_race"));
+    assert_eq!(
+        intent_states(&h),
+        vec![("flag".to_string(), "failed".to_string())]
+    );
+    h.sync();
+    assert_eq!(flag_calls(&h), 1);
+}
+
+#[test]
+fn awaiting_rescan_retries_when_only_the_source_holds_the_message() {
+    let h = Harness::new(Live);
+    h.sync();
+    h.fake
+        .deliver("INBOX", &mail("n", "Weekly newsletter", "Our newsletter"));
+    h.fake.inject(FakeOp::Move, Fault::EpochRaceBefore);
+    h.sync(); // race, reverted
+    h.sync(); // INBOX rescan
+    assert_eq!(
+        intent_states(&h),
+        vec![("move".to_string(), "awaiting_rescan".to_string())]
+    );
+    h.sync(); // in F only: retried
+    h.sync(); // applied
+    assert_eq!(place(&h, "n")[0].0, "Newsletters");
+    let intent = h.service().store.intents("work", false).unwrap().remove(0);
+    assert_eq!((intent.state.as_str(), intent.attempts), ("applied", 1));
+    assert_eq!(move_calls(&h), 3, "race, revert, retry");
+}
+
+#[test]
+fn awaiting_rescan_with_the_message_in_neither_end_is_lost() {
+    let h = Harness::new(Live);
+    h.sync();
+    h.fake
+        .deliver("INBOX", &mail("n", "Weekly newsletter", "Our newsletter"));
+    h.fake.inject(FakeOp::Move, Fault::ErrorAfter);
+    h.sync();
+    let (folder, uid) = place(&h, "n")[0].clone();
+    assert_eq!(folder, "Newsletters");
+    h.fake.client_delete(&folder, uid);
+    h.fake.reset_epoch("Newsletters");
+    h.sync();
+    assert_eq!(
+        intent_states(&h),
+        vec![("move".to_string(), "awaiting_rescan".to_string())]
+    );
+    h.sync();
+    assert_eq!(
+        intent_states(&h),
+        vec![("move".to_string(), "lost".to_string())]
+    );
+    let p = h.service().store.placements("work").unwrap().remove(0);
+    assert_eq!(p.location_state, mailtriage::filing::LocationState::Absent);
+    assert_eq!(move_calls(&h), 1);
+}
+
+#[test]
+fn noselect_writes_nothing_and_resolves_as_still_in_the_source() {
+    let h = Harness::new(Live);
+    h.sync();
+    h.fake
+        .deliver("INBOX", &mail("n", "Weekly newsletter", "Our newsletter"));
+    h.fake.inject(FakeOp::Move, Fault::NoSelect);
+    h.sync();
+    assert_eq!(place(&h, "n")[0].0, "INBOX");
+    let intent = h.service().store.intents("work", false).unwrap().remove(0);
+    assert_eq!(
+        (intent.state.as_str(), intent.error.as_deref()),
+        ("uncertain", Some("not_selected"))
+    );
+    h.sync();
+    assert_eq!(move_calls(&h), 2, "observed in F, then retried");
+    assert_eq!(place(&h, "n")[0].0, "Newsletters");
+}
+
+#[test]
+fn unrelated_arrivals_in_a_busy_target_do_not_hold_a_lost_move() {
+    let h = Harness::new(Live);
+    h.sync();
+    h.fake
+        .deliver("INBOX", &mail("n", "Weekly newsletter", "Our newsletter"));
+    h.sync();
+    let (folder, uid) = place(&h, "n")[0].clone();
+    assert_eq!(folder, "Newsletters");
+    h.fake.client_delete(&folder, uid);
+    h.fake
+        .deliver(&folder, &mail("x", "Unrelated", "something else"));
+    h.sync();
+    assert_eq!(
+        intent_states(&h),
+        vec![("move".to_string(), "lost".to_string())]
+    );
 }

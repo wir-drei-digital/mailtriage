@@ -39,6 +39,9 @@ pub struct Plan {
     pub actions: Vec<Action>,
     /// Satisfied explicit requests: (message id, desired_rev) to clear.
     pub cleared_requests: Vec<(String, i64)>,
+    /// Flag-eligible messages that already carry `\Flagged`: their one flag
+    /// attempt is consumed without an engine call.
+    pub satisfied_flags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,6 +120,13 @@ enum MoveDecision {
     Nothing,
 }
 
+enum FlagDecision {
+    Flag(Action),
+    /// Everything holds, but the message is already flagged.
+    Satisfied,
+    Nothing,
+}
+
 pub fn plan(input: &PlanInput) -> Plan {
     let mut out = Plan::default();
     if input.mode == FilingMode::Off {
@@ -136,8 +146,10 @@ pub fn plan(input: &PlanInput) -> Plan {
             continue;
         };
         let mut actions = Vec::new();
-        if let Some(flag) = flag_action(input, m, home, home_view) {
-            actions.push(flag);
+        match flag_action(input, m, home, home_view) {
+            FlagDecision::Flag(flag) => actions.push(flag),
+            FlagDecision::Satisfied => out.satisfied_flags.push(m.message_id.clone()),
+            FlagDecision::Nothing => {}
         }
         match move_action(input, m, home, home_view) {
             MoveDecision::Move(a) => actions.push(a),
@@ -193,24 +205,27 @@ fn flag_action(
     m: &PlanMessage,
     home: &Locator,
     home_view: &FolderView,
-) -> Option<Action> {
+) -> FlagDecision {
     if !input.flag_enabled || m.flag_attempted || m.open_flag_intent {
-        return None;
+        return FlagDecision::Nothing;
     }
     // Flags only touch a source folder or a category folder in state `ok`.
     if !(home_view.is_source || (home_view.is_category && home_view.usable == FolderUse::Ok)) {
-        return None;
+        return FlagDecision::Nothing;
     }
     if !(is_new(input, m) || m.eligible_once || m.filed_at.is_some()) {
-        return None;
-    }
-    if m.flags.iter().any(|f| f.eq_ignore_ascii_case("\\Flagged")) {
-        return None;
+        return FlagDecision::Nothing;
     }
     let e = &m.effective;
     let action = e.action_required == Some(true) && (e.action_from_override || e.current);
     let urgent = e.urgency == Some(Urgency::High) && (e.urgency_from_override || e.current);
-    (action || urgent).then(|| Action::Flag {
+    if !(action || urgent) {
+        return FlagDecision::Nothing;
+    }
+    if m.flags.iter().any(|f| f.eq_ignore_ascii_case("\\Flagged")) {
+        return FlagDecision::Satisfied;
+    }
+    FlagDecision::Flag(Action::Flag {
         message_id: m.message_id.clone(),
         at: home.clone(),
     })
@@ -573,6 +588,7 @@ mod tests {
             flags(&p),
             vec!["act".to_string(), "forced".into(), "hot".into()]
         );
+        assert_eq!(p.satisfied_flags, vec!["has".to_string()]);
         let mut i = input(vec![msg("x", "correspondence")]);
         i.messages[0].effective.action_required = Some(true);
         i.flag_enabled = false;
