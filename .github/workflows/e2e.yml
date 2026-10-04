@@ -1,0 +1,53 @@
+name: Dovecot end to end
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Official Himalaya v2.1.0 release asset, pinned by SHA-256.
+  HIMALAYA_URL: https://github.com/pimalaya/himalaya/releases/download/v2.1.0/himalaya.x86_64-linux.tgz
+  HIMALAYA_SHA256: 683a2ab8e1534f01e6bda3a69e204d564c31fbfbe20511fc7bc60b67f2e85884
+
+jobs:
+  dovecot:
+    name: Dovecot (flat and INBOX. prefix)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: e2e
+      - name: Install pinned Himalaya v2.1.0
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/himalaya-v2.1.0"
+          mkdir -p "$dir"
+          cd "$dir"
+          curl -fsSL -o himalaya.x86_64-linux.tgz "$HIMALAYA_URL"
+          echo "$HIMALAYA_SHA256  himalaya.x86_64-linux.tgz" | sha256sum -c -
+          tar -xzf himalaya.x86_64-linux.tgz himalaya
+          ./himalaya --version
+          echo "MT_E2E_HIMALAYA=$PWD/himalaya" >> "$GITHUB_ENV"
+      - id: build
+        run: cargo build --locked
+      - name: End to end, flat namespace
+        run: bash tests/e2e/run.sh flat 31143
+      # Runs even when the flat layout failed, so both results are reported.
+      - name: End to end, INBOX. prefix namespace
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: bash tests/e2e/run.sh prefix 31144

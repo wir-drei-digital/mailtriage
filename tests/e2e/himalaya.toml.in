@@ -1,0 +1,9 @@
+# Himalaya v2.1.0 account for the Dovecot end-to-end test (tests/e2e/run.sh).
+# tests/e2e_dovecot.rs replaces @PORT@ with the container's host port.
+# Cleartext IMAP to a throwaway local container: no TLS, fixed test login.
+[accounts.e2e]
+default = true
+imap.server = "imap://127.0.0.1:@PORT@"
+imap.starttls = false
+imap.sasl.plain.username = "e2e"
+imap.sasl.plain.password.raw = "e2e-pass"
