@@ -7,35 +7,12 @@ use serde_json::{json, Value};
 use std::{collections::BTreeMap, path::Path, time::Duration as StdDuration};
 use uuid::Uuid;
 
-pub struct Store {
-    pub(crate) db: Connection,
-}
-#[derive(Debug, Clone)]
-pub struct Record {
-    pub id: String,
-    pub account: String,
-    pub normalized: Option<NormalizedMessage>,
-    pub envelope: Value,
-    pub status: String,
-    pub classification: Option<Value>,
-    pub overrides: Value,
-    pub review_state: String,
-    pub observed_at: String,
-    pub error: Option<String>,
-    pub generation: String,
-}
-impl Store {
-    pub fn open(path: &Path) -> Result<Self> {
-        let db = Connection::open(path)?;
-        db.busy_timeout(StdDuration::from_secs(5))?;
-        db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;")?;
-        let version: u32 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 4 {
-            bail!("database schema is newer than this binary");
-        }
-        if version == 0 {
-            db.execute_batch("BEGIN IMMEDIATE;
-CREATE TABLE metadata(key TEXT PRIMARY KEY, value INTEGER NOT NULL);
+/// Schema migrations: (version reached, SQL). Each runs in its own
+/// `BEGIN IMMEDIATE` transaction that re-reads `user_version` first.
+const MIGRATIONS: [(u32, &str); 4] = [
+    (
+        1,
+        "CREATE TABLE metadata(key TEXT PRIMARY KEY, value INTEGER NOT NULL);
 INSERT INTO metadata VALUES('revision',0);
 CREATE TABLE accounts(name TEXT PRIMARY KEY, identity TEXT NOT NULL, generation TEXT NOT NULL);
 CREATE TABLE messages(id TEXT PRIMARY KEY, account TEXT NOT NULL REFERENCES accounts(name), fingerprint TEXT,
@@ -52,17 +29,17 @@ CREATE TABLE jobs(message_id TEXT PRIMARY KEY REFERENCES messages(id), state TEX
  next_after TEXT NOT NULL, lease_until TEXT, generation TEXT NOT NULL);
 CREATE TABLE attempts(id INTEGER PRIMARY KEY, message_id TEXT NOT NULL REFERENCES messages(id), created_at TEXT NOT NULL,
  generation TEXT NOT NULL, result TEXT, error TEXT);
-PRAGMA user_version=1; COMMIT;")?;
-        }
-        if version < 2 {
-            db.execute_batch("BEGIN IMMEDIATE;
-ALTER TABLE messages ADD COLUMN source_managed INTEGER NOT NULL DEFAULT 0;
+",
+    ),
+    (
+        2,
+        "ALTER TABLE messages ADD COLUMN source_managed INTEGER NOT NULL DEFAULT 0;
 CREATE TABLE reconciliation(account TEXT NOT NULL, mailbox TEXT NOT NULL, epoch INTEGER NOT NULL, cursor INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(account,mailbox));
-PRAGMA user_version=2; COMMIT;")?;
-        }
-        if version < 3 {
-            db.execute_batch("BEGIN IMMEDIATE;
-ALTER TABLE messages ADD COLUMN rfc_message_id TEXT;
+",
+    ),
+    (
+        3,
+        "ALTER TABLE messages ADD COLUMN rfc_message_id TEXT;
 ALTER TABLE messages ADD COLUMN size INTEGER;
 ALTER TABLE messages ADD COLUMN internal_date TEXT;
 CREATE INDEX message_rfc_id ON messages(account, rfc_message_id);
@@ -99,14 +76,64 @@ CREATE TABLE filing_reverts(id INTEGER PRIMARY KEY, account TEXT NOT NULL, paren
 CREATE TABLE filing_events(id INTEGER PRIMARY KEY, account TEXT NOT NULL, message_id TEXT, folder TEXT,
  at TEXT NOT NULL, kind TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '{}');
 CREATE INDEX event_account ON filing_events(account, id);
-PRAGMA user_version=3; COMMIT;")?;
+",
+    ),
+    (4, "ALTER TABLE filing_intents ADD COLUMN race_until_uid INTEGER;"),
+];
+
+/// Runs one migration under the write lock, unless another process applied
+/// it since this one read `user_version`: the version is re-read inside the
+/// `BEGIN IMMEDIATE` transaction, so concurrent opens never apply a
+/// migration twice.
+fn migrate(db: &Connection, to: u32, sql: &str) -> Result<()> {
+    db.execute_batch("BEGIN IMMEDIATE")?;
+    let applied = (|| -> Result<()> {
+        let version: u32 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version < to {
+            db.execute_batch(sql)?;
+            db.pragma_update(None, "user_version", to)?;
         }
-        if version < 4 {
-            db.execute_batch(
-                "BEGIN IMMEDIATE;
-ALTER TABLE filing_intents ADD COLUMN race_until_uid INTEGER;
-PRAGMA user_version=4; COMMIT;",
-            )?;
+        Ok(())
+    })();
+    match applied {
+        Ok(()) => Ok(db.execute_batch("COMMIT")?),
+        Err(e) => {
+            let _ = db.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
+}
+
+pub struct Store {
+    pub(crate) db: Connection,
+}
+#[derive(Debug, Clone)]
+pub struct Record {
+    pub id: String,
+    pub account: String,
+    pub normalized: Option<NormalizedMessage>,
+    pub envelope: Value,
+    pub status: String,
+    pub classification: Option<Value>,
+    pub overrides: Value,
+    pub review_state: String,
+    pub observed_at: String,
+    pub error: Option<String>,
+    pub generation: String,
+}
+impl Store {
+    pub fn open(path: &Path) -> Result<Self> {
+        let db = Connection::open(path)?;
+        db.busy_timeout(StdDuration::from_secs(5))?;
+        db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;")?;
+        let version: u32 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version > 4 {
+            bail!("database schema is newer than this binary");
+        }
+        for (to, sql) in MIGRATIONS {
+            if version < to {
+                migrate(&db, to, sql)?;
+            }
         }
         Ok(Self { db })
     }

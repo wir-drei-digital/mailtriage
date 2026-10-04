@@ -921,3 +921,96 @@ fn done_candidates_are_absent_and_open() {
         .collect();
     assert_eq!(candidates, vec![ids[1].clone()]);
 }
+
+/// A schema v2 database written by hand (the v1 and v2 migrations of the
+/// release before filing, in the WAL mode its `Store::open` set) holding one
+/// fetched message.
+fn v2_database(path: &std::path::Path) {
+    let db = rusqlite::Connection::open(path).unwrap();
+    db.execute_batch(
+        "PRAGMA journal_mode=WAL;
+CREATE TABLE metadata(key TEXT PRIMARY KEY, value INTEGER NOT NULL);
+INSERT INTO metadata VALUES('revision',7);
+CREATE TABLE accounts(name TEXT PRIMARY KEY, identity TEXT NOT NULL, generation TEXT NOT NULL);
+CREATE TABLE messages(id TEXT PRIMARY KEY, account TEXT NOT NULL REFERENCES accounts(name), fingerprint TEXT,
+ normalized TEXT, envelope TEXT NOT NULL, status TEXT NOT NULL, classification TEXT, overrides TEXT NOT NULL DEFAULT '{}',
+ review_state TEXT NOT NULL DEFAULT 'open', observed_at TEXT NOT NULL, error TEXT, generation TEXT NOT NULL);
+CREATE UNIQUE INDEX content_identity ON messages(account,fingerprint) WHERE fingerprint IS NOT NULL;
+CREATE INDEX message_account ON messages(account,observed_at,id);
+CREATE TABLE aliases(account TEXT NOT NULL, alias TEXT NOT NULL, canonical TEXT NOT NULL REFERENCES messages(id), PRIMARY KEY(account,alias));
+CREATE TABLE occurrences(account TEXT NOT NULL, mailbox TEXT NOT NULL, epoch INTEGER NOT NULL, uid INTEGER NOT NULL,
+ message_id TEXT NOT NULL REFERENCES messages(id), PRIMARY KEY(account,mailbox,epoch,uid));
+CREATE TABLE checkpoints(account TEXT NOT NULL, mailbox TEXT NOT NULL, epoch INTEGER NOT NULL, last_uid INTEGER NOT NULL,
+ scanned_at TEXT, complete INTEGER NOT NULL DEFAULT 0, error TEXT, PRIMARY KEY(account,mailbox));
+CREATE TABLE jobs(message_id TEXT PRIMARY KEY REFERENCES messages(id), state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+ next_after TEXT NOT NULL, lease_until TEXT, generation TEXT NOT NULL);
+CREATE TABLE attempts(id INTEGER PRIMARY KEY, message_id TEXT NOT NULL REFERENCES messages(id), created_at TEXT NOT NULL,
+ generation TEXT NOT NULL, result TEXT, error TEXT);
+ALTER TABLE messages ADD COLUMN source_managed INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE reconciliation(account TEXT NOT NULL, mailbox TEXT NOT NULL, epoch INTEGER NOT NULL, cursor INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(account,mailbox));
+INSERT INTO accounts VALUES('work','id','g1');
+INSERT INTO messages(id,account,fingerprint,normalized,envelope,status,classification,overrides,review_state,observed_at,generation,source_managed)
+ VALUES('msg_1','work','f1',NULL,'{\"subject\":\"Hello\"}','ready','{\"state\":\"ready\"}','{\"urgency\":\"high\"}','done','2026-10-01T00:00:00+00:00','g1',1);
+INSERT INTO occurrences VALUES('work','INBOX',5,3,'msg_1');
+INSERT INTO checkpoints(account,mailbox,epoch,last_uid,complete) VALUES('work','INBOX',5,3,1);
+INSERT INTO jobs(message_id,state,next_after,generation) VALUES('msg_1','complete','2026-10-01T00:00:00+00:00','g1');
+PRAGMA user_version=2;",
+    )
+    .unwrap();
+}
+
+fn assert_v2_mail_kept(s: &Store) {
+    assert_eq!(s.schema_version().unwrap(), 4);
+    let r = s.record("work", "msg_1").unwrap().unwrap();
+    assert_eq!(r.envelope["subject"], "Hello");
+    assert_eq!(r.overrides["urgency"], "high");
+    assert_eq!(r.review_state, "done");
+    assert_eq!(r.status, "ready");
+    assert_eq!(
+        s.occurrences_of("work", "msg_1").unwrap(),
+        vec![("INBOX".to_string(), 5, 3)]
+    );
+    assert_eq!(s.revision().unwrap(), 7);
+    let meta = s.message_meta("work", "msg_1").unwrap().unwrap();
+    assert_eq!((meta.rfc_message_id, meta.size), (None, None));
+    assert!(s.placements("work").unwrap().is_empty());
+}
+
+/// Final review M6: a v2 database holding mail migrates to v4 and keeps it.
+#[test]
+fn a_v2_database_with_mail_migrates_to_v4_and_keeps_it() {
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("db");
+    v2_database(&p);
+    assert_v2_mail_kept(&Store::open(&p).unwrap());
+    assert_v2_mail_kept(&Store::open(&p).unwrap());
+}
+
+/// Final review M6: processes opening a v2 database together after an
+/// upgrade each re-read the version inside the migration's write lock, so
+/// none runs a migration another already applied.
+#[test]
+fn concurrent_opens_migrate_a_v2_database_once() {
+    use std::sync::{Arc, Barrier};
+    for round in 0..20 {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("db");
+        v2_database(&p);
+        let barrier = Arc::new(Barrier::new(4));
+        let opens: Vec<_> = (0..4)
+            .map(|_| {
+                let (p, barrier) = (p.clone(), Arc::clone(&barrier));
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    Store::open(&p).map(drop).map_err(|e| e.to_string())
+                })
+            })
+            .collect();
+        for open in opens {
+            open.join()
+                .unwrap()
+                .unwrap_or_else(|e| panic!("round {round}: {e}"));
+        }
+        assert_v2_mail_kept(&Store::open(&p).unwrap());
+    }
+}
