@@ -599,7 +599,7 @@ fn setup(cli: &Cli, arg: &SetupArg) -> Result<Value, CliError> {
         std::env::var_os("MAILTRIAGE_CONFIG").as_deref(),
         home.as_deref(),
     )
-    .map_err(|e| CliError::input(e.to_string()))?;
+    .map_err(|e| CliError::input(format!("step 1 (config): {e}")))?;
     let terminal = io::stdin().is_terminal();
     let mut prompt = Prompter::new(
         prompt::stdin_unbuffered(),

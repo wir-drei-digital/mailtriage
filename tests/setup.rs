@@ -622,3 +622,240 @@ fn a_himalaya_config_path_with_spaces_is_kept_whole() {
     let quoted = serde_json::to_string(toml.to_str().unwrap()).unwrap();
     assert!(f.calls().contains(&quoted), "{}", f.calls());
 }
+
+#[test]
+fn changing_the_key_store_keeps_the_rest_of_the_classifier() {
+    let f = Fixture::new();
+    assert_eq!(f.run(&WORK_ENV, "").0.status.code(), Some(0));
+    let mut c = f.config();
+    c["provider"]["api_key_env"] = json!("MY_OPENROUTER_KEY");
+    c["provider"]["model"] = json!("~typesafe/jev-latest");
+    c["provider"]["endpoint"] = json!("http://127.0.0.1:9/api/alpha/decisions");
+    c["provider"]["timeout_seconds"] = json!(45);
+    fs::write(f.config_path(), serde_json::to_vec_pretty(&c).unwrap()).unwrap();
+    let before = f.config()["provider"].clone();
+    let update = [
+        "setup",
+        "--yes",
+        "--update",
+        "--json",
+        "--himalaya-account",
+        "work",
+    ];
+    // To a key command: only api_key_command is added.
+    let (out, v) = f.run(
+        &[&update[..], &["--key-command", "printf 'k\\n'"]].concat(),
+        "",
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(v["setup"]["key_store"], "command");
+    let mut provider = f.config()["provider"].clone();
+    assert_eq!(
+        provider["api_key_command"],
+        json!(["/bin/sh", "-c", "printf 'k\\n'"])
+    );
+    provider.as_object_mut().unwrap().remove("api_key_command");
+    assert_eq!(provider, before);
+    // Back to the variable: the provider is the original again.
+    let (out, v) = f.run(&[&update[..], &["--key-store", "env"]].concat(), "");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(v["setup"]["key_store"], "env");
+    assert_eq!(f.config()["provider"], before);
+}
+
+#[test]
+fn updating_an_account_interactively_keeps_its_mailbox() {
+    let f = Fixture::new();
+    assert_eq!(f.run(&WORK_ENV, "").0.status.code(), Some(0));
+    let (out, _) = f.run(
+        &[
+            "setup",
+            "--yes",
+            "--update",
+            "--json",
+            "--himalaya-account",
+            "home",
+            "--account",
+            "home",
+        ],
+        "",
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let before = f.config();
+    // Update (1), home (1), then Enter for the Himalaya account, identity,
+    // time zone, brief, folders, keeping the classifier and filing.
+    let input = format!("1\n1\n{}", "\n".repeat(7));
+    let (out, _) = f.run(&["setup", "--interactive", "--json"], &input);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let after = f.config();
+    assert_eq!(after["accounts"]["home"]["engine"]["account"], "home");
+    assert_eq!(after["accounts"]["home"], before["accounts"]["home"]);
+    assert_eq!(after["accounts"]["work"], before["accounts"]["work"]);
+}
+
+#[test]
+fn updating_an_account_by_name_keeps_its_himalaya_settings() {
+    let f = Fixture::new();
+    assert_eq!(f.run(&WORK_ENV, "").0.status.code(), Some(0));
+    // home uses a Himalaya binary and TOML that discovery would not find.
+    let alt = f.home.join("Other Mail");
+    fs::create_dir_all(&alt).unwrap();
+    write_tool(&alt, "himalaya", HIMALAYA);
+    fs::copy(f.bin.join("accounts.json"), alt.join("accounts.json")).unwrap();
+    let binary = alt.join("himalaya");
+    let toml = alt.join("himalaya.toml");
+    fs::copy(f.himalaya_toml(), &toml).unwrap();
+    let (out, _) = f.run(
+        &[
+            "setup",
+            "--yes",
+            "--update",
+            "--json",
+            "--account",
+            "home",
+            "--himalaya-account",
+            "home",
+            "--himalaya-binary",
+            binary.to_str().unwrap(),
+            "--himalaya-config",
+            toml.to_str().unwrap(),
+        ],
+        "",
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let before = f.config();
+    assert_eq!(
+        before["accounts"]["home"]["engine"]["config"],
+        toml.to_str().unwrap()
+    );
+    fs::remove_file(alt.join("calls.log")).unwrap();
+    fs::remove_file(f.bin.join("calls.log")).unwrap();
+
+    let (out, v) = f.run(
+        &["setup", "--yes", "--update", "--json", "--account", "home"],
+        "",
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(v["setup"]["account"], "home");
+    let after = f.config();
+    assert_eq!(after["accounts"]["home"], before["accounts"]["home"]);
+    assert_eq!(after["accounts"]["work"], before["accounts"]["work"]);
+    // The stored binary ran the checks; the one on PATH was never asked.
+    let calls = fs::read_to_string(alt.join("calls.log")).unwrap();
+    assert!(calls.contains("\"check\""), "{calls}");
+    assert!(!f.bin.join("calls.log").exists(), "{}", f.calls());
+}
+
+#[test]
+fn an_account_flag_skips_the_config_menu() {
+    let f = Fixture::new();
+    assert_eq!(f.run(&WORK_ENV, "").0.status.code(), Some(0));
+    let before = f.config();
+    // A new name adds that account: Himalaya account 1 (home), then Enter
+    // for identity, time zone, brief, folders, keeping the classifier and
+    // filing.
+    let input = format!("1\n{}", "\n".repeat(6));
+    let (out, v) = f.run(
+        &["setup", "--interactive", "--json", "--account", "home"],
+        &input,
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(!stderr(&out).contains("What would you like to do?"));
+    assert_eq!(v["setup"]["account"], "home");
+    let added = f.config();
+    assert_eq!(added["accounts"]["home"]["engine"]["account"], "home");
+    assert_eq!(added["accounts"]["work"], before["accounts"]["work"]);
+    // An existing name updates it: Enter for the Himalaya account and the
+    // six questions after it.
+    let (out, _) = f.run(
+        &["setup", "--interactive", "--json", "--account", "work"],
+        &"\n".repeat(7),
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(!err.contains("What would you like to do?"), "{err}");
+    assert!(!err.contains("Which account?"), "{err}");
+    let updated = f.config();
+    assert_eq!(updated["accounts"]["work"], before["accounts"]["work"]);
+    assert_eq!(updated["accounts"]["home"], added["accounts"]["home"]);
+}
+
+#[test]
+fn every_error_names_its_step_and_a_fix() {
+    let f = Fixture::new();
+    let w = ["--himalaya-account", "work"];
+    let we = ["--himalaya-account", "work", "--key-store", "env"];
+    let cases: Vec<(Vec<&str>, &str)> = vec![
+        (vec!["--key-store", "env"], "step 2 (Himalaya): "),
+        (
+            vec!["--himalaya-account", "nobody", "--key-store", "env"],
+            "step 2 (Himalaya): ",
+        ),
+        (
+            [&we[..], &["--himalaya-config", "missing.toml"]].concat(),
+            "step 2 (Himalaya): --himalaya-config: ",
+        ),
+        (
+            [&we[..], &["--account", "my work"]].concat(),
+            "step 3 (account): --account: ",
+        ),
+        (
+            [&we[..], &["--identity", " "]].concat(),
+            "step 3 (account): --identity: ",
+        ),
+        (
+            [&we[..], &["--timezone", "Europe Berlin"]].concat(),
+            "step 3 (account): --timezone: ",
+        ),
+        (
+            [&we[..], &["--mailbox", "Nope"]].concat(),
+            "step 4 (folders): --mailbox: ",
+        ),
+        (
+            [&we[..], &["--model", "gpt-4"]].concat(),
+            "step 5 (classifier): --model: ",
+        ),
+        (
+            [&w[..], &["--key-store", "command"]].concat(),
+            "step 5 (key): --key-command ",
+        ),
+        (
+            [&w[..], &["--key-command", "x", "--key-env", "FOO"]].concat(),
+            "step 5 (key): ",
+        ),
+        (
+            [&we[..], &["--key-command", "x"]].concat(),
+            "step 5 (key): ",
+        ),
+        (
+            [&w[..], &["--key-env", "bad-name"]].concat(),
+            "step 5 (key): --key-env: ",
+        ),
+        (
+            [&w[..], &["--key-command", "exit 1"]].concat(),
+            "step 5 (key): ",
+        ),
+        (
+            [&we[..], &["--mailbox", "Caf&AOk-"]].concat(),
+            "step 7 (filing): ",
+        ),
+    ];
+    for (extra, prefix) in cases {
+        let (out, v) = f.run(&[&["setup", "--yes", "--json"][..], &extra].concat(), "");
+        assert_ne!(out.status.code(), Some(0), "{extra:?}");
+        let m = message(&v);
+        assert!(m.starts_with(prefix), "{extra:?}: {m}");
+        assert!(m.contains("--") || m.contains('`'), "{extra:?}: {m}");
+    }
+    // Without HOME, step 1 names --config.
+    let (out, v) = f.run_with(&WORK_ENV, "", &[("HOME", "")]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(message(&v).starts_with("step 1 (config): "), "{v}");
+    assert!(message(&v).contains("--config"), "{v}");
+    assert!(!f.config_path().exists());
+    // An existing config without --update.
+    assert_eq!(f.run(&WORK_ENV, "").0.status.code(), Some(0));
+    let (out, v) = f.run(&WORK_ENV, "");
+    assert_eq!(out.status.code(), Some(5));
+    assert!(message(&v).starts_with("step 1 (config): "), "{v}");
+}

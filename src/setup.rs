@@ -31,6 +31,12 @@ const HIMALAYA_VERSION: &str = "2.1.0";
 const HIMALAYA_TIMEOUT: Duration = Duration::from_secs(60);
 const HIMALAYA_MAX_OUTPUT: usize = 1024 * 1024;
 
+/// Every setup error starts with its step, then names the flag or the
+/// command that fixes it.
+const STEP_ACCOUNT: &str = "step 3 (account)";
+const STEP_CLASSIFIER: &str = "step 5 (classifier)";
+const STEP_KEY: &str = "step 5 (key)";
+
 /// Answers given as flags. `None` (or empty) means: ask, or without
 /// prompts take the default, or fail naming the flag.
 #[derive(Debug, Clone, Default)]
@@ -59,11 +65,13 @@ pub struct SetupArgs {
 enum Intent {
     /// No config yet.
     Create,
-    /// Prompted: update this existing account.
+    /// Update this existing account: chosen from the menu, or named by
+    /// `--account`.
     Update(String),
-    /// Prompted: add an account; its name must be new.
+    /// Add an account; its name must be new.
     Add,
-    /// `--update` without prompts: update the named account, or add it.
+    /// `--update` without prompts and without `--account`: update the
+    /// account the name defaults to, or add it.
     UpdateOrAdd,
 }
 
@@ -82,13 +90,21 @@ struct HimalayaAccount {
 pub fn run(args: &SetupArgs, path: &Path, p: &mut Prompter) -> Result<Value> {
     // 1. Config.
     let (mut cfg, intent) = load_target(args, path, p)?;
-    // 2. Himalaya.
-    let h = himalaya_step(args, p)?;
+    // 2. Himalaya. An account being updated keeps its own by default.
+    let stored = match &intent {
+        Intent::Update(name) => cfg
+            .accounts
+            .get(name)
+            .and_then(|account| stored_engine(account, path)),
+        _ => None,
+    };
+    let h = himalaya_step(args, p, stored.as_ref())?;
     // 3. Account details.
     let name = account_name(args, p, &h, &cfg, &intent)?;
     let previous = cfg.accounts.get(&name).cloned();
     let identity = answer(
         p,
+        STEP_ACCOUNT,
         args.identity.as_deref(),
         "--identity",
         "Your email address for this account",
@@ -109,6 +125,7 @@ pub fn run(args: &SetupArgs, path: &Path, p: &mut Prompter) -> Result<Value> {
     );
     let timezone = answer(
         p,
+        STEP_ACCOUNT,
         args.timezone.as_deref(),
         "--timezone",
         "Time zone",
@@ -123,6 +140,7 @@ pub fn run(args: &SetupArgs, path: &Path, p: &mut Prompter) -> Result<Value> {
     )?;
     let brief = answer(
         p,
+        STEP_ACCOUNT,
         args.brief.as_deref(),
         "--brief",
         "One line about you that helps classification (optional)",
@@ -191,14 +209,23 @@ pub fn run(args: &SetupArgs, path: &Path, p: &mut Prompter) -> Result<Value> {
         },
     );
     cfg.provider = provider;
-    config::validate(&cfg).map_err(|e| err(2, format!("step 8 (write): {e}")))?;
-    config::save(path, &cfg).map_err(|_| {
+    config::validate(&cfg).map_err(|e| {
         err(
-            3,
-            format!("step 8 (write): could not write {}", path.display()),
+            2,
+            format!("step 8 (write): {e}; nothing was written; run setup again with other answers, or with --filing off for a category folder problem"),
         )
     })?;
-    let path = fs::canonicalize(path)?;
+    let unwritable = || {
+        err(
+            3,
+            format!(
+                "step 8 (write): could not write {}; make its directory writable or pass --config",
+                path.display()
+            ),
+        )
+    };
+    config::save(path, &cfg).map_err(|_| unwritable())?;
+    let path = fs::canonicalize(path).map_err(|_| unwritable())?;
     p.say(&format!("Wrote {}.", path.display()));
     // 9. Check.
     let doctor = doctor_step(p, &path, &name, &cfg.provider, &engine);
@@ -234,6 +261,15 @@ fn load_target(args: &SetupArgs, path: &Path, p: &mut Prompter) -> Result<(AppCo
             ),
         )
     })?;
+    // `--account` answers the menu: an existing name is updated, a new one
+    // added.
+    let named = args.account.as_ref().map(|name| {
+        if cfg.accounts.contains_key(name) {
+            Intent::Update(name.clone())
+        } else {
+            Intent::Add
+        }
+    });
     if !p.enabled() {
         if !args.update {
             return Err(err(
@@ -244,9 +280,12 @@ fn load_target(args: &SetupArgs, path: &Path, p: &mut Prompter) -> Result<(AppCo
                 ),
             ));
         }
-        return Ok((cfg, Intent::UpdateOrAdd));
+        return Ok((cfg, named.unwrap_or(Intent::UpdateOrAdd)));
     }
     p.say(&format!("A config already exists at {}.", path.display()));
+    if let Some(intent) = named {
+        return Ok((cfg, intent));
+    }
     let actions = ["Update an account", "Add an account", "Abort"].map(String::from);
     match p.choose("What would you like to do?", &actions, 0)? {
         0 => {
@@ -260,11 +299,40 @@ fn load_target(args: &SetupArgs, path: &Path, p: &mut Prompter) -> Result<(AppCo
     }
 }
 
-/// Step 2: the Himalaya binary, its config and the account, checked.
-fn himalaya_step(args: &SetupArgs, p: &mut Prompter) -> Result<HimalayaChoice> {
-    let binary = match &args.himalaya_binary {
-        Some(binary) => absolute(binary)?,
-        None => process::find_on_path("himalaya").ok_or_else(|| {
+/// The Himalaya settings of an account being updated, with relative paths
+/// resolved against the config's directory as `Service` resolves them, and
+/// a bare binary name looked up on `PATH`.
+fn stored_engine(account: &AccountConfig, config_path: &Path) -> Option<HimalayaConfig> {
+    let EngineConfig::Himalaya(mut h) = account.engine_config()?;
+    let base = std::path::absolute(config_path)
+        .ok()?
+        .parent()?
+        .to_path_buf();
+    if h.config.is_relative() {
+        h.config = base.join(&h.config);
+    }
+    if h.binary.is_relative() {
+        if h.binary.components().count() > 1 {
+            h.binary = base.join(&h.binary);
+        } else if let Some(found) = process::find_on_path(&h.binary.to_string_lossy()) {
+            h.binary = found;
+        }
+    }
+    Some(h)
+}
+
+/// Step 2: the Himalaya binary, its config and the account, checked. For
+/// each, a flag wins, then the `stored` settings of an account being
+/// updated, then `HIMALAYA_CONFIG` (config only), then discovery.
+fn himalaya_step(
+    args: &SetupArgs,
+    p: &mut Prompter,
+    stored: Option<&HimalayaConfig>,
+) -> Result<HimalayaChoice> {
+    let binary = match (&args.himalaya_binary, stored) {
+        (Some(binary), _) => absolute(binary, "--himalaya-binary")?,
+        (None, Some(stored)) => stored.binary.clone(),
+        (None, None) => process::find_on_path("himalaya").ok_or_else(|| {
             err(
                 3,
                 "step 2 (Himalaya): himalaya is not on PATH; install Himalaya v2.1.0 or pass --himalaya-binary",
@@ -283,19 +351,26 @@ fn himalaya_step(args: &SetupArgs, p: &mut Prompter) -> Result<HimalayaChoice> {
             )
         })?;
     p.say(&format!("Using {version} at {}.", binary.display()));
-    let explicit = match &args.himalaya_config {
-        Some(toml) => {
-            let toml = absolute(toml)?;
+    let explicit = match (&args.himalaya_config, stored) {
+        (Some(toml), _) => {
+            let toml = absolute(toml, "--himalaya-config")?;
             if !toml.is_file() {
                 return Err(err(
                     2,
-                    format!("--himalaya-config: {} does not exist", toml.display()),
+                    format!(
+                        "step 2 (Himalaya): --himalaya-config: {} does not exist; pass the file that defines the account",
+                        toml.display()
+                    ),
                 ));
             }
             Some(toml)
         }
-        None => himalaya_config_env()?,
+        (None, Some(stored)) => Some(stored.config.clone()),
+        (None, None) => himalaya_config_env()?,
     };
+    // Without prompts the stored account stands in for --himalaya-account;
+    // with prompts it is the menu's default.
+    let stored_account = stored.map(|s| s.account.as_str());
     loop {
         let toml = explicit
             .clone()
@@ -324,13 +399,17 @@ fn himalaya_step(args: &SetupArgs, p: &mut Prompter) -> Result<HimalayaChoice> {
             configure(&binary, explicit.as_deref())?;
             continue;
         };
-        let name = match &args.himalaya_account {
-            Some(name) if accounts.iter().any(|a| &a.name == name) => name.clone(),
+        let wanted = args
+            .himalaya_account
+            .as_deref()
+            .or(stored_account.filter(|_| !p.enabled()));
+        let name = match wanted {
+            Some(name) if accounts.iter().any(|a| a.name == name) => name.to_owned(),
             Some(name) => {
                 return Err(err(
                     2,
                     format!(
-                        "--himalaya-account: {} has no IMAP account named {name}",
+                        "step 2 (Himalaya): {} has no IMAP account named {name}; pass --himalaya-account with one of its accounts",
                         toml.display()
                     ),
                 ))
@@ -344,7 +423,10 @@ fn himalaya_step(args: &SetupArgs, p: &mut Prompter) -> Result<HimalayaChoice> {
             None => {
                 let mut options: Vec<String> = accounts.iter().map(|a| a.name.clone()).collect();
                 options.push("Create a new account with `himalaya configure`".to_owned());
-                let default = accounts.iter().position(|a| a.default).unwrap_or(0);
+                let default = stored_account
+                    .and_then(|s| accounts.iter().position(|a| a.name == s))
+                    .or_else(|| accounts.iter().position(|a| a.default))
+                    .unwrap_or(0);
                 let pick = p.choose(
                     "Which Himalaya account should mailtriage use?",
                     &options,
@@ -415,7 +497,7 @@ fn himalaya_config_env() -> Result<Option<PathBuf>> {
             "step 2 (Himalaya): HIMALAYA_CONFIG names several files; pass --himalaya-config with the file that defines the account",
         ));
     }
-    Ok(Some(absolute(&paths[0])?))
+    Ok(Some(absolute(&paths[0], "--himalaya-config")?))
 }
 
 /// Runs Himalaya for setup's own checks; stdout when it exits 0.
@@ -561,6 +643,7 @@ fn account_name(
     let must_be_new = matches!(intent, Intent::Add);
     answer(
         p,
+        STEP_ACCOUNT,
         args.account.as_deref(),
         "--account",
         "Name for this account in mailtriage",
@@ -641,7 +724,9 @@ fn folders_step(
             if !folders.contains(name) {
                 return Err(err(
                     2,
-                    format!("--mailbox: no folder named {name} on the server"),
+                    format!(
+                        "step 4 (folders): --mailbox: no folder named {name} on the server; pass one of the server's folders"
+                    ),
                 ));
             }
             if !chosen.contains(name) {
@@ -711,12 +796,26 @@ fn classifier_step(
     if kind == "fake" {
         return Ok((config::default_config().provider, None));
     }
-    let model = answer(
+    // A current OpenRouter provider changes only where asked, so its
+    // generation hash, and with it every classification, stays put.
+    let mut provider = current
+        .filter(|c| c.kind == "openrouter")
+        .cloned()
+        .unwrap_or_else(|| ProviderConfig {
+            kind,
+            model: DEFAULT_MODEL.to_owned(),
+            endpoint: provider::DECISIONS_ENDPOINT.to_owned(),
+            api_key_command: None,
+            api_key_env: DEFAULT_KEY_ENV.to_owned(),
+            timeout_seconds: 30,
+        });
+    provider.model = answer(
         p,
+        STEP_CLASSIFIER,
         args.model.as_deref(),
         "--model",
         "Model",
-        Some(DEFAULT_MODEL),
+        Some(&provider.model),
         |m| {
             if m.starts_with("typesafe/jev-") || m.starts_with("~typesafe/jev-") {
                 Ok(m.to_owned())
@@ -725,17 +824,6 @@ fn classifier_step(
             }
         },
     )?;
-    let api_key_env = current
-        .filter(|c| c.kind == "openrouter" && !c.api_key_env.is_empty())
-        .map_or_else(|| DEFAULT_KEY_ENV.to_owned(), |c| c.api_key_env.clone());
-    let mut provider = ProviderConfig {
-        kind,
-        model,
-        endpoint: provider::DECISIONS_ENDPOINT.to_owned(),
-        api_key_command: None,
-        api_key_env,
-        timeout_seconds: 30,
-    };
     let store = key_step(args, p, &mut provider)?;
     Ok((provider, Some(store)))
 }
@@ -751,17 +839,21 @@ fn describe(provider: &ProviderConfig) -> String {
 /// The store from `--key-store`, implied by `--key-command`/`--key-env`,
 /// or chosen from the menu (first option without prompts).
 fn chosen_store(args: &SetupArgs, p: &mut Prompter) -> Result<KeyStore> {
-    let implied = match (args.key_command.is_some(), args.key_env.is_some()) {
-        (true, true) => return Err(err(2, "--key-command and --key-env exclude each other")),
-        (true, false) => Some(KeyStore::Command),
-        (false, true) => Some(KeyStore::Env),
-        (false, false) => None,
-    };
+    let implied =
+        match (args.key_command.is_some(), args.key_env.is_some()) {
+            (true, true) => return Err(err(
+                2,
+                "step 5 (key): --key-command and --key-env exclude each other; pass one of them",
+            )),
+            (true, false) => Some(KeyStore::Command),
+            (false, true) => Some(KeyStore::Env),
+            (false, false) => None,
+        };
     match (args.key_store, implied) {
         (Some(store), Some(other)) if store != other => Err(err(
             2,
             format!(
-                "--key-store {} conflicts with {}",
+                "step 5 (key): --key-store {} conflicts with {}; drop one of them",
                 store.flag(),
                 if other == KeyStore::Command {
                     "--key-command"
@@ -796,6 +888,7 @@ fn key_step(args: &SetupArgs, p: &mut Prompter, provider: &mut ProviderConfig) -
         KeyStore::Command => loop {
             let text = answer(
                 p,
+                STEP_KEY,
                 args.key_command.as_deref(),
                 "--key-command",
                 "Command that prints the key (run with /bin/sh -c)",
@@ -816,12 +909,18 @@ fn key_step(args: &SetupArgs, p: &mut Prompter, provider: &mut ProviderConfig) -
             }
         },
         KeyStore::Env => {
+            let current = if provider.api_key_env.is_empty() {
+                DEFAULT_KEY_ENV.to_owned()
+            } else {
+                provider.api_key_env.clone()
+            };
             let name = answer(
                 p,
+                STEP_KEY,
                 args.key_env.as_deref(),
                 "--key-env",
                 "Environment variable that holds the key",
-                Some(DEFAULT_KEY_ENV),
+                Some(&current),
                 |n| {
                     if provider::valid_env_name(n) {
                         Ok(n.to_owned())
@@ -836,6 +935,7 @@ fn key_step(args: &SetupArgs, p: &mut Prompter, provider: &mut ProviderConfig) -
                 ));
             }
             provider.api_key_env = name;
+            provider.api_key_command = None;
         }
     }
     Ok(store)
@@ -1028,24 +1128,29 @@ fn key_source_value(provider: &ProviderConfig) -> Value {
 }
 
 /// A flag's value; else the prompt's answer; else the default; without
-/// prompts and without a default, exit 2 naming the flag.
+/// prompts and without a default, exit 2 naming `step` and the flag.
 fn answer(
     p: &mut Prompter,
+    step: &str,
     flag: Option<&str>,
     flag_name: &str,
     question: &str,
     default: Option<&str>,
     check: impl Fn(&str) -> Result<String, String>,
 ) -> Result<String> {
+    let invalid = |reason: String| err(2, format!("{step}: {flag_name}: {reason}"));
     if let Some(value) = flag {
-        return check(value).map_err(|reason| err(2, format!("{flag_name}: {reason}")));
+        return check(value).map_err(invalid);
     }
     if p.enabled() {
         return p.ask(question, default, check);
     }
     match default {
-        Some(value) => check(value).map_err(|reason| err(2, format!("{flag_name}: {reason}"))),
-        None => Err(err(2, format!("{flag_name} is required without prompts"))),
+        Some(value) => check(value).map_err(invalid),
+        None => Err(err(
+            2,
+            format!("{step}: {flag_name} is required without prompts"),
+        )),
     }
 }
 
@@ -1057,8 +1162,17 @@ fn nonempty(value: &str) -> Result<String, String> {
     }
 }
 
-fn absolute(path: &Path) -> Result<PathBuf> {
-    std::path::absolute(path).map_err(|_| err(2, format!("cannot resolve {}", path.display())))
+/// A step 2 path given by `flag` (or `HIMALAYA_CONFIG`), made absolute.
+fn absolute(path: &Path, flag: &str) -> Result<PathBuf> {
+    std::path::absolute(path).map_err(|_| {
+        err(
+            2,
+            format!(
+                "step 2 (Himalaya): {flag}: cannot resolve {}; pass an absolute path",
+                path.display()
+            ),
+        )
+    })
 }
 
 fn error_text(error: &anyhow::Error) -> String {
