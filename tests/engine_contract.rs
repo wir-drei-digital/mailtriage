@@ -249,6 +249,13 @@ fn alias_conflicts_detected() {
         .alias_conflicts(&["Newsletters".into(), "INBOX".into(), "Receipts".into()])
         .unwrap();
     assert_eq!(conflicts, vec!["Newsletters".to_string()]);
+    // INBOX is case-insensitive in IMAP: a server that lists it as "Inbox"
+    // names the mailbox the alias `inbox = "INBOX"` resolves to.
+    let conflicts = f
+        .engine
+        .alias_conflicts(&["Inbox".into(), "inbox".into()])
+        .unwrap();
+    assert!(conflicts.is_empty(), "{conflicts:?}");
 }
 
 // A session whose SELECT result was never captured is an error (outcome

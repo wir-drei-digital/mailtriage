@@ -576,13 +576,19 @@ impl MailEngine for Himalaya {
         Ok(folders
             .iter()
             .filter(|folder| {
-                aliases
-                    .iter()
-                    .any(|(key, native)| key.eq_ignore_ascii_case(folder) && native != folder)
+                aliases.iter().any(|(key, native)| {
+                    key.eq_ignore_ascii_case(folder) && !same_mailbox(native, folder)
+                })
             })
             .cloned()
             .collect())
     }
+}
+
+/// Whether two native names select the same mailbox: equal, or both INBOX,
+/// whose name IMAP treats case-insensitively (RFC 3501 5.1).
+fn same_mailbox(a: &str, b: &str) -> bool {
+    a == b || (a.eq_ignore_ascii_case("INBOX") && b.eq_ignore_ascii_case("INBOX"))
 }
 
 /// Maps one SELECT-plus-command session. `Err` means the SELECT result was not
