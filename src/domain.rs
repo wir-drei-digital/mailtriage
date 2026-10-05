@@ -15,6 +15,11 @@ pub struct ProviderConfig {
     pub kind: String,
     pub model: String,
     pub endpoint: String,
+    /// Argument list that prints the API key; when set it is the only key
+    /// source. Serialized only when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_command: Option<Vec<String>>,
+    #[serde(default)]
     pub api_key_env: String,
     pub timeout_seconds: u64,
 }

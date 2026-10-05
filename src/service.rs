@@ -11,6 +11,7 @@ use crate::{
         StageOptions,
     },
     normalize, policy, provider,
+    secrets::{self, KeyCache},
     store::{now, Record, Store},
 };
 use anyhow::{anyhow, Result};
@@ -124,6 +125,7 @@ pub struct Service {
     config_bytes_hash: String,
     pub store: Store,
     engine_override: Option<Rc<dyn MailEngine>>,
+    key: KeyCache,
 }
 impl Service {
     pub fn open(path: &Path) -> Result<Self> {
@@ -150,6 +152,7 @@ impl Service {
             config_bytes_hash: hash(&bytes),
             store,
             engine_override: None,
+            key: KeyCache::default(),
         })
     }
     /// Like `open`, but every account with an engine config uses `engine`.
@@ -255,10 +258,16 @@ impl Service {
     pub fn doctor(&mut self, name: &str) -> Result<Value> {
         let (account, _) = self.ensure(name)?;
         let provider_valid = provider::validate_configuration(&self.config.provider).is_ok();
-        let key_present = self.config.provider.kind == "fake"
-            || std::env::var(&self.config.provider.api_key_env)
-                .map(|v| !v.trim().is_empty())
-                .unwrap_or(false);
+        let provider_cfg = &self.config.provider;
+        let (key_source, key_error) = if provider_cfg.kind == "fake" {
+            (Value::Null, None)
+        } else {
+            (
+                json!(secrets::key_source(provider_cfg)),
+                self.key.get(provider_cfg).err().map(|e| e.to_string()),
+            )
+        };
+        let key_present = key_error.is_none();
         let transport = match self.engine(&account).map(|e| e.map(|e| e.version())) {
             Ok(None) => json!({"configured":false,"ready":true}),
             Ok(Some(Ok(v))) => json!({"configured":true,"ready":true,"version":v}),
@@ -266,7 +275,10 @@ impl Service {
                 json!({"configured":true,"ready":false,"error":"Himalaya version/config check failed"})
             }
         };
-        let mut out = json!({"schema_version":1,"account":name,"ready":provider_valid&&key_present&&transport["ready"]==true,"provider":{"kind":self.config.provider.kind,"model":self.config.provider.model,"configuration_valid":provider_valid,"key_present":key_present},"transport":transport,"review_mode":self.config.policy.review_mode,"state_dir":self.config.state_dir,"live_checks_performed":false,"coverage":self.coverage(name)?});
+        let mut out = json!({"schema_version":1,"account":name,"ready":provider_valid&&key_present&&transport["ready"]==true,"provider":{"kind":self.config.provider.kind,"model":self.config.provider.model,"configuration_valid":provider_valid,"key_source":key_source,"key_present":key_present},"transport":transport,"review_mode":self.config.policy.review_mode,"state_dir":self.config.state_dir,"live_checks_performed":false,"coverage":self.coverage(name)?});
+        if let Some(e) = key_error {
+            out["provider"]["key_error"] = json!(e);
+        }
         if let Some(filing) = self.doctor_filing(&account) {
             out["filing"] = filing;
         }
@@ -392,11 +404,12 @@ impl Service {
                 .warnings
                 .push("body_truncated_by_current_policy".into());
         }
-        match provider::classify(
+        match provider::classify_with_key(
             &self.config.provider,
             account,
             &message,
             &self.config.policy,
+            &self.key,
         ) {
             Ok(result) => {
                 if !self.unchanged()? {
@@ -1536,8 +1549,13 @@ fn category_semantics(categories: &[Category]) -> Value {
     json!(cats)
 }
 fn generation(config: &AppConfig, account: &AccountConfig) -> Result<String> {
+    // The key command is how the key is fetched, not what classifies mail.
+    let mut provider = serde_json::to_value(&config.provider)?;
+    if let Some(fields) = provider.as_object_mut() {
+        fields.remove("api_key_command");
+    }
     Ok(hash(&serde_json::to_vec(
-        &json!({"rubric_version":1,"normalizer_version":1,"taxonomy_revision":account.taxonomy_revision,"categories":category_semantics(&account.categories),"brief":account.brief,"timezone":account.timezone,"provider":config.provider,"policy":config.policy}),
+        &json!({"rubric_version":1,"normalizer_version":1,"taxonomy_revision":account.taxonomy_revision,"categories":category_semantics(&account.categories),"brief":account.brief,"timezone":account.timezone,"provider":provider,"policy":config.policy}),
     )?))
 }
 fn hash(bytes: &[u8]) -> String {
@@ -1838,6 +1856,19 @@ mod golden {
         assert_eq!(
             super::generation(&cfg, &cfg.accounts["work"]).unwrap(),
             expected
+        );
+    }
+
+    #[test]
+    fn generation_hash_ignores_the_key_command() {
+        let mut cfg = crate::config::default_config();
+        cfg.provider.api_key_command = Some(vec![
+            "/usr/bin/security".into(),
+            "find-generic-password".into(),
+        ]);
+        assert_eq!(
+            super::generation(&cfg, &cfg.accounts["work"]).unwrap(),
+            "6dfd7bf30e6bf1c0b27ee97af991ecf21dc5ac0400044c2f3adbda7f79d37514"
         );
     }
 }

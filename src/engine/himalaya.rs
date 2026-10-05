@@ -4,6 +4,7 @@ use super::{
     raw, ConfigChanged, EngineCapabilities, FolderInfo, MailEngine, WriteOutcome, SPECIAL_USE_ROLES,
 };
 use crate::domain::{Address, HimalayaConfig, MailboxSnapshot, SourceEnvelope};
+use crate::process::{read_bounded, terminate};
 use crate::service::err;
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
@@ -11,7 +12,6 @@ use sha2::{Digest, Sha256};
 use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
-use std::io::Read;
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -745,47 +745,6 @@ fn scrub_secrets(value: &mut Value) {
             }
         }
         _ => {}
-    }
-}
-
-fn terminate(child: &mut std::process::Child) {
-    #[cfg(unix)]
-    {
-        unsafe extern "C" {
-            fn kill(pid: i32, signal: i32) -> i32;
-        }
-        // The child starts in its own process group, so helpers cannot keep pipes open.
-        unsafe {
-            kill(-(child.id() as i32), 9);
-        }
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
-/// Reads `input` to EOF, handing each chunk to `sink`. Raises `overflow` and
-/// stops once more than `limit` bytes arrive; also stops when `sink` refuses.
-fn read_bounded<R: Read>(
-    mut input: R,
-    limit: usize,
-    overflow: &AtomicBool,
-    mut sink: impl FnMut(&[u8]) -> bool,
-) -> std::io::Result<()> {
-    let mut total = 0usize;
-    let mut buffer = [0u8; 8192];
-    loop {
-        let size = input.read(&mut buffer)?;
-        if size == 0 {
-            return Ok(());
-        }
-        if size > limit.saturating_sub(total) {
-            overflow.store(true, Ordering::Relaxed);
-            return Ok(());
-        }
-        total += size;
-        if !sink(&buffer[..size]) {
-            return Ok(());
-        }
     }
 }
 

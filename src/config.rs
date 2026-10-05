@@ -83,6 +83,7 @@ pub fn default_config() -> AppConfig {
             kind: "fake".into(),
             model: "fake/offline".into(),
             endpoint: String::new(),
+            api_key_command: None,
             api_key_env: String::new(),
             timeout_seconds: 30,
         },

@@ -1,13 +1,14 @@
 //! OpenRouter Decisions API adapter and an explicit deterministic demo provider.
-use crate::domain::{
-    AccountConfig, Classification, NormalizedMessage, PolicyConfig, ProviderConfig,
+use crate::{
+    domain::{AccountConfig, Classification, NormalizedMessage, PolicyConfig, ProviderConfig},
+    secrets::KeyCache,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Map, Value};
 use std::time::Duration;
 
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
-const DECISIONS_ENDPOINT: &str = "https://openrouter.ai/api/alpha/decisions";
+pub const DECISIONS_ENDPOINT: &str = "https://openrouter.ai/api/alpha/decisions";
 
 pub fn validate_configuration(config: &ProviderConfig) -> Result<()> {
     if config.timeout_seconds == 0 || config.timeout_seconds > 300 {
@@ -33,12 +34,18 @@ pub fn validate_configuration(config: &ProviderConfig) -> Result<()> {
             {
                 bail!("provider endpoint must be the OpenRouter Decisions endpoint");
             }
-            if config.api_key_env.is_empty()
-                || !config
-                    .api_key_env
-                    .bytes()
-                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
-            {
+            match &config.api_key_command {
+                Some(command) => {
+                    if command.first().is_none_or(|program| program.is_empty()) {
+                        bail!("provider.api_key_command must name a program");
+                    }
+                }
+                None if config.api_key_env.is_empty() => {
+                    bail!("OpenRouter provider needs api_key_command or api_key_env")
+                }
+                None => {}
+            }
+            if !config.api_key_env.is_empty() && !valid_env_name(&config.api_key_env) {
                 bail!("provider API key environment variable name is invalid");
             }
             Ok(())
@@ -47,11 +54,30 @@ pub fn validate_configuration(config: &ProviderConfig) -> Result<()> {
     }
 }
 
+/// Upper-case ASCII letters, digits and `_`, nonempty.
+pub fn valid_env_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+}
+
 pub fn classify(
     config: &ProviderConfig,
     account: &AccountConfig,
     message: &NormalizedMessage,
     policy: &PolicyConfig,
+) -> Result<Classification> {
+    classify_with_key(config, account, message, policy, &KeyCache::default())
+}
+
+/// `classify`, resolving the OpenRouter key through `key`.
+pub fn classify_with_key(
+    config: &ProviderConfig,
+    account: &AccountConfig,
+    message: &NormalizedMessage,
+    policy: &PolicyConfig,
+    key: &KeyCache,
 ) -> Result<Classification> {
     validate_configuration(config)?;
     if account.categories.is_empty() {
@@ -59,7 +85,7 @@ pub fn classify(
     }
     let raw = match config.kind.as_str() {
         "fake" => fake_decision(config, account, message),
-        "openrouter" => request_decision(config, account, message)?,
+        "openrouter" => request_decision(config, account, message, &key.get(config)?)?,
         _ => unreachable!(),
     };
     crate::policy::decode_response(&raw, account, policy, message.incomplete)
@@ -69,12 +95,8 @@ fn request_decision(
     config: &ProviderConfig,
     account: &AccountConfig,
     message: &NormalizedMessage,
+    key: &str,
 ) -> Result<Value> {
-    let key = std::env::var(&config.api_key_env)
-        .map_err(|_| anyhow!("OpenRouter API key environment variable is missing"))?;
-    if key.trim().is_empty() {
-        bail!("OpenRouter API key environment variable is empty");
-    }
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(config.timeout_seconds))
         .redirect(reqwest::redirect::Policy::none())
