@@ -11,6 +11,7 @@ fn run(cwd: &Path, args: &[&str]) -> (i32, Value) {
     let out = Command::new(env!("CARGO_BIN_EXE_mailtriage"))
         .current_dir(cwd)
         .args(args)
+        .env_remove("MAILTRIAGE_CONFIG")
         .output()
         .unwrap();
     let v = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);

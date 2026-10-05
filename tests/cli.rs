@@ -9,6 +9,7 @@ fn run(cwd: &Path, args: &[&str]) -> (Output, Value) {
     let output = Command::new(env!("CARGO_BIN_EXE_mailtriage"))
         .current_dir(cwd)
         .args(args)
+        .env_remove("MAILTRIAGE_CONFIG")
         .output()
         .expect("run mailtriage");
     let value: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|_| {
