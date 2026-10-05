@@ -1567,6 +1567,33 @@ impl Service {
         Ok(out)
     }
 }
+/// Whether the binding stored for `account` in the state database of the
+/// config at `config_path` (which need not exist yet) matches the one `cfg`
+/// gives it, computed as `ensure` computes it. `None` without a state
+/// database or without a row for the account. Reads only: the state
+/// directory and the database are never created.
+pub fn stored_binding_matches(
+    config_path: &Path,
+    cfg: &AppConfig,
+    account: &str,
+) -> Result<Option<bool>> {
+    let config_path =
+        fs::canonicalize(config_path).or_else(|_| std::path::absolute(config_path))?;
+    let mut cfg = cfg.clone();
+    resolve_paths(&mut cfg, &config_path);
+    let db = cfg.state_dir.join("mailtriage.sqlite");
+    if !db.is_file() {
+        return Ok(None);
+    }
+    let Some(stored) = Store::stored_identity(&db, account)? else {
+        return Ok(None);
+    };
+    let account = cfg
+        .accounts
+        .get(account)
+        .ok_or_else(|| err(2, "unknown account"))?;
+    Ok(Some(binding_identity(account, None)? == stored))
+}
 fn resolve_paths(cfg: &mut AppConfig, path: &Path) {
     let base = path.parent().unwrap_or(Path::new("."));
     if cfg.state_dir.is_relative() {

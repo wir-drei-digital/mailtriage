@@ -2,7 +2,7 @@ use crate::domain::{MailboxSnapshot, NormalizedMessage, SourceEnvelope};
 use crate::filing::{open_states_sql, StageOptions};
 use anyhow::{bail, Result};
 use chrono::{Duration, Utc};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, path::Path, time::Duration as StdDuration};
 use uuid::Uuid;
@@ -140,6 +140,23 @@ impl Store {
             }
         }
         Ok(Self { db })
+    }
+    /// The binding identity stored for `account` in the database at `path`,
+    /// opened read-only so nothing is created or migrated; `None` without a
+    /// row.
+    pub fn stored_identity(path: &Path, account: &str) -> Result<Option<String>> {
+        let db = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        db.busy_timeout(StdDuration::from_secs(5))?;
+        Ok(db
+            .query_row(
+                "SELECT identity FROM accounts WHERE name=?",
+                [account],
+                |r| r.get(0),
+            )
+            .optional()?)
     }
     /// Records how the account's latest sync pass ended.
     pub fn record_heartbeat(

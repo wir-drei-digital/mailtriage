@@ -376,6 +376,93 @@ fn an_existing_config_needs_update_and_keeps_other_accounts() {
     assert_eq!(work["categories"][0]["description"], "People I write with");
 }
 
+/// Final review I1: an update that would change a bound account's identity,
+/// Himalaya account or IMAP server is refused before anything is written,
+/// and so is a fresh setup over a state directory that outlived its config.
+#[test]
+fn a_binding_changing_update_is_refused_before_writing() {
+    let f = Fixture::new();
+    assert_eq!(f.run(&WORK_ENV, "").0.status.code(), Some(0));
+    let before = fs::read(f.config_path()).unwrap();
+    let update = ["setup", "--yes", "--update", "--json", "--account", "work"];
+    for extra in [
+        ["--identity", "other@example.test"],
+        ["--himalaya-account", "home"],
+    ] {
+        let (out, v) = f.run(&[&update[..], &extra[..]].concat(), "");
+        assert_eq!(out.status.code(), Some(5), "{extra:?}: {v}");
+        let m = message(&v);
+        assert!(
+            m.starts_with(
+                "step 3 (account): account work is bound to its previous mailbox (identity, Himalaya account or IMAP server changed); "
+            ),
+            "{m}"
+        );
+        assert!(m.contains("--account NEW"), "{m}");
+        assert_eq!(fs::read(f.config_path()).unwrap(), before, "{extra:?}");
+    }
+    // An update that keeps the binding still works.
+    let (out, _) = f.run(&[&update[..], &["--brief", "Runs a bakery"]].concat(), "");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(f.config()["accounts"]["work"]["brief"], "Runs a bakery");
+    // The config is gone, its state is not.
+    fs::remove_file(f.config_path()).unwrap();
+    let (out, v) = f.run(
+        &[&WORK_ENV[..], &["--identity", "other@example.test"]].concat(),
+        "",
+    );
+    assert_eq!(out.status.code(), Some(5), "{v}");
+    assert!(message(&v).starts_with("step 3 (account): "), "{v}");
+    assert!(!f.config_path().exists());
+    let (out, _) = f.run(&WORK_ENV, "");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+}
+
+/// Final review I1: a service whose every pass would fail is not installed.
+#[test]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn a_failed_state_check_installs_no_service() {
+    let f = Fixture::new();
+    write_tool(&f.bin, "launchctl", LAUNCHCTL);
+    write_tool(&f.bin, "systemctl", SYSTEMCTL);
+    assert_eq!(f.run(&WORK_ENV, "").0.status.code(), Some(0));
+    // A state database from a newer mailtriage cannot be opened.
+    let db = f.config_path().with_file_name("state/mailtriage.sqlite");
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .pragma_update(None, "user_version", 99)
+        .unwrap();
+    let (out, v) = f.run(
+        &[
+            "setup",
+            "--yes",
+            "--update",
+            "--json",
+            "--account",
+            "work",
+            "--service",
+            "install",
+        ],
+        "",
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let items = v["setup"]["doctor"]["items"].as_array().unwrap();
+    assert!(
+        items
+            .iter()
+            .any(|i| i["check"] == "state" && i["ready"] == false),
+        "{items:?}"
+    );
+    assert_eq!(v["setup"]["service"], Value::Null);
+    assert!(
+        stderr(&out).contains("Not installing the background service"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!f.bin.join("launchctl.log").exists());
+    assert!(!f.bin.join("systemctl.log").exists());
+}
+
 #[test]
 fn prompts_offer_defaults_and_ask_again_after_invalid_input() {
     let f = Fixture::new();

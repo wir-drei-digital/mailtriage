@@ -222,6 +222,17 @@ pub fn run(args: &SetupArgs, path: &Path, p: &mut Prompter) -> Result<Value> {
             format!("step 8 (write): {e}; nothing was written; run setup again with other answers, or with --filing off for a category folder problem"),
         )
     })?;
+    // `ensure` would refuse every later command for an account whose binding
+    // changed (exit 5), so such an update writes nothing. A state database
+    // that cannot be read is left to step 9, which reports it.
+    if let Ok(Some(false)) = service::stored_binding_matches(path, &cfg, &name) {
+        return Err(err(
+            5,
+            format!(
+                "{STEP_ACCOUNT}: account {name} is bound to its previous mailbox (identity, Himalaya account or IMAP server changed); keep them, or set this mailbox up under a new name with --account NEW"
+            ),
+        ));
+    }
     let unwritable = || {
         err(
             3,
@@ -237,8 +248,12 @@ pub fn run(args: &SetupArgs, path: &Path, p: &mut Prompter) -> Result<Value> {
     // 9. Check.
     let doctor = doctor_step(p, &path, &name, &cfg.provider, &engine);
     next_steps(p, &name, mode);
-    // 10. Service.
-    let service = service_step(args, p, &path, &name)?;
+    // 10. Service, only when the state check passed: otherwise every pass
+    // of the service would fail.
+    let state_ok = doctor["items"]
+        .as_array()
+        .is_some_and(|items| items.iter().all(|i| i["check"] != "state"));
+    let service = service_step(args, p, &path, &name, state_ok)?;
     Ok(json!({"schema_version": 1, "setup": {
         "config": path,
         "account": name,
@@ -1197,8 +1212,24 @@ fn next_steps(p: &mut Prompter, name: &str, mode: FilingMode) {
 }
 
 /// Step 10: the background service. Asked with prompts (default yes);
-/// without prompts only `--service install` installs it.
-fn service_step(args: &SetupArgs, p: &mut Prompter, path: &Path, name: &str) -> Result<Value> {
+/// without prompts only `--service install` installs it. Never installed
+/// when `state_ok` is false.
+fn service_step(
+    args: &SetupArgs,
+    p: &mut Prompter,
+    path: &Path,
+    name: &str,
+    state_ok: bool,
+) -> Result<Value> {
+    let retry = install_command(path, name);
+    if !state_ok {
+        if args.service == Some(true) || (args.service.is_none() && p.enabled()) {
+            p.say(&format!(
+                "Not installing the background service: the state check failed, so every pass would fail. Fix it, then run `{retry}`."
+            ));
+        }
+        return Ok(Value::Null);
+    }
     let wanted = match args.service {
         Some(wanted) => wanted,
         None if p.enabled() => match Context::detect() {
@@ -1237,15 +1268,6 @@ fn service_step(args: &SetupArgs, p: &mut Prompter, path: &Path, name: &str) -> 
     // The config is already written, so the fix is the service command
     // alone; the exit code is the original error's.
     let (ctx, out) = installed.map_err(|e| {
-        let retry = shell_line(&[
-            OsStr::new("mailtriage"),
-            OsStr::new("service"),
-            OsStr::new("install"),
-            OsStr::new("--config"),
-            path.as_os_str(),
-            OsStr::new("--account"),
-            OsStr::new(name),
-        ]);
         err(
             service::exit_code(&e),
             format!(
@@ -1265,6 +1287,19 @@ fn service_step(args: &SetupArgs, p: &mut Prompter, path: &Path, name: &str) -> 
         p.say("To keep it running while you are logged out: loginctl enable-linger $USER");
     }
     Ok(out)
+}
+
+/// `mailtriage service install` for the written config and `name`.
+fn install_command(path: &Path, name: &str) -> String {
+    shell_line(&[
+        OsStr::new("mailtriage"),
+        OsStr::new("service"),
+        OsStr::new("install"),
+        OsStr::new("--config"),
+        path.as_os_str(),
+        OsStr::new("--account"),
+        OsStr::new(name),
+    ])
 }
 
 fn key_source_value(provider: &ProviderConfig) -> Value {
