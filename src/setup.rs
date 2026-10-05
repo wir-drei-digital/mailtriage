@@ -1327,18 +1327,18 @@ fn service_step(
     let wanted = match args.service {
         Some(wanted) => wanted,
         None if p.enabled() => match Context::detect() {
-            Ok(ctx) => {
+            Ok(_) => {
                 let env_key = provider.kind == "openrouter" && provider.api_key_command.is_none();
                 if env_key {
+                    // The store a fresh setup would offer first: the
+                    // platform's own when its tool is here, else a command.
+                    let store = secrets::key_store_options(cfg!(target_os = "macos"), |tool| {
+                        process::find_on_path(tool).is_some()
+                    })[0];
                     let store = mailtriage_line(
                         shown,
                         &["setup", "--update"],
-                        &[
-                            "--account",
-                            name,
-                            "--key-store",
-                            system_service::platform_key_stores(ctx.manager)[0],
-                        ],
+                        &["--account", name, "--key-store", store.flag()],
                     );
                     p.say(&format!(
                         "The key comes from {}, which the background service does not inherit, so the default is no. Store the key first: `{store}`.",
@@ -1412,7 +1412,7 @@ fn service_fix(supported: bool, retry: &str) -> String {
     if supported {
         format!("fix this, then run `{retry}`")
     } else {
-        "drop --service install; run `mailtriage watch` under a supervisor of your own".to_owned()
+        "drop --service install".to_owned()
     }
 }
 
@@ -1625,15 +1625,7 @@ mod tests {
             service_fix(true, retry),
             format!("fix this, then run `{retry}`")
         );
-        let unsupported = service_fix(false, retry);
-        assert!(
-            unsupported.starts_with("drop --service install"),
-            "{unsupported}"
-        );
-        assert!(
-            !unsupported.contains("service install --config"),
-            "{unsupported}"
-        );
+        assert_eq!(service_fix(false, retry), "drop --service install");
     }
 
     #[test]

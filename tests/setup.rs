@@ -1504,6 +1504,15 @@ fn the_service_question_defaults_to_no_for_a_key_from_the_environment() {
         err.contains("OPENROUTER_API_KEY, which the background service does not inherit"),
         "{err}"
     );
+    let store =
+        secrets::key_store_options(cfg!(target_os = "macos"), |tool| f.bin.join(tool).exists())[0];
+    assert!(
+        err.contains(&format!(
+            "`mailtriage setup --update --account work --key-store {}`",
+            store.flag()
+        )),
+        "{err}"
+    );
     assert!(err.contains("seconds)? [y/N]"), "{err}");
     assert!(!f.bin.join("launchctl.log").exists());
     assert!(!f.bin.join("systemctl.log").exists());
