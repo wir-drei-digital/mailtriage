@@ -129,8 +129,12 @@ pub struct Service {
 }
 impl Service {
     pub fn open(path: &Path) -> Result<Self> {
-        let path = fs::canonicalize(path)
-            .map_err(|_| err(2, "configuration not found; run init or pass --config"))?;
+        let path = fs::canonicalize(path).map_err(|_| {
+            err(
+                2,
+                "configuration not found; run `mailtriage setup` or pass --config",
+            )
+        })?;
         let bytes = fs::read(&path)?;
         let mut cfg = config::load(&path).map_err(|_| {
             err(

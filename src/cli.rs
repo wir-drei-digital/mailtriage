@@ -25,12 +25,29 @@ use std::{
     about = "Local mail classification and attention queries"
 )]
 struct Cli {
-    #[arg(long, global = true, default_value = "mailtriage.json")]
-    config: PathBuf,
+    /// Config file (default: MAILTRIAGE_CONFIG, ./mailtriage.json if present, else ~/.config/mailtriage/mailtriage.json).
+    #[arg(long, global = true)]
+    config: Option<PathBuf>,
     #[arg(long, global = true)]
     json: bool,
     #[command(subcommand)]
     command: Command,
+}
+
+impl Cli {
+    /// The config path for every command except `init` and `setup`.
+    fn config_path(&self) -> Result<PathBuf, CliError> {
+        let cwd = std::env::current_dir()
+            .map_err(|_| CliError::input("cannot read the working directory; pass --config"))?;
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        config::resolve_path(
+            self.config.as_deref(),
+            std::env::var_os("MAILTRIAGE_CONFIG").as_deref(),
+            &cwd,
+            home.as_deref(),
+        )
+        .map_err(|e| CliError::input(e.to_string()))
+    }
 }
 
 #[derive(Subcommand)]
@@ -374,10 +391,14 @@ fn open(path: &Path) -> Result<Service, CliError> {
 fn execute(cli: &Cli) -> Result<Value, CliError> {
     match &cli.command {
         Command::Init => {
-            if cli.config.exists() {
+            let path = cli
+                .config
+                .clone()
+                .unwrap_or_else(|| PathBuf::from(config::CONFIG_FILE));
+            if path.exists() {
                 return Err(CliError::input(format!(
                     "config already exists: {}",
-                    cli.config.display()
+                    path.display()
                 )));
             }
             let mut value = config::default_config();
@@ -388,22 +409,21 @@ fn execute(cli: &Cli) -> Result<Value, CliError> {
                 .next()
                 .cloned()
                 .ok_or_else(|| CliError::input("default config has no account"))?;
-            config::save(&cli.config, &value)
-                .map_err(|_| CliError::input("could not write config"))?;
+            config::save(&path, &value).map_err(|_| CliError::input("could not write config"))?;
             Ok(
-                json!({"schema_version":1,"config":cli.config,"provider":"fake","account":account,"state_dir":".state"}),
+                json!({"schema_version":1,"config":path,"provider":"fake","account":account,"state_dir":".state"}),
             )
         }
-        Command::Doctor(arg) => open(&cli.config)?
+        Command::Doctor(arg) => open(&cli.config_path()?)?
             .doctor(&arg.account)
             .map_err(service_error),
         Command::Classify(arg) => {
             let data = read_input(&arg.input, 16 * 1024 * 1024)?;
-            open(&cli.config)?
+            open(&cli.config_path()?)?
                 .classify(&arg.account, &data, &arg.format)
                 .map_err(service_error)
         }
-        Command::Sync(arg) => open(&cli.config)?
+        Command::Sync(arg) => open(&cli.config_path()?)?
             .sync(&arg.account, arg.limit)
             .map_err(service_error),
         Command::Watch(arg) => watch(cli, arg),
@@ -416,11 +436,11 @@ fn execute(cli: &Cli) -> Result<Value, CliError> {
                 limit: arg.limit,
                 cursor: arg.cursor.clone(),
             };
-            open(&cli.config)?
+            open(&cli.config_path()?)?
                 .list(&arg.account, opts)
                 .map_err(service_error)
         }
-        Command::Read(arg) => open(&cli.config)?
+        Command::Read(arg) => open(&cli.config_path()?)?
             .read(&arg.account, &arg.id)
             .map_err(service_error),
         Command::Correct(arg) => {
@@ -446,24 +466,24 @@ fn execute(cli: &Cli) -> Result<Value, CliError> {
                     return Err(CliError::input("cannot set and clear the same field"));
                 }
             }
-            open(&cli.config)?
+            open(&cli.config_path()?)?
                 .correct(&arg.account, &arg.id, Value::Object(patch), clear)
                 .map_err(service_error)
         }
-        Command::Done(arg) => open(&cli.config)?
+        Command::Done(arg) => open(&cli.config_path()?)?
             .review(&arg.account, &arg.id, true)
             .map_err(service_error),
-        Command::Reopen(arg) => open(&cli.config)?
+        Command::Reopen(arg) => open(&cli.config_path()?)?
             .review(&arg.account, &arg.id, false)
             .map_err(service_error),
         Command::Categories { command } => match command {
-            CategoriesCommand::Export(arg) => open(&cli.config)?
+            CategoriesCommand::Export(arg) => open(&cli.config_path()?)?
                 .categories(&arg.account)
                 .map_err(service_error),
             CategoriesCommand::Validate { file, account } => {
                 let categories = read_categories(file)?;
                 if let Some(account) = account {
-                    return open(&cli.config)?
+                    return open(&cli.config_path()?)?
                         .validate_categories(account, categories)
                         .map_err(service_error);
                 }
@@ -472,18 +492,18 @@ fn execute(cli: &Cli) -> Result<Value, CliError> {
             }
             CategoriesCommand::Apply { account, file } => {
                 let categories = read_categories(file)?;
-                open(&cli.config)?
+                open(&cli.config_path()?)?
                     .apply_categories(account, categories)
                     .map_err(service_error)
             }
         },
-        Command::Reclassify(arg) => open(&cli.config)?
+        Command::Reclassify(arg) => open(&cli.config_path()?)?
             .reclassify(&arg.account, arg.since.as_deref(), arg.dry_run, arg.limit)
             .map_err(service_error),
-        Command::Export(arg) => open(&cli.config)?
+        Command::Export(arg) => open(&cli.config_path()?)?
             .export(&arg.account)
             .map_err(service_error),
-        Command::Filing { command } => filing(&cli.config, command),
+        Command::Filing { command } => filing(&cli.config_path()?, command),
     }
 }
 
@@ -573,6 +593,7 @@ fn validate_categories(categories: &[Category]) -> Result<(), CliError> {
 }
 
 fn watch(cli: &Cli, arg: &WatchArg) -> Result<Value, CliError> {
+    let path = cli.config_path()?;
     let stop = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&stop);
     ctrlc::set_handler(move || {
@@ -583,7 +604,7 @@ fn watch(cli: &Cli, arg: &WatchArg) -> Result<Value, CliError> {
         || stop.load(Ordering::SeqCst),
         arg.interval_seconds,
         cli.json,
-        || Service::open(&cli.config)?.sync(&arg.account, arg.limit),
+        || Service::open(&path)?.sync(&arg.account, arg.limit),
     )?;
     let partial = tally.partial_passes > 0 || tally.skipped_passes > 0;
     Ok(

@@ -2,12 +2,13 @@ use crate::domain::{
     AccountConfig, AppConfig, Category, EngineConfig, FilingConfig, FilingMode, PolicyConfig,
     ProviderConfig,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use std::{
     collections::BTreeMap,
+    ffi::OsStr,
     fs::{self, OpenOptions},
     io::Write,
-    path::Path,
+    path::{Path, PathBuf},
 };
 use uuid::Uuid;
 
@@ -337,4 +338,48 @@ pub fn save(path: &Path, config: &AppConfig) -> Result<()> {
         let _ = fs::remove_file(&tmp);
     }
     result
+}
+
+/// The config file name, in the working directory and the home config dir.
+pub const CONFIG_FILE: &str = "mailtriage.json";
+
+/// `~/.config/mailtriage/mailtriage.json`; `None` without a home directory.
+pub fn home_config_path(home: Option<&Path>) -> Option<PathBuf> {
+    home.filter(|h| !h.as_os_str().is_empty())
+        .map(|h| h.join(".config").join("mailtriage").join(CONFIG_FILE))
+}
+
+/// The config every command except `init` and `setup` uses: `--config`,
+/// else `MAILTRIAGE_CONFIG`, else `./mailtriage.json` if it exists, else
+/// `~/.config/mailtriage/mailtriage.json`.
+pub fn resolve_path(
+    flag: Option<&Path>,
+    env: Option<&OsStr>,
+    cwd: &Path,
+    home: Option<&Path>,
+) -> Result<PathBuf> {
+    if flag.is_none() && env.is_none_or(OsStr::is_empty) {
+        let local = cwd.join(CONFIG_FILE);
+        if local.exists() {
+            return Ok(local);
+        }
+    }
+    setup_path(flag, env, home)
+}
+
+/// The config `setup` writes: `--config`, else `MAILTRIAGE_CONFIG`, else
+/// the home config. It never picks `./mailtriage.json`.
+pub fn setup_path(
+    flag: Option<&Path>,
+    env: Option<&OsStr>,
+    home: Option<&Path>,
+) -> Result<PathBuf> {
+    if let Some(path) = flag {
+        return Ok(path.to_path_buf());
+    }
+    if let Some(path) = env.filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(path));
+    }
+    home_config_path(home)
+        .ok_or_else(|| anyhow!("cannot find the config: HOME is not set; pass --config PATH"))
 }

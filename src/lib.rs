@@ -9,6 +9,7 @@ pub mod himalaya {
 pub mod normalize;
 pub mod policy;
 pub mod process;
+pub mod prompt;
 pub mod provider;
 pub mod secrets;
 pub mod service;
