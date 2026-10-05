@@ -35,6 +35,15 @@ impl Manager {
     }
 }
 
+/// The `--key-store` values of the platform's own key stores, preferred
+/// first: the Keychain with launchd, Secret Service or `pass` with systemd.
+pub fn platform_key_stores(manager: Manager) -> &'static [&'static str] {
+    match manager {
+        Manager::Launchd => &["keychain"],
+        Manager::Systemd => &["secret-service", "pass"],
+    }
+}
+
 /// How to reach this user's service manager.
 #[derive(Debug, Clone)]
 pub struct Context {

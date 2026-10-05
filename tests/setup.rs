@@ -1218,15 +1218,48 @@ fn prompting_offers_the_service_with_yes_as_default() {
     let f = Fixture::new();
     write_tool(&f.bin, "launchctl", LAUNCHCTL);
     write_tool(&f.bin, "systemctl", SYSTEMCTL);
-    // Eight defaults, key variable, filing, then Enter for the service.
-    let input = "\n".repeat(11);
+    // Eight defaults, filing, then Enter for the service.
+    let input = "\n".repeat(10);
     let (out, v) = f.run_exact(
-        &["setup", "--interactive", "--json", "--key-store", "env"],
+        &[
+            "setup",
+            "--interactive",
+            "--json",
+            "--key-command",
+            "printf 'sk-or-k\\n'",
+        ],
         &input,
         &[],
     );
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(stderr(&out).contains("seconds)? [Y/n]"), "{}", stderr(&out));
     assert_eq!(v["setup"]["service"]["action"], "installed");
+}
+
+/// Final review I2: the service does not inherit the variable an `env` key
+/// comes from, so the prompted question defaults to no and says why.
+#[test]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn the_service_question_defaults_to_no_for_a_key_from_the_environment() {
+    let f = Fixture::new();
+    write_tool(&f.bin, "launchctl", LAUNCHCTL);
+    write_tool(&f.bin, "systemctl", SYSTEMCTL);
+    // Eight defaults, key variable, filing, then Enter for the service.
+    let (out, v) = f.run_exact(
+        &["setup", "--interactive", "--json", "--key-store", "env"],
+        &"\n".repeat(11),
+        &[("OPENROUTER_API_KEY", "sk-or-env")],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(v["setup"]["service"], Value::Null);
+    let err = stderr(&out);
+    assert!(
+        err.contains("OPENROUTER_API_KEY, which the background service does not inherit"),
+        "{err}"
+    );
+    assert!(err.contains("seconds)? [y/N]"), "{err}");
+    assert!(!f.bin.join("launchctl.log").exists());
+    assert!(!f.bin.join("systemctl.log").exists());
 }
 
 #[test]

@@ -253,7 +253,7 @@ pub fn run(args: &SetupArgs, path: &Path, p: &mut Prompter) -> Result<Value> {
     let state_ok = doctor["items"]
         .as_array()
         .is_some_and(|items| items.iter().all(|i| i["check"] != "state"));
-    let service = service_step(args, p, &path, &name, state_ok)?;
+    let service = service_step(args, p, &path, &name, &cfg.provider, state_ok)?;
     Ok(json!({"schema_version": 1, "setup": {
         "config": path,
         "account": name,
@@ -1211,14 +1211,16 @@ fn next_steps(p: &mut Prompter, name: &str, mode: FilingMode) {
     }
 }
 
-/// Step 10: the background service. Asked with prompts (default yes);
-/// without prompts only `--service install` installs it. Never installed
-/// when `state_ok` is false.
+/// Step 10: the background service. Asked with prompts (default yes, but
+/// no for a key from an environment variable, which the service does not
+/// inherit); without prompts only `--service install` installs it. Never
+/// installed when `state_ok` is false.
 fn service_step(
     args: &SetupArgs,
     p: &mut Prompter,
     path: &Path,
     name: &str,
+    provider: &ProviderConfig,
     state_ok: bool,
 ) -> Result<Value> {
     let retry = install_command(path, name);
@@ -1233,13 +1235,31 @@ fn service_step(
     let wanted = match args.service {
         Some(wanted) => wanted,
         None if p.enabled() => match Context::detect() {
-            Ok(_) => p.confirm(
-                &format!(
-                    "Run mailtriage in the background now (`watch` every {} seconds)?",
-                    args.interval_seconds
-                ),
-                true,
-            )?,
+            Ok(ctx) => {
+                let env_key = provider.kind == "openrouter" && provider.api_key_command.is_none();
+                if env_key {
+                    let store = shell_line(&[
+                        "mailtriage",
+                        "setup",
+                        "--update",
+                        "--account",
+                        name,
+                        "--key-store",
+                        system_service::platform_key_stores(ctx.manager)[0],
+                    ]);
+                    p.say(&format!(
+                        "The key comes from {}, which the background service does not inherit, so the default is no. Store the key first: `{store}`.",
+                        provider.api_key_env
+                    ));
+                }
+                p.confirm(
+                    &format!(
+                        "Run mailtriage in the background now (`watch` every {} seconds)?",
+                        args.interval_seconds
+                    ),
+                    !env_key,
+                )?
+            }
             Err(e) => {
                 p.say(&format!(
                     "Skipping the background service: {}.",

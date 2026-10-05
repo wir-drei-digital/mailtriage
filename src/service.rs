@@ -326,11 +326,26 @@ impl Service {
         }
         .map_err(|_| err(2, "invalid message input"))?;
         let id = self.store.ingest(name, &message, &generation)?;
-        let outcome = self.process_one(name, &account, &generation, &id, None)?;
+        let skipped = self.classification_skipped();
+        let outcome = match &skipped {
+            Some(_) => "skipped".to_owned(),
+            None => self.process_one(name, &account, &generation, &id, None)?,
+        };
         let row = self.required(name, &id)?;
-        Ok(
-            json!({"schema_version":1,"item":self.item(&row)?,"outcome":outcome,"partial":outcome=="failed"}),
-        )
+        let mut out = json!({"schema_version":1,"item":self.item(&row)?,"outcome":outcome,"partial":outcome=="failed"});
+        mark_skipped(&mut out, skipped);
+        Ok(out)
+    }
+    /// Why classification cannot run in this command: the OpenRouter key is
+    /// unavailable. Resolved once per `Service` through the key cache, before
+    /// any job is leased, so an unavailable key consumes no attempts and its
+    /// mail stays queued. The reason is a fixed key-error string.
+    fn classification_skipped(&self) -> Option<String> {
+        let provider = &self.config.provider;
+        if provider.kind != "openrouter" {
+            return None;
+        }
+        self.key.get(provider).err().map(|e| e.to_string())
     }
     fn process_one(
         &mut self,
@@ -547,28 +562,34 @@ impl Service {
         if let Some(ctx) = filing {
             self.recover_intents(ctx, &map, &mut summary)?;
         }
-        // 6. Fetch and classify.
-        let done = self.fetch_and_classify(
-            name,
-            &account,
-            &generation,
-            engine.as_deref(),
-            filing.map(|_| &map),
-            limit,
-        )?;
+        // 6. Fetch and classify, skipped while the key is unavailable.
+        let skipped = self.classification_skipped();
+        let done = match &skipped {
+            Some(_) => Processed::default(),
+            None => self.fetch_and_classify(
+                name,
+                &account,
+                &generation,
+                engine.as_deref(),
+                filing.map(|_| &map),
+                limit,
+            )?,
+        };
         // 7–10. Arrivals and re-evaluation, bootstrap and hydration, plan and
         // apply, done inference.
         if let Some(ctx) = filing {
             self.locate_and_file(ctx, &map, &removed, &mut summary)?;
         }
         // 11. Summary.
-        self.sync_response(
+        let mut out = self.sync_response(
             name,
             discovered,
             scan_errors,
             &done,
             filing.map(|_| &summary),
-        )
+        )?;
+        mark_skipped(&mut out, skipped);
+        Ok(out)
     }
     /// Steps 7–10 with filing on: arrival resolution, then re-evaluation of
     /// what reconciliation removed; rescan completion (re-evaluating rescan
@@ -1539,7 +1560,11 @@ impl Service {
         }
         let matched = ids.len();
         self.store.requeue(name, &ids, &generation)?;
-        let selected: Vec<_> = ids.into_iter().take(limit).collect();
+        let skipped = self.classification_skipped();
+        let selected: Vec<_> = match skipped {
+            Some(_) => vec![],
+            None => ids.into_iter().take(limit).collect(),
+        };
         let h = self.engine(&account)?;
         let mut failed = 0;
         for id in &selected {
@@ -1547,9 +1572,9 @@ impl Service {
                 failed += 1;
             }
         }
-        Ok(
-            json!({"schema_version":1,"matched":matched,"reclassified":selected.len()-failed,"pending":self.coverage(name)?["pending_jobs"],"failed":failed,"partial":failed>0}),
-        )
+        let mut out = json!({"schema_version":1,"matched":matched,"reclassified":selected.len()-failed,"pending":self.coverage(name)?["pending_jobs"],"failed":failed,"partial":failed>0});
+        mark_skipped(&mut out, skipped);
+        Ok(out)
     }
     pub fn export(&mut self, name: &str) -> Result<Value> {
         self.ensure(name)?;
@@ -1638,6 +1663,15 @@ fn check_binding(
         return Err(err(5, "Himalaya mailbox identity changed during operation"));
     }
     Ok(())
+}
+
+/// A result whose classification was skipped gains
+/// `classification: {skipped: true, reason}` and is partial.
+fn mark_skipped(out: &mut Value, skipped: Option<String>) {
+    if let Some(reason) = skipped {
+        out["classification"] = json!({"skipped": true, "reason": reason});
+        out["partial"] = json!(true);
+    }
 }
 
 fn config_changed() -> anyhow::Error {
