@@ -71,6 +71,42 @@ pub fn resolve_key(config: &ProviderConfig) -> Result<String> {
     Ok(key)
 }
 
+/// Where setup keeps the key. Task 4 adds the tool-backed stores.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyStore {
+    Command,
+    Env,
+}
+
+impl KeyStore {
+    pub const ALL: [KeyStore; 2] = [KeyStore::Command, KeyStore::Env];
+
+    /// The `--key-store` value.
+    pub fn flag(self) -> &'static str {
+        match self {
+            KeyStore::Command => "command",
+            KeyStore::Env => "env",
+        }
+    }
+
+    pub fn from_flag(flag: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|store| store.flag() == flag)
+    }
+
+    /// The menu text.
+    pub fn label(self) -> &'static str {
+        match self {
+            KeyStore::Command => "A command that prints the key",
+            KeyStore::Env => "An environment variable only",
+        }
+    }
+}
+
+/// The stores setup offers, the platform's own first.
+pub fn key_store_options(_macos: bool, _has_tool: impl Fn(&str) -> bool) -> Vec<KeyStore> {
+    vec![KeyStore::Command, KeyStore::Env]
+}
+
 /// The key, or the reason it is missing, resolved at most once. A `Service`
 /// holds one, so each `watch` pass resolves the key again. No `Debug`: it
 /// holds the key.

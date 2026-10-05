@@ -13,4 +13,5 @@ pub mod prompt;
 pub mod provider;
 pub mod secrets;
 pub mod service;
+pub mod setup;
 pub mod store;

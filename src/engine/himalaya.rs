@@ -87,22 +87,10 @@ impl Himalaya {
     }
 
     pub fn version(&self) -> Result<String> {
-        let output = self.run(&["--version"], false)?;
-        let output_text =
-            std::str::from_utf8(&output).context("invalid Himalaya version output")?;
-        let version = output_text.lines().next().unwrap_or_default().trim();
-        let mut words = version.split_ascii_whitespace();
-        let expected = format!("v{}", self.config.expected_version);
-        if words.next() != Some("himalaya")
-            || words.next() != Some(expected.as_str())
-            || !words.any(|feature| feature == "+imap")
-        {
-            bail!(
-                "unsupported Himalaya version; expected {}",
-                self.config.expected_version
-            );
-        }
-        Ok(version.to_owned())
+        check_version_output(
+            &self.run(&["--version"], false)?,
+            &self.config.expected_version,
+        )
     }
 
     pub fn snapshot(&self, mailbox: &str) -> Result<MailboxSnapshot> {
@@ -629,6 +617,21 @@ pub(crate) fn check_write_uids(uids: &[u64]) -> Result<()> {
         bail!("UID must be positive");
     }
     Ok(())
+}
+
+/// The version line of `himalaya --version` when it is `expected` with IMAP.
+pub fn check_version_output(output: &[u8], expected: &str) -> Result<String> {
+    let text = std::str::from_utf8(output).context("invalid Himalaya version output")?;
+    let version = text.lines().next().unwrap_or_default().trim();
+    let mut words = version.split_ascii_whitespace();
+    let wanted = format!("v{expected}");
+    if words.next() != Some("himalaya")
+        || words.next() != Some(wanted.as_str())
+        || !words.any(|feature| feature == "+imap")
+    {
+        bail!("unsupported Himalaya version; expected {expected}");
+    }
+    Ok(version.to_owned())
 }
 
 /// Parses `imap list` JSON: an array of rows or an object with `mailboxes`.

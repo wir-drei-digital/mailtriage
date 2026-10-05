@@ -251,13 +251,26 @@ pub fn unsafe_source_mailboxes(account: &AccountConfig) -> Vec<String> {
     };
     h.mailboxes
         .iter()
-        .filter(|m| {
-            !m.chars().all(|c| (' '..='~').contains(&c))
-                || m.contains(['\\', '"', '&'])
-                || m.starts_with('-')
-        })
+        .filter(|m| unsafe_source_mailbox(m))
         .cloned()
         .collect()
+}
+
+/// Whether filing cannot name `mailbox` safely in raw IMAP text
+/// (`SOURCE_RULE`).
+pub fn unsafe_source_mailbox(mailbox: &str) -> bool {
+    !mailbox.chars().all(|c| (' '..='~').contains(&c))
+        || mailbox.contains(['\\', '"', '&'])
+        || mailbox.starts_with('-')
+}
+
+/// Account names setup and the service accept: 1 to 64 ASCII letters,
+/// digits, `-` or `_` (they become service labels and file names).
+pub fn valid_account_name(name: &str) -> bool {
+    (1..=64).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 fn folder_problems(account: &AccountConfig) -> Vec<(String, &'static str)> {

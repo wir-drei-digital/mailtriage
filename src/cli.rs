@@ -3,12 +3,15 @@ use mailtriage::{
     config,
     domain::{Category, FilingMode},
     engine::ConfigChanged,
+    prompt::{self, Prompter},
+    secrets::KeyStore,
     service::{is_config_change, Backfill, ListOptions, RetryTarget, Service, ServiceError},
+    setup,
 };
 use serde_json::{json, Value};
 use std::{
     fs,
-    io::{self, Read, Write},
+    io::{self, IsTerminal, Read, Write},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -53,6 +56,8 @@ impl Cli {
 #[derive(Subcommand)]
 enum Command {
     Init,
+    /// Guided first run: mail account, folders, classifier and key, filing.
+    Setup(Box<SetupArg>),
     Doctor(AccountArg),
     Classify(ClassifyArg),
     Sync(ScanArg),
@@ -73,6 +78,85 @@ enum Command {
         #[command(subcommand)]
         command: FilingCommand,
     },
+}
+
+#[derive(Args)]
+struct SetupArg {
+    /// Change an existing config (required without prompts).
+    #[arg(long)]
+    update: bool,
+    /// No prompts: flags and defaults only.
+    #[arg(long, conflicts_with = "interactive")]
+    yes: bool,
+    /// Prompt even when stdin is not a terminal.
+    #[arg(long)]
+    interactive: bool,
+    #[arg(long)]
+    himalaya_binary: Option<PathBuf>,
+    #[arg(long)]
+    himalaya_config: Option<PathBuf>,
+    #[arg(long)]
+    himalaya_account: Option<String>,
+    /// Account name in mailtriage (letters, digits, - and _).
+    #[arg(long)]
+    account: Option<String>,
+    #[arg(long)]
+    identity: Option<String>,
+    #[arg(long)]
+    timezone: Option<String>,
+    /// One line about the recipient that helps classification.
+    #[arg(long)]
+    brief: Option<String>,
+    /// A folder to watch; repeat for several.
+    #[arg(long = "mailbox")]
+    mailboxes: Vec<String>,
+    #[arg(long, value_parser = ["openrouter", "fake"])]
+    provider: Option<String>,
+    #[arg(long)]
+    model: Option<String>,
+    #[arg(long, value_parser = ["command", "env"])]
+    key_store: Option<String>,
+    /// Shell command that prints the key (stored as /bin/sh -c).
+    #[arg(long)]
+    key_command: Option<String>,
+    /// Environment variable that holds the key.
+    #[arg(long)]
+    key_env: Option<String>,
+    /// The key is already in the chosen store.
+    #[arg(long)]
+    key_stored: bool,
+    #[arg(long, value_parser = ["off", "dry-run"])]
+    filing: Option<String>,
+}
+
+impl SetupArg {
+    fn to_args(&self, terminal: bool) -> setup::SetupArgs {
+        setup::SetupArgs {
+            update: self.update,
+            terminal,
+            himalaya_binary: self.himalaya_binary.clone(),
+            himalaya_config: self.himalaya_config.clone(),
+            himalaya_account: self.himalaya_account.clone(),
+            account: self.account.clone(),
+            identity: self.identity.clone(),
+            timezone: self.timezone.clone(),
+            brief: self.brief.clone(),
+            mailboxes: self.mailboxes.clone(),
+            provider: self.provider.clone(),
+            model: self.model.clone(),
+            key_store: self.key_store.as_deref().and_then(KeyStore::from_flag),
+            key_command: self.key_command.clone(),
+            key_env: self.key_env.clone(),
+            key_stored: self.key_stored,
+            filing: self.filing.as_deref().map(|f| {
+                if f == "off" {
+                    FilingMode::Off
+                } else {
+                    FilingMode::DryRun
+                }
+            }),
+        }
+    }
 }
 
 #[derive(Args)]
@@ -414,6 +498,7 @@ fn execute(cli: &Cli) -> Result<Value, CliError> {
                 json!({"schema_version":1,"config":path,"provider":"fake","account":account,"state_dir":".state"}),
             )
         }
+        Command::Setup(arg) => setup(cli, arg),
         Command::Doctor(arg) => open(&cli.config_path()?)?
             .doctor(&arg.account)
             .map_err(service_error),
@@ -505,6 +590,23 @@ fn execute(cli: &Cli) -> Result<Value, CliError> {
             .map_err(service_error),
         Command::Filing { command } => filing(&cli.config_path()?, command),
     }
+}
+
+fn setup(cli: &Cli, arg: &SetupArg) -> Result<Value, CliError> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let path = config::setup_path(
+        cli.config.as_deref(),
+        std::env::var_os("MAILTRIAGE_CONFIG").as_deref(),
+        home.as_deref(),
+    )
+    .map_err(|e| CliError::input(e.to_string()))?;
+    let terminal = io::stdin().is_terminal();
+    let mut prompt = Prompter::new(
+        prompt::stdin_unbuffered(),
+        io::stderr(),
+        !arg.yes && (arg.interactive || terminal),
+    );
+    setup::run(&arg.to_args(terminal), &path, &mut prompt).map_err(service_error)
 }
 
 fn filing(config: &Path, command: &FilingCommand) -> Result<Value, CliError> {
