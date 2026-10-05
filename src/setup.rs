@@ -21,7 +21,7 @@ use std::{
     ffi::OsStr,
     fs,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     time::Duration,
 };
 
@@ -885,6 +885,74 @@ fn chosen_store(args: &SetupArgs, p: &mut Prompter) -> Result<KeyStore> {
 fn key_step(args: &SetupArgs, p: &mut Prompter, provider: &mut ProviderConfig) -> Result<KeyStore> {
     let store = chosen_store(args, p)?;
     match store {
+        KeyStore::Keychain | KeyStore::SecretService | KeyStore::Pass => {
+            let tool_name = store.tool().expect("tool-backed store");
+            let tool = process::find_on_path(tool_name).ok_or_else(|| {
+                err(
+                    2,
+                    format!(
+                        "step 5 (key): --key-store {}: {tool_name} is not on PATH",
+                        store.flag()
+                    ),
+                )
+            })?;
+            let read = secrets::read_command(store, &tool).expect("tool-backed store");
+            let save = secrets::store_command(store, &tool).expect("tool-backed store");
+            let stored = secrets::run_key_command(&read).is_ok();
+            let reuse = stored
+                && (args.key_stored
+                    || !p.enabled()
+                    || p.confirm(
+                        &format!("A key is already stored in {}. Use it?", store.label()),
+                        true,
+                    )?);
+            if !reuse {
+                if args.key_stored {
+                    return Err(err(
+                        3,
+                        format!(
+                            "step 5 (key): no key found in {}; store it with `{}`",
+                            store.label(),
+                            shell_line(&save)
+                        ),
+                    ));
+                }
+                if !p.enabled() && !args.terminal {
+                    return Err(err(
+                        2,
+                        format!(
+                            "step 5 (key): storing the key needs a terminal; run `{}`, then pass --key-stored, or use --key-store env",
+                            shell_line(&save)
+                        ),
+                    ));
+                }
+                p.say(&format!(
+                    "{tool_name} will now ask for your OpenRouter key; mailtriage never sees it."
+                ));
+                // The tool prompts on the terminal; its stdout is not shown.
+                let status = Command::new(&save[0])
+                    .args(&save[1..])
+                    .stdout(Stdio::null())
+                    .status();
+                if !status.is_ok_and(|s| s.success()) {
+                    return Err(err(
+                        3,
+                        format!("step 5 (key): `{}` failed", shell_line(&save)),
+                    ));
+                }
+                secrets::run_key_command(&read).map_err(|e| {
+                    err(
+                        3,
+                        format!(
+                            "step 5 (key): {e} after storing it; check `{}`",
+                            shell_line(&read)
+                        ),
+                    )
+                })?;
+            }
+            p.say(&format!("The key is in {}.", store.label()));
+            provider.api_key_command = Some(read);
+        }
         KeyStore::Command => loop {
             let text = answer(
                 p,
@@ -1269,15 +1337,5 @@ mod tests {
         for bad in ["", "my work", "a.b", "ä", "a/b"] {
             assert!(!config::valid_account_name(bad), "{bad}");
         }
-    }
-
-    #[test]
-    fn key_store_options_without_tool_stores() {
-        assert_eq!(
-            secrets::key_store_options(true, |_| true),
-            vec![KeyStore::Command, KeyStore::Env]
-        );
-        assert_eq!(KeyStore::from_flag("env"), Some(KeyStore::Env));
-        assert_eq!(KeyStore::from_flag("keychain"), None);
     }
 }

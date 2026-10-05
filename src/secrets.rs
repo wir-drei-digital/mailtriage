@@ -71,19 +71,31 @@ pub fn resolve_key(config: &ProviderConfig) -> Result<String> {
     Ok(key)
 }
 
-/// Where setup keeps the key. Task 4 adds the tool-backed stores.
+/// Where setup keeps the key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyStore {
+    Keychain,
+    SecretService,
+    Pass,
     Command,
     Env,
 }
 
 impl KeyStore {
-    pub const ALL: [KeyStore; 2] = [KeyStore::Command, KeyStore::Env];
+    pub const ALL: [KeyStore; 5] = [
+        KeyStore::Keychain,
+        KeyStore::SecretService,
+        KeyStore::Pass,
+        KeyStore::Command,
+        KeyStore::Env,
+    ];
 
     /// The `--key-store` value.
     pub fn flag(self) -> &'static str {
         match self {
+            KeyStore::Keychain => "keychain",
+            KeyStore::SecretService => "secret-service",
+            KeyStore::Pass => "pass",
             KeyStore::Command => "command",
             KeyStore::Env => "env",
         }
@@ -96,15 +108,90 @@ impl KeyStore {
     /// The menu text.
     pub fn label(self) -> &'static str {
         match self {
+            KeyStore::Keychain => "macOS Keychain",
+            KeyStore::SecretService => "Secret Service (secret-tool)",
+            KeyStore::Pass => "pass (the standard Unix password manager)",
             KeyStore::Command => "A command that prints the key",
             KeyStore::Env => "An environment variable only",
         }
     }
+
+    /// The program behind a tool-backed store.
+    pub fn tool(self) -> Option<&'static str> {
+        match self {
+            KeyStore::Keychain => Some("security"),
+            KeyStore::SecretService => Some("secret-tool"),
+            KeyStore::Pass => Some("pass"),
+            KeyStore::Command | KeyStore::Env => None,
+        }
+    }
 }
 
-/// The stores setup offers, the platform's own first.
-pub fn key_store_options(_macos: bool, _has_tool: impl Fn(&str) -> bool) -> Vec<KeyStore> {
-    vec![KeyStore::Command, KeyStore::Env]
+/// The stores setup offers, the platform's own first: the Keychain on
+/// macOS; Secret Service and `pass` when their tools are on `PATH`; a
+/// command and an environment variable always.
+pub fn key_store_options(macos: bool, has_tool: impl Fn(&str) -> bool) -> Vec<KeyStore> {
+    let mut options = Vec::new();
+    if macos {
+        options.push(KeyStore::Keychain);
+    }
+    for store in [KeyStore::SecretService, KeyStore::Pass] {
+        if store.tool().is_some_and(&has_tool) {
+            options.push(store);
+        }
+    }
+    options.extend([KeyStore::Command, KeyStore::Env]);
+    options
+}
+
+/// The command that prints the stored key, with the tool's absolute path.
+pub fn read_command(store: KeyStore, tool: &Path) -> Option<Vec<String>> {
+    let args: &[&str] = match store {
+        KeyStore::Keychain => &[
+            "find-generic-password",
+            "-s",
+            "mailtriage",
+            "-a",
+            "openrouter",
+            "-w",
+        ],
+        KeyStore::SecretService => &["lookup", "service", "mailtriage", "provider", "openrouter"],
+        KeyStore::Pass => &["show", "mailtriage/openrouter"],
+        KeyStore::Command | KeyStore::Env => return None,
+    };
+    Some(with_tool(tool, args))
+}
+
+/// The command that stores the key; the tool asks for it on the terminal.
+pub fn store_command(store: KeyStore, tool: &Path) -> Option<Vec<String>> {
+    let args: &[&str] = match store {
+        KeyStore::Keychain => &[
+            "add-generic-password",
+            "-U",
+            "-s",
+            "mailtriage",
+            "-a",
+            "openrouter",
+            "-w",
+        ],
+        KeyStore::SecretService => &[
+            "store",
+            "--label=mailtriage OpenRouter key",
+            "service",
+            "mailtriage",
+            "provider",
+            "openrouter",
+        ],
+        KeyStore::Pass => &["insert", "mailtriage/openrouter"],
+        KeyStore::Command | KeyStore::Env => return None,
+    };
+    Some(with_tool(tool, args))
+}
+
+fn with_tool(tool: &Path, args: &[&str]) -> Vec<String> {
+    std::iter::once(tool.display().to_string())
+        .chain(args.iter().map(|arg| (*arg).to_owned()))
+        .collect()
 }
 
 /// The key, or the reason it is missing, resolved at most once. A `Service`
@@ -119,5 +206,104 @@ impl KeyCache {
             .get_or_init(|| resolve_key(config).map_err(|e| e.to_string()))
             .clone()
             .map_err(|message| anyhow!(message))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn the_platform_store_comes_first() {
+        assert_eq!(
+            key_store_options(true, |_| false),
+            vec![KeyStore::Keychain, KeyStore::Command, KeyStore::Env]
+        );
+        assert_eq!(
+            key_store_options(false, |_| true),
+            vec![
+                KeyStore::SecretService,
+                KeyStore::Pass,
+                KeyStore::Command,
+                KeyStore::Env
+            ]
+        );
+        assert_eq!(
+            key_store_options(false, |tool| tool == "pass"),
+            vec![KeyStore::Pass, KeyStore::Command, KeyStore::Env]
+        );
+        assert_eq!(
+            key_store_options(false, |_| false),
+            vec![KeyStore::Command, KeyStore::Env]
+        );
+        for store in KeyStore::ALL {
+            assert_eq!(KeyStore::from_flag(store.flag()), Some(store));
+        }
+    }
+
+    #[test]
+    fn read_and_store_commands_use_the_tool_path() {
+        let tool = Path::new("/usr/bin/security");
+        assert_eq!(
+            read_command(KeyStore::Keychain, tool).unwrap(),
+            [
+                "/usr/bin/security",
+                "find-generic-password",
+                "-s",
+                "mailtriage",
+                "-a",
+                "openrouter",
+                "-w"
+            ]
+        );
+        assert_eq!(
+            store_command(KeyStore::Keychain, tool).unwrap(),
+            [
+                "/usr/bin/security",
+                "add-generic-password",
+                "-U",
+                "-s",
+                "mailtriage",
+                "-a",
+                "openrouter",
+                "-w"
+            ]
+        );
+        let tool = Path::new("/usr/bin/secret-tool");
+        assert_eq!(
+            read_command(KeyStore::SecretService, tool).unwrap(),
+            [
+                "/usr/bin/secret-tool",
+                "lookup",
+                "service",
+                "mailtriage",
+                "provider",
+                "openrouter"
+            ]
+        );
+        assert_eq!(
+            store_command(KeyStore::SecretService, tool).unwrap(),
+            [
+                "/usr/bin/secret-tool",
+                "store",
+                "--label=mailtriage OpenRouter key",
+                "service",
+                "mailtriage",
+                "provider",
+                "openrouter"
+            ]
+        );
+        let tool = Path::new("/usr/bin/pass");
+        assert_eq!(
+            read_command(KeyStore::Pass, tool).unwrap(),
+            ["/usr/bin/pass", "show", "mailtriage/openrouter"]
+        );
+        assert_eq!(
+            store_command(KeyStore::Pass, tool).unwrap(),
+            ["/usr/bin/pass", "insert", "mailtriage/openrouter"]
+        );
+        assert_eq!(read_command(KeyStore::Env, tool), None);
+        assert_eq!(store_command(KeyStore::Command, tool), None);
     }
 }

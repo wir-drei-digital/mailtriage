@@ -114,7 +114,7 @@ struct SetupArg {
     provider: Option<String>,
     #[arg(long)]
     model: Option<String>,
-    #[arg(long, value_parser = ["command", "env"])]
+    #[arg(long, value_parser = KeyStore::ALL.map(KeyStore::flag))]
     key_store: Option<String>,
     /// Shell command that prints the key (stored as /bin/sh -c).
     #[arg(long)]

@@ -2,6 +2,7 @@
 //! `mailtriage setup` through the binary, with a fake Himalaya first on PATH
 //! and HOME in a temp dir. Prompts are driven with `--interactive` and piped
 //! stdin; every other run uses `--yes`.
+use mailtriage::secrets;
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -783,6 +784,7 @@ fn an_account_flag_skips_the_config_menu() {
 #[test]
 fn every_error_names_its_step_and_a_fix() {
     let f = Fixture::new();
+    f.add_key_tools();
     let w = ["--himalaya-account", "work"];
     let we = ["--himalaya-account", "work", "--key-store", "env"];
     let cases: Vec<(Vec<&str>, &str)> = vec![
@@ -836,6 +838,14 @@ fn every_error_names_its_step_and_a_fix() {
             "step 5 (key): ",
         ),
         (
+            [&w[..], &["--key-store", "pass"]].concat(),
+            "step 5 (key): ",
+        ),
+        (
+            [&w[..], &["--key-store", "pass", "--key-stored"]].concat(),
+            "step 5 (key): ",
+        ),
+        (
             [&we[..], &["--mailbox", "Caf&AOk-"]].concat(),
             "step 7 (filing): ",
         ),
@@ -858,4 +868,222 @@ fn every_error_names_its_step_and_a_fix() {
     let (out, v) = f.run(&WORK_ENV, "");
     assert_eq!(out.status.code(), Some(5));
     assert!(message(&v).starts_with("step 1 (config): "), "{v}");
+}
+
+/// A fake key tool. The store verb reads one line from stdin, as the real
+/// tools read the key from the terminal; the read verb prints it, or exits
+/// 44 when nothing is stored. Calls are logged to `tools.log`.
+fn key_tool(store_verb: &str, read_verb: &str, file: &str) -> String {
+    format!(
+        "#!/bin/sh\ndir=\"$(dirname \"$0\")\"\necho \"$*\" >> \"$dir/tools.log\"\ncase \"$1\" in\n  {store_verb}) IFS= read -r key || exit 1; printf '%s\\n' \"$key\" > \"$dir/{file}\" ;;\n  {read_verb}) [ -f \"$dir/{file}\" ] && cat \"$dir/{file}\" || exit 44 ;;\n  *) exit 64 ;;\nesac\n"
+    )
+}
+
+impl Fixture {
+    fn add_key_tools(&self) {
+        write_tool(
+            &self.bin,
+            "security",
+            &key_tool(
+                "add-generic-password",
+                "find-generic-password",
+                "keychain.key",
+            ),
+        );
+        write_tool(
+            &self.bin,
+            "secret-tool",
+            &key_tool("store", "lookup", "secret-service.key"),
+        );
+        write_tool(&self.bin, "pass", &key_tool("insert", "show", "pass.key"));
+    }
+
+    fn stored(&self, file: &str) -> Option<String> {
+        fs::read_to_string(self.bin.join(file))
+            .ok()
+            .map(|s| s.trim().to_owned())
+    }
+
+    fn tool_calls(&self) -> String {
+        fs::read_to_string(self.bin.join("tools.log")).unwrap_or_default()
+    }
+}
+
+#[test]
+fn the_store_tool_asks_for_the_key_on_the_shared_stdin() {
+    let f = Fixture::new();
+    f.add_key_tools();
+    // Defaults for account, name, identity, time zone, brief, folders,
+    // provider and model; the line secret-tool reads; then filing.
+    let input = format!("{}sk-or-stored-1\n\n", "\n".repeat(8));
+    let (out, v) = f.run(
+        &[
+            "setup",
+            "--interactive",
+            "--json",
+            "--key-store",
+            "secret-service",
+        ],
+        &input,
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(
+        f.stored("secret-service.key").as_deref(),
+        Some("sk-or-stored-1")
+    );
+    assert_eq!(
+        f.config()["provider"]["api_key_command"],
+        json!([
+            f.bin.join("secret-tool").to_str().unwrap(),
+            "lookup",
+            "service",
+            "mailtriage",
+            "provider",
+            "openrouter"
+        ])
+    );
+    assert_eq!(v["setup"]["key_store"], "secret-service");
+    assert_eq!(
+        v["setup"]["doctor"]["ready"], true,
+        "{}",
+        v["setup"]["doctor"]
+    );
+    assert!(!stdout(&out).contains("sk-or-stored-1"));
+    assert!(!stderr(&out).contains("sk-or-stored-1"));
+}
+
+#[test]
+fn a_stored_key_is_reused_without_prompts() {
+    let f = Fixture::new();
+    f.add_key_tools();
+    fs::write(f.bin.join("pass.key"), "sk-or-old\n").unwrap();
+    let (out, v) = f.run(
+        &[
+            "setup",
+            "--yes",
+            "--json",
+            "--himalaya-account",
+            "work",
+            "--key-store",
+            "pass",
+        ],
+        "",
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(v["setup"]["key_store"], "pass");
+    assert!(!f.tool_calls().contains("insert"));
+    assert_eq!(
+        f.config()["provider"]["api_key_command"],
+        json!([
+            f.bin.join("pass").to_str().unwrap(),
+            "show",
+            "mailtriage/openrouter"
+        ])
+    );
+}
+
+#[test]
+fn without_a_terminal_the_store_step_needs_key_stored() {
+    let f = Fixture::new();
+    f.add_key_tools();
+    let base = [
+        "setup",
+        "--yes",
+        "--json",
+        "--himalaya-account",
+        "work",
+        "--key-store",
+        "pass",
+    ];
+    let (out, v) = f.run(&base, "");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(message(&v).contains("--key-stored"), "{v}");
+    let (out, v) = f.run(&[&base[..], &["--key-stored"]].concat(), "");
+    assert_eq!(out.status.code(), Some(3));
+    assert!(message(&v).contains("no key found"), "{v}");
+    assert!(!f.config_path().exists());
+    assert!(!f.tool_calls().contains("insert"));
+}
+
+#[test]
+fn a_stored_key_can_be_replaced_when_prompting() {
+    let f = Fixture::new();
+    f.add_key_tools();
+    fs::write(f.bin.join("pass.key"), "sk-or-old\n").unwrap();
+    // Eight defaults, decline reuse, the new key for pass, then filing.
+    let input = format!("{}n\nsk-or-new\n\n", "\n".repeat(8));
+    let (out, _) = f.run(
+        &["setup", "--interactive", "--json", "--key-store", "pass"],
+        &input,
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(f.stored("pass.key").as_deref(), Some("sk-or-new"));
+}
+
+#[test]
+fn the_key_store_menu_starts_with_the_platform_default() {
+    let f = Fixture::new();
+    f.add_key_tools();
+    let options =
+        secrets::key_store_options(cfg!(target_os = "macos"), |tool| f.bin.join(tool).exists());
+    // Eight defaults, the last menu entry (env), its variable, then filing.
+    let input = format!("{}{}\n\n\n", "\n".repeat(8), options.len());
+    let (out, v) = f.run_with(
+        &["setup", "--interactive", "--json"],
+        &input,
+        &[("OPENROUTER_API_KEY", "sk-or-env")],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let first = if cfg!(target_os = "macos") {
+        "keychain"
+    } else {
+        "secret-service"
+    };
+    assert_eq!(options[0].flag(), first);
+    assert!(
+        stderr(&out).contains(&format!("  1) {} (default)", options[0].label())),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(v["setup"]["key_store"], "env");
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn keychain_is_the_default_on_macos() {
+    let f = Fixture::new();
+    f.add_key_tools();
+    fs::write(f.bin.join("keychain.key"), "sk-or-keychain\n").unwrap();
+    let (out, v) = f.run(
+        &["setup", "--yes", "--json", "--himalaya-account", "work"],
+        "",
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(v["setup"]["key_store"], "keychain");
+    assert_eq!(
+        f.config()["provider"]["api_key_command"],
+        json!([
+            f.bin.join("security").to_str().unwrap(),
+            "find-generic-password",
+            "-s",
+            "mailtriage",
+            "-a",
+            "openrouter",
+            "-w"
+        ])
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn secret_service_is_the_default_on_linux_when_available() {
+    let f = Fixture::new();
+    f.add_key_tools();
+    fs::write(f.bin.join("secret-service.key"), "sk-or-linux\n").unwrap();
+    let (out, v) = f.run(
+        &["setup", "--yes", "--json", "--himalaya-account", "work"],
+        "",
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(v["setup"]["key_store"], "secret-service");
 }
