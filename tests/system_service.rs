@@ -277,6 +277,52 @@ fn files_mailtriage_did_not_write_are_never_touched() {
     }
 }
 
+/// Final review I3: the note for a key from the environment names the
+/// platform's own store, the account and the config, and warns against
+/// putting the key into the service file.
+#[test]
+fn the_install_note_names_the_platform_store_and_the_account() {
+    for (manager, store, file) in [
+        (
+            Manager::Launchd,
+            "--key-store keychain` (or `--key-store command`)",
+            "plist",
+        ),
+        (
+            Manager::Systemd,
+            "--key-store secret-service` (or `--key-store pass`, `--key-store command`)",
+            "unit",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = context(manager, dir.path());
+        let path = dir.path().join("mailtriage.json");
+        let mut c = mailtriage::config::default_config();
+        c.provider.kind = "openrouter".into();
+        c.provider.model = "typesafe/jev-1.13".into();
+        c.provider.endpoint = mailtriage::provider::DECISIONS_ENDPOINT.into();
+        c.provider.api_key_env = "OPENROUTER_API_KEY".into();
+        mailtriage::config::save(&path, &c).unwrap();
+        let service = mailtriage::service::Service::open(&path).unwrap();
+        let out = system_service::install_account(&service, &path, "work", 60, 100, &ctx).unwrap();
+        let note = out["note"].as_str().unwrap();
+        let config = fs::canonicalize(&path).unwrap();
+        assert!(
+            note.contains(&format!(
+                "`mailtriage setup --update --config {} --account work {store}",
+                config.display()
+            )),
+            "{note}"
+        );
+        assert!(
+            note.contains(&format!(
+                "Do not put the key into the {file} yourself: that file is readable, and `service install` rewrites it."
+            )),
+            "{note}"
+        );
+    }
+}
+
 #[test]
 fn a_failing_manager_is_exit_3() {
     let dir = tempfile::tempdir().unwrap();

@@ -178,14 +178,11 @@ pub fn run(args: &SetupArgs, path: &Path, p: &mut Prompter) -> Result<Value> {
     // 5. Classifier.
     let current = (!matches!(intent, Intent::Create)).then(|| cfg.provider.clone());
     let (provider, store) = classifier_step(args, p, current.as_ref())?;
-    // 6. Categories.
+    // 6. Categories: a new account gets the defaults, shown once the
+    // config is written.
     let categories = match &previous {
         Some(a) => a.categories.clone(),
-        None => {
-            let categories = default_categories();
-            p.say(&categories_hint(&name, &categories));
-            categories
-        }
+        None => default_categories(),
     };
     // 7. Filing.
     let mode = filing_step(
@@ -245,15 +242,24 @@ pub fn run(args: &SetupArgs, path: &Path, p: &mut Prompter) -> Result<Value> {
     config::save(path, &cfg).map_err(|_| unwritable())?;
     let path = fs::canonicalize(path).map_err(|_| unwritable())?;
     p.say(&format!("Wrote {}.", path.display()));
+    let shown = printed_config(p, &path);
+    let shown = shown.as_deref();
+    if previous.is_none() {
+        p.say(&categories_hint(
+            shown,
+            &name,
+            &cfg.accounts[&name].categories,
+        ));
+    }
     // 9. Check.
-    let doctor = doctor_step(p, &path, &name, &cfg.provider, &engine);
-    next_steps(p, &name, mode);
+    let doctor = doctor_step(p, &path, shown, &name, &cfg.provider, &engine);
     // 10. Service, only when the state check passed: otherwise every pass
     // of the service would fail.
     let state_ok = doctor["items"]
         .as_array()
         .is_some_and(|items| items.iter().all(|i| i["check"] != "state"));
-    let service = service_step(args, p, &path, &name, &cfg.provider, state_ok)?;
+    let service = service_step(args, p, &path, shown, &name, &cfg.provider, state_ok)?;
+    next_steps(p, shown, &name, mode, !service.is_null());
     Ok(json!({"schema_version": 1, "setup": {
         "config": path,
         "account": name,
@@ -1045,11 +1051,15 @@ fn default_categories() -> Vec<Category> {
     categories
 }
 
-fn categories_hint(name: &str, categories: &[Category]) -> String {
+fn categories_hint(config: Option<&Path>, name: &str, categories: &[Category]) -> String {
     let names: Vec<&str> = categories.iter().map(|c| c.name.as_str()).collect();
+    let file = ["--account", name, "--file", "categories.json"];
     format!(
-        "Categories: {}. Each files into a folder of the same name. To change them: `mailtriage categories export --account {name} > categories.json`, edit the file, `mailtriage categories validate --account {name} --file categories.json`, then `mailtriage categories apply --account {name} --file categories.json`.",
-        names.join(", ")
+        "Categories: {}. Each files into a folder of the same name. To change them: `{} > categories.json`, edit the file, `{}`, then `{}`.",
+        names.join(", "),
+        mailtriage_line(config, &["categories", "export"], &["--account", name]),
+        mailtriage_line(config, &["categories", "validate"], &file),
+        mailtriage_line(config, &["categories", "apply"], &file),
     )
 }
 
@@ -1111,6 +1121,7 @@ fn filing_step(
 fn doctor_step(
     p: &mut Prompter,
     path: &Path,
+    shown: Option<&Path>,
     name: &str,
     provider: &ProviderConfig,
     engine: &HimalayaConfig,
@@ -1131,8 +1142,24 @@ fn doctor_step(
                 None,
                 format!("check the provider block in {}", path.display()),
             ));
+            // Asking for the store keeps setup from keeping the broken key
+            // along with the classifier.
             let key_fix = if key["key_source"] == "command" {
-                "run `mailtriage setup --update` and store the key again".to_owned()
+                let store = provider
+                    .api_key_command
+                    .as_deref()
+                    .and_then(secrets::store_of)
+                    .unwrap_or(KeyStore::Command);
+                let setup = mailtriage_line(
+                    shown,
+                    &["setup", "--update"],
+                    &["--account", name, "--key-store", store.flag()],
+                );
+                if store == KeyStore::Command {
+                    format!("run `{setup}` and give a command that prints the key")
+                } else {
+                    format!("run `{setup}` to store the key again")
+                }
             } else {
                 format!(
                     "export {}=<your OpenRouter key> where mailtriage runs",
@@ -1168,7 +1195,10 @@ fn doctor_step(
                     "filing",
                     problems == 0,
                     None,
-                    format!("run `mailtriage filing status --account {name}`"),
+                    format!(
+                        "run `{}`",
+                        mailtriage_line(shown, &["filing", "status"], &["--account", name])
+                    ),
                 ));
             }
         }
@@ -1196,17 +1226,42 @@ fn check_item(check: &str, ready: bool, error: Option<String>, fix: String) -> V
     item
 }
 
-fn next_steps(p: &mut Prompter, name: &str, mode: FilingMode) {
+/// What to run next. With the service installed, `sync` and `watch` would
+/// compete with it for the account lock, so they are not suggested.
+fn next_steps(
+    p: &mut Prompter,
+    shown: Option<&Path>,
+    name: &str,
+    mode: FilingMode,
+    installed: bool,
+) {
+    let account = ["--account", name];
     p.say("");
-    p.say(&format!(
-        "Next: `mailtriage sync --account {name}` classifies new mail; `mailtriage watch --account {name}` keeps doing it."
-    ));
+    if installed {
+        p.say(&format!(
+            "Next: the background service runs `watch`. `{}` shows how it runs; `{}` lists the mail that needs attention.",
+            mailtriage_line(shown, &["service", "status"], &account),
+            mailtriage_line(shown, &["list"], &account),
+        ));
+    } else {
+        p.say(&format!(
+            "Next: `{}` classifies new mail; `{}` keeps doing it.",
+            mailtriage_line(shown, &["sync"], &account),
+            mailtriage_line(shown, &["watch"], &account),
+        ));
+    }
     if mode == FilingMode::DryRun {
         p.say(&format!(
-            "Filing is a dry run: `mailtriage filing plan --account {name}` shows what would move."
+            "Filing is a dry run: `{}` shows what would move.",
+            mailtriage_line(shown, &["filing", "plan"], &account),
         ));
         p.say(&format!(
-            "Go live only after the provider checklist (docs/verification.md): `mailtriage filing enable --account {name} --mode live`."
+            "Go live only after the provider checklist (docs/verification.md): `{}`.",
+            mailtriage_line(
+                shown,
+                &["filing", "enable"],
+                &["--account", name, "--mode", "live"]
+            ),
         ));
     }
 }
@@ -1219,11 +1274,12 @@ fn service_step(
     args: &SetupArgs,
     p: &mut Prompter,
     path: &Path,
+    shown: Option<&Path>,
     name: &str,
     provider: &ProviderConfig,
     state_ok: bool,
 ) -> Result<Value> {
-    let retry = install_command(path, name);
+    let retry = install_command(args, path, name);
     if !state_ok {
         if args.service == Some(true) || (args.service.is_none() && p.enabled()) {
             p.say(&format!(
@@ -1238,15 +1294,16 @@ fn service_step(
             Ok(ctx) => {
                 let env_key = provider.kind == "openrouter" && provider.api_key_command.is_none();
                 if env_key {
-                    let store = shell_line(&[
-                        "mailtriage",
-                        "setup",
-                        "--update",
-                        "--account",
-                        name,
-                        "--key-store",
-                        system_service::platform_key_stores(ctx.manager)[0],
-                    ]);
+                    let store = mailtriage_line(
+                        shown,
+                        &["setup", "--update"],
+                        &[
+                            "--account",
+                            name,
+                            "--key-store",
+                            system_service::platform_key_stores(ctx.manager)[0],
+                        ],
+                    );
                     p.say(&format!(
                         "The key comes from {}, which the background service does not inherit, so the default is no. Store the key first: `{store}`.",
                         provider.api_key_env
@@ -1291,8 +1348,9 @@ fn service_step(
         err(
             service::exit_code(&e),
             format!(
-                "{STEP_SERVICE}: {}; the config is written: fix this, then run `{retry}`",
-                error_text(&e)
+                "{STEP_SERVICE}: {}; the config is written: {}",
+                error_text(&e),
+                service_fix(SERVICE_SUPPORTED, &retry)
             ),
         )
     })?;
@@ -1309,17 +1367,75 @@ fn service_step(
     Ok(out)
 }
 
-/// `mailtriage service install` for the written config and `name`.
-fn install_command(path: &Path, name: &str) -> String {
-    shell_line(&[
-        OsStr::new("mailtriage"),
-        OsStr::new("service"),
-        OsStr::new("install"),
-        OsStr::new("--config"),
-        path.as_os_str(),
-        OsStr::new("--account"),
-        OsStr::new(name),
-    ])
+/// Whether this platform has a service manager setup can use.
+const SERVICE_SUPPORTED: bool = cfg!(any(target_os = "macos", target_os = "linux"));
+
+/// What fixes a failed step 10 once the config is written: the service
+/// command alone, or, where no service is supported, nothing to retry.
+fn service_fix(supported: bool, retry: &str) -> String {
+    if supported {
+        format!("fix this, then run `{retry}`")
+    } else {
+        "drop --service install; run `mailtriage watch` under a supervisor of your own".to_owned()
+    }
+}
+
+/// `mailtriage service install` for the written config, `name` and this
+/// run's interval and limit.
+fn install_command(args: &SetupArgs, path: &Path, name: &str) -> String {
+    let interval = args.interval_seconds.to_string();
+    let limit = args.limit.to_string();
+    mailtriage_line(
+        Some(path),
+        &["service", "install"],
+        &[
+            "--account",
+            name,
+            "--interval-seconds",
+            &interval,
+            "--limit",
+            &limit,
+        ],
+    )
+}
+
+/// The config that printed `mailtriage` commands must pass: `None` when
+/// commands run here without `--config` find `path` (canonical). Warns
+/// once when a `./mailtriage.json` in the working directory shadows it.
+fn printed_config(p: &mut Prompter, path: &Path) -> Option<PathBuf> {
+    let env = std::env::var_os("MAILTRIAGE_CONFIG");
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let Ok(cwd) = std::env::current_dir() else {
+        return Some(path.to_owned());
+    };
+    let found = config::resolve_path(None, env.as_deref(), &cwd, home.as_deref())
+        .ok()
+        .and_then(|found| fs::canonicalize(found).ok());
+    if found.as_deref() == Some(path) {
+        return None;
+    }
+    let local = cwd.join(config::CONFIG_FILE);
+    if env.as_deref().is_none_or(OsStr::is_empty) && local.exists() {
+        p.say(&format!(
+            "Warning: {} takes precedence over {} for commands run in {} without --config, so the commands below pass --config.",
+            local.display(),
+            path.display(),
+            cwd.display()
+        ));
+    }
+    Some(path.to_owned())
+}
+
+/// A `mailtriage` command for messages: the subcommand `words`, then
+/// `--config` when `config` is given, then `args`.
+fn mailtriage_line(config: Option<&Path>, words: &[&str], args: &[&str]) -> String {
+    let mut line: Vec<&OsStr> = vec![OsStr::new("mailtriage")];
+    line.extend(words.iter().map(OsStr::new));
+    if let Some(config) = config {
+        line.extend([OsStr::new("--config"), config.as_os_str()]);
+    }
+    line.extend(args.iter().map(OsStr::new));
+    shell_line(&line)
 }
 
 fn key_source_value(provider: &ProviderConfig) -> Value {
@@ -1385,7 +1501,7 @@ fn error_text(error: &anyhow::Error) -> String {
 }
 
 /// A command line for messages, quoting words the shell would split.
-fn shell_line<S: AsRef<OsStr>>(words: &[S]) -> String {
+pub(crate) fn shell_line<S: AsRef<OsStr>>(words: &[S]) -> String {
     words
         .iter()
         .map(|word| {
@@ -1461,6 +1577,26 @@ mod tests {
                 PathBuf::from("/h/.config/himalaya/config.toml"),
                 PathBuf::from("/h/.himalayarc"),
             ]
+        );
+    }
+
+    /// Final review I3: where no service manager is supported, retrying the
+    /// install cannot help.
+    #[test]
+    fn a_failed_service_step_names_its_fix() {
+        let retry = "mailtriage service install --config /c.json --account work";
+        assert_eq!(
+            service_fix(true, retry),
+            format!("fix this, then run `{retry}`")
+        );
+        let unsupported = service_fix(false, retry);
+        assert!(
+            unsupported.starts_with("drop --service install"),
+            "{unsupported}"
+        );
+        assert!(
+            !unsupported.contains("service install --config"),
+            "{unsupported}"
         );
     }
 

@@ -1210,6 +1210,138 @@ fn setup_can_install_the_background_service() {
     if cfg!(target_os = "linux") {
         assert!(stderr(&out).contains("loginctl enable-linger"));
     }
+    // Final review I3: the note names this platform's store and the
+    // account; next steps leave the lock to the service.
+    let note = service["note"].as_str().unwrap();
+    let store = if cfg!(target_os = "macos") {
+        "--key-store keychain`"
+    } else {
+        "--key-store secret-service`"
+    };
+    assert!(note.contains(" --account work --key-store "), "{note}");
+    assert!(note.contains(store), "{note}");
+    assert!(note.contains("setup --update --config "), "{note}");
+    assert!(note.contains("`service install` rewrites it"), "{note}");
+    let err = stderr(&out);
+    assert!(
+        err.contains("`mailtriage service status --account work`"),
+        "{err}"
+    );
+    assert!(err.contains("`mailtriage list --account work`"), "{err}");
+    assert!(!err.contains("`mailtriage sync"), "{err}");
+    assert!(!err.contains("`mailtriage watch"), "{err}");
+}
+
+/// Final review I3: every command setup prints finds the written config.
+#[test]
+fn printed_commands_name_the_config_unless_it_is_found_without() {
+    let f = Fixture::new();
+    // The home config: found from anywhere, so no --config.
+    let (out, _) = f.run(&WORK_ENV, "");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(err.contains("`mailtriage sync --account work`"), "{err}");
+    assert!(
+        err.contains("`mailtriage categories export --account work > categories.json`"),
+        "{err}"
+    );
+    assert!(!err.contains("--config"), "{err}");
+    // Another path: every printed command carries it, quoted.
+    let other = f.cwd.join("Some Dir/x.json");
+    let (out, v) = f.run(
+        &[&WORK_ENV[..], &["--config", other.to_str().unwrap()]].concat(),
+        "",
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let flag = format!("--config '{}'", v["setup"]["config"].as_str().unwrap());
+    let err = stderr(&out);
+    for command in [
+        "mailtriage categories export",
+        "mailtriage categories validate",
+        "mailtriage categories apply",
+        "mailtriage sync",
+        "mailtriage watch",
+        "mailtriage filing plan",
+        "mailtriage filing enable",
+    ] {
+        assert!(
+            err.contains(&format!("`{command} {flag} --account work")),
+            "{command}: {err}"
+        );
+    }
+    assert!(!err.contains("takes precedence"), "{err}");
+}
+
+/// Final review I3: a `./mailtriage.json` in the working directory would
+/// win over the written config, so setup warns and passes --config.
+#[test]
+fn a_shadowing_local_config_is_named_in_a_warning() {
+    let f = Fixture::new();
+    assert!(f.run(&["init", "--json"], "").0.status.success());
+    let (out, v) = f.run(&WORK_ENV, "");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let written = v["setup"]["config"].as_str().unwrap();
+    let err = stderr(&out);
+    assert_eq!(err.matches("takes precedence over").count(), 1, "{err}");
+    assert!(
+        err.contains(&format!(
+            "`mailtriage sync --config {written} --account work`"
+        )),
+        "{err}"
+    );
+}
+
+/// Final review I3: the doctor's key fix keeps the store the key comes
+/// from, and asks for it explicitly, so it does not keep the broken key.
+#[test]
+fn the_doctor_key_fix_names_the_current_store() {
+    let f = Fixture::new();
+    fs::write(f.bin.join("pass.key"), "sk-or-old\n").unwrap();
+    let (out, _) = f.run(
+        &[
+            "setup",
+            "--yes",
+            "--json",
+            "--himalaya-account",
+            "work",
+            "--key-store",
+            "pass",
+        ],
+        "",
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let key_fix = |v: &Value| {
+        v["setup"]["doctor"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["check"] == "key")
+            .unwrap()["fix"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let update = ["setup", "--yes", "--update", "--json", "--account", "work"];
+    fs::remove_file(f.bin.join("pass.key")).unwrap();
+    let (out, v) = f.run(&update, "");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        key_fix(&v).contains("`mailtriage setup --update --account work --key-store pass`"),
+        "{v}"
+    );
+    // A command of the user's own.
+    let key = f.home.join("key.txt");
+    fs::write(&key, "sk-or-file\n").unwrap();
+    let cat = format!("cat '{}'", key.display());
+    let (out, _) = f.run(&[&update[..], &["--key-command", &cat]].concat(), "");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    fs::remove_file(&key).unwrap();
+    let (out, v) = f.run(&update, "");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        key_fix(&v).contains("`mailtriage setup --update --account work --key-store command`"),
+        "{v}"
+    );
 }
 
 #[test]
@@ -1294,7 +1426,10 @@ fn service_errors_name_step_10_and_keep_their_exit_code() {
         m.contains("then run `mailtriage service install --config "),
         "{m}"
     );
-    assert!(m.ends_with(" --account work`"), "{m}");
+    assert!(
+        m.ends_with(" --account work --interval-seconds 60 --limit 100`"),
+        "{m}"
+    );
     assert_eq!(fs::read_to_string(&unit).unwrap(), "the user's own file\n");
     assert!(f.config_path().exists());
     // A failing manager tool: exit 3.

@@ -188,6 +188,17 @@ pub fn store_command(store: KeyStore, tool: &Path) -> Option<Vec<String>> {
     Some(with_tool(tool, args))
 }
 
+/// The tool-backed store whose read command `command` is, if any.
+pub fn store_of(command: &[String]) -> Option<KeyStore> {
+    let tool = Path::new(command.first()?);
+    [KeyStore::Keychain, KeyStore::SecretService, KeyStore::Pass]
+        .into_iter()
+        .find(|&store| {
+            tool.file_name().and_then(|name| name.to_str()) == store.tool()
+                && read_command(store, tool).as_deref() == Some(command)
+        })
+}
+
 fn with_tool(tool: &Path, args: &[&str]) -> Vec<String> {
     std::iter::once(tool.display().to_string())
         .chain(args.iter().map(|arg| (*arg).to_owned()))
@@ -305,5 +316,27 @@ mod tests {
         );
         assert_eq!(read_command(KeyStore::Env, tool), None);
         assert_eq!(store_command(KeyStore::Command, tool), None);
+    }
+
+    #[test]
+    fn a_read_command_names_its_store() {
+        for (store, tool) in [
+            (KeyStore::Keychain, "/usr/bin/security"),
+            (KeyStore::SecretService, "/usr/bin/secret-tool"),
+            (KeyStore::Pass, "/opt/homebrew/bin/pass"),
+        ] {
+            let command = read_command(store, Path::new(tool)).unwrap();
+            assert_eq!(store_of(&command), Some(store));
+        }
+        let mut other = read_command(KeyStore::Pass, Path::new("/usr/bin/pass")).unwrap();
+        other[2] = "other/key".into();
+        assert_eq!(store_of(&other), None);
+        let renamed = read_command(KeyStore::Pass, Path::new("/usr/bin/gopass")).unwrap();
+        assert_eq!(store_of(&renamed), None);
+        assert_eq!(
+            store_of(&["/bin/sh".into(), "-c".into(), "cat k".into()]),
+            None
+        );
+        assert_eq!(store_of(&[]), None);
     }
 }

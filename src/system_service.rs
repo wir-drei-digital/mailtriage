@@ -9,6 +9,7 @@ use crate::{
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::{
+    ffi::OsStr,
     fs,
     path::{Path, PathBuf},
     time::Duration,
@@ -497,12 +498,39 @@ pub fn install_account(
     let mut out = install(ctx, &unit)?;
     let provider = &service.config.provider;
     if provider.kind == "openrouter" && provider.api_key_command.is_none() {
-        out["note"] = json!(format!(
-            "The key comes from {}, which the service does not inherit. Store it with `mailtriage setup --update --key-store keychain` (or secret-service, pass, command), or add {} to the service's environment yourself.",
-            provider.api_key_env, provider.api_key_env
-        ));
+        out["note"] = json!(env_key_note(ctx.manager, &unit, &provider.api_key_env));
     }
     Ok(out)
+}
+
+/// Why a service whose key comes from the variable `env` will not find it,
+/// and the setup command that moves the key into the platform's own store.
+fn env_key_note(manager: Manager, unit: &Unit, env: &str) -> String {
+    let stores = platform_key_stores(manager);
+    let setup = crate::setup::shell_line(&[
+        OsStr::new("mailtriage"),
+        OsStr::new("setup"),
+        OsStr::new("--update"),
+        OsStr::new("--config"),
+        unit.config.as_os_str(),
+        OsStr::new("--account"),
+        OsStr::new(&unit.account),
+        OsStr::new("--key-store"),
+        OsStr::new(stores[0]),
+    ]);
+    let alternatives: Vec<String> = stores[1..]
+        .iter()
+        .chain(&["command"])
+        .map(|s| format!("`--key-store {s}`"))
+        .collect();
+    let file = match manager {
+        Manager::Launchd => "plist",
+        Manager::Systemd => "unit",
+    };
+    format!(
+        "The key comes from {env}, which the service does not inherit. Store it with `{setup}` (or {}). Do not put the key into the {file} yourself: that file is readable, and `service install` rewrites it.",
+        alternatives.join(", ")
+    )
 }
 
 /// `service status`: manager fields plus the last sync pass from the state
