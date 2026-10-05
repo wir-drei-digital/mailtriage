@@ -12,13 +12,15 @@ use std::{
     ffi::OsStr,
     fs,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 pub const LABEL_PREFIX: &str = "digital.wirdrei.mailtriage";
 const PLIST_MARKER: &str = "<key>XMailtriageManaged</key>";
 const UNIT_MARKER: &str = "# managed by mailtriage";
 const TOOL_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long `install`/`uninstall` wait for launchd to drop a booted-out job.
+const BOOTOUT_WAIT: Duration = Duration::from_secs(10);
 const TOOL_MAX_OUTPUT: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -285,6 +287,30 @@ fn target(ctx: &Context, account: &str) -> String {
     format!("gui/{}/{}", ctx.uid, label(account))
 }
 
+/// Unloads a loaded launchd job and waits until launchd reports it gone:
+/// `bootout` returns before the job is fully removed, and a `bootstrap`
+/// right after it fails ("Bootstrap failed: 5").
+fn bootout(ctx: &Context, target: &str) -> Result<()> {
+    if tool_output(ctx, &["print", target]).is_none() {
+        return Ok(());
+    }
+    tool(ctx, &["bootout", target])?;
+    let deadline = Instant::now() + BOOTOUT_WAIT;
+    while tool_output(ctx, &["print", target]).is_some() {
+        if Instant::now() >= deadline {
+            return Err(err(
+                3,
+                format!(
+                    "launchd still lists {target} {} s after `launchctl bootout`; run `launchctl bootout {target}` and retry",
+                    BOOTOUT_WAIT.as_secs()
+                ),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Ok(())
+}
+
 pub fn install(ctx: &Context, unit: &Unit) -> Result<Value> {
     let path = ctx.unit_path(&unit.account);
     refuse_unmarked(ctx, &path)?;
@@ -299,10 +325,7 @@ pub fn install(ctx: &Context, unit: &Unit) -> Result<Value> {
                 use std::os::unix::fs::PermissionsExt;
                 fs::set_permissions(&unit.log_dir, fs::Permissions::from_mode(0o700))?;
             }
-            let target = target(ctx, &unit.account);
-            if tool_output(ctx, &["print", &target]).is_some() {
-                tool(ctx, &["bootout", &target])?;
-            }
+            bootout(ctx, &target(ctx, &unit.account))?;
             fs::write(&path, plist(unit))?;
             let domain = format!("gui/{}", ctx.uid);
             tool(ctx, &["bootstrap", &domain, &path.display().to_string()])?;
@@ -331,10 +354,7 @@ pub fn uninstall(ctx: &Context, account: &str) -> Result<Value> {
     let existed = path.exists();
     match ctx.manager {
         Manager::Launchd => {
-            let target = target(ctx, account);
-            if tool_output(ctx, &["print", &target]).is_some() {
-                tool(ctx, &["bootout", &target])?;
-            }
+            bootout(ctx, &target(ctx, account))?;
             if existed {
                 fs::remove_file(&path)?;
             }

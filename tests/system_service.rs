@@ -177,14 +177,16 @@ fn launchd_install_reload_status_and_uninstall() {
             dir.path().join("logs/work.err")
         ])
     );
-    // Installing again reloads: bootout, then bootstrap, same file.
+    // Installing again reloads: bootout, wait until launchd no longer lists
+    // the job, then bootstrap, same file.
     system_service::install(&ctx, &unit).unwrap();
     let log = calls(dir.path(), "launchctl");
     assert_eq!(
-        log[log.len() - 3..],
+        log[log.len() - 4..],
         [
             format!("print {target}"),
             format!("bootout {target}"),
+            format!("print {target}"),
             format!("bootstrap gui/501 {}", path.display())
         ]
     );
@@ -408,4 +410,45 @@ fn service_commands_through_the_cli() {
         run(&["service", "install", "--account", "nobody", "--json"]).0,
         Some(2)
     );
+}
+
+/// Fake `launchctl` that, like the real one, still lists a job briefly after
+/// `bootout` returns (two more `print` calls) and refuses `bootstrap` while it does.
+const SLOW_LAUNCHCTL: &str = "#!/bin/sh\ndir=\"$(dirname \"$0\")\"\necho \"$*\" >> \"$dir/launchctl.log\"\ncase \"$1\" in\n  bootstrap) [ -f \"$dir/loaded\" ] && exit 5; touch \"$dir/loaded\" ;;\n  bootout) [ -f \"$dir/loaded\" ] || exit 3; echo 2 > \"$dir/lingering\" ;;\n  print)\n    if [ -f \"$dir/lingering\" ]; then n=$(cat \"$dir/lingering\"); if [ \"$n\" -le 0 ]; then rm -f \"$dir/lingering\" \"$dir/loaded\"; exit 113; fi; echo $((n-1)) > \"$dir/lingering\"; fi\n    [ -f \"$dir/loaded\" ] || exit 113\n    printf '%s = {\\n\\tstate = running\\n}\\n' \"$2\" ;;\n  *) exit 64 ;;\nesac\n";
+
+#[test]
+fn reinstall_waits_until_launchd_drops_the_old_job() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = context(Manager::Launchd, dir.path());
+    write_tool(dir.path(), "launchctl", SLOW_LAUNCHCTL);
+    let unit = unit_in(dir.path());
+    system_service::install(&ctx, &unit).unwrap();
+    // Reinstalling a loaded job: bootout, then print until it is gone, then bootstrap.
+    system_service::install(&ctx, &unit).unwrap();
+    let log = calls(dir.path(), "launchctl");
+    let target = "gui/501/digital.wirdrei.mailtriage.work";
+    let after_bootout: Vec<&str> = log
+        .iter()
+        .skip_while(|call| !call.starts_with("bootout"))
+        .map(String::as_str)
+        .collect();
+    assert_eq!(after_bootout[0], format!("bootout {target}"));
+    assert_eq!(
+        after_bootout
+            .iter()
+            .filter(|c| c.starts_with("print"))
+            .count(),
+        3
+    );
+    assert!(after_bootout
+        .last()
+        .unwrap()
+        .starts_with("bootstrap gui/501 "));
+    assert_eq!(
+        system_service::status(Some(&ctx), "work", &unit.log_dir)["running"],
+        true
+    );
+    // Uninstall waits the same way, so an install right after it succeeds.
+    system_service::uninstall(&ctx, "work").unwrap();
+    system_service::install(&ctx, &unit).unwrap();
 }
