@@ -820,7 +820,7 @@ and Fastmail or a Dovecot host, record in `docs/verification.md`:
 
 Outcome per provider: go, go with noted differences, or no-go. A no-go blocks
 enabling `live` for that provider until resolved and is documented in the
-README.
+guide's [Provider check](../../guide.md#provider-check) section.
 
 ## Out of scope
 

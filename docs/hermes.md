@@ -8,15 +8,17 @@ Hermes, or any other agent, calls `mailtriage` as an ordinary process. It needs 
 2. Run setup without prompts, as the user that will run mailtriage:
 
    ```sh
-   /opt/mailtriage/mailtriage setup --yes --himalaya-account work --key-store env --json
+   /opt/mailtriage/mailtriage setup --yes --himalaya-account work --key-store pass --key-stored --json
    ```
+
+   This example assumes a person has stored the key with `pass insert mailtriage/openrouter` as that user.
 
    - `--yes` turns prompts off. Each answer comes from its flag or its default.
    - `--himalaya-account NAME` is required: an account with IMAP in the Himalaya configuration. Add `--himalaya-binary PATH` when `himalaya` is not on the agent's `PATH`, and `--himalaya-config PATH` when the file is not in Himalaya's default location. Setup stores both as absolute paths.
-   - The key, one of:
-     - `--key-store env`, with `--key-env NAME` when the variable is not `OPENROUTER_API_KEY`: mailtriage reads the key from the variable in its own environment.
-     - `--key-command 'COMMAND'`: a shell command that prints the key. Setup runs it once to check it.
+   - The key, preferably from a key store or a key command, so no process needs it in its environment:
      - `--key-store keychain`, `secret-service` or `pass` with `--key-stored`: a person has already stored the key with that store's command (see [Key stores](guide.md#key-stores)). Setup records the read command and checks that it prints a key.
+     - `--key-command 'COMMAND'`: a shell command that prints the key. Setup runs it once to check it.
+     - `--key-store env`, with `--key-env NAME` when the variable is not `OPENROUTER_API_KEY`: mailtriage reads the key from the variable in its own environment.
    - `--service install` also installs `watch` as a launchd agent or systemd user unit (see [Background service](guide.md#background-service)). The default is `skip`.
    - Optional: `--account`, `--identity`, `--timezone`, `--brief`, `--mailbox` (repeat for several folders), `--filing off|dry-run`, `--interval-seconds`, `--limit`.
    - To change an existing config, add `--update`.
@@ -31,7 +33,7 @@ Hermes, or any other agent, calls `mailtriage` as an ordinary process. It needs 
    | 5 | The config already exists, or a service file exists that mailtriage did not write. | For the config, add `--update` if the user wants it changed. For a service file, report the path to the user. |
 
 3. Give the user that runs mailtriage read and write access to `state_dir` and to the directory that holds `mailtriage.json`. mailtriage creates `mailtriage.lock` there and rewrites the file for `filing enable`, `filing disable` and `categories apply`. That user also needs read access to the Himalaya configuration and whatever its password command reads.
-4. With `--key-store env`, put the OpenRouter key in the environment of the agent process. mailtriage reads the variable named by `provider.api_key_env` from its own environment, which it inherits from the agent. It does not read a `.env` file. Set the variable in the agent's service configuration (for example systemd `EnvironmentFile=`; see [Your own supervisor](guide.md#your-own-supervisor)). With a key command, nothing needs to be set. `sync`, `watch`, `classify` and `reclassify` need the key; `list`, `read`, `correct`, `done`, `reopen` and the `filing` commands do not.
+4. Prefer a key store or a key command (`provider.api_key_command`): mailtriage then runs the command itself, and nothing needs to be set in the agent's environment. Only with `--key-store env` must the variable named by `provider.api_key_env` reach the mailtriage process, which inherits its environment from the agent. mailtriage does not read a `.env` file or any other key file. `sync`, `watch`, `classify` and `reclassify` need the key; `list`, `read`, `correct`, `done`, `reopen` and the `filing` commands do not.
 5. Check the setup from the agent's own environment:
 
    ```sh

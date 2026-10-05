@@ -110,7 +110,7 @@ mailtriage setup
 - Himalaya's default is the first existing file of: `~/Library/Application Support/himalaya/config.toml` on macOS, or `$XDG_CONFIG_HOME/himalaya/config.toml` on Linux when `XDG_CONFIG_HOME` is an absolute path; then `~/.config/himalaya/config.toml`; then `~/.himalayarc`.
 - Account: setup offers only accounts with an IMAP backend. The default is the account being updated, else Himalaya's default account.
 - The menu's last entry runs `himalaya configure`, Himalaya's own wizard, attached to your terminal. Setup also offers it when no IMAP account exists. See [Set up Himalaya](#1-set-up-himalaya) to write the file yourself.
-- Without prompts, `--himalaya-account` is required, and `himalaya configure` never runs. An account updated by `--account NAME` keeps its stored Himalaya account instead.
+- Without prompts, `--himalaya-account` is required, and `himalaya configure` never runs. An account updated by `--account NAME` keeps its stored Himalaya account instead. Changing the Himalaya account of a checked account breaks its binding; see [Updating an account](#updating-an-account).
 - Check: setup runs `himalaya account check` for the IMAP backend. If it fails, setup exits 3 and prints the command that shows why. It never prints Himalaya's output.
 
 **Step 3, account details.**
@@ -119,7 +119,7 @@ mailtriage setup
 - `--identity`: your address. Default the account's `email` in the Himalaya file.
 - `--timezone`: an IANA name such as `Europe/Zurich`. Default `TZ`, then the zone `/etc/localtime` points to, then `UTC`.
 - `--brief`: optional. One line about you that helps classification. It is sent to the provider with every message.
-- When you update an account, its current values are the defaults.
+- When you update an account, its current values are the defaults. Its identity is bound after the first check; see [Updating an account](#updating-an-account).
 
 **Step 4, folders.**
 
@@ -142,7 +142,7 @@ mailtriage setup
 
 **Step 8, write.** Setup validates the whole config and writes it atomically with mode 0600. The state directory is created with mode 0700. If the result is invalid, setup exits 2 and writes nothing.
 
-**Step 9, check.** Setup runs `doctor` for the account. It prints each item (`provider`, `key`, `mail`, and `filing` when filing is on) as `ok`, or as `not ready` with the one command that fixes it. Setup exits 0 even when an item is not ready.
+**Step 9, check.** Setup runs `doctor` for the account. It prints each item (`provider`, `key`, `mail`, and `filing` when filing is on) as `ok`, or as `not ready` with the one command that fixes it. If `doctor` itself fails, for example after a changed [account binding](#updating-an-account), setup reports a single not-ready `state` item instead. Setup exits 0 even when an item is not ready.
 
 **Step 10, service.** With prompts on macOS or Linux, setup asks whether to run `watch` in the background (default yes); on other platforms it skips this step. Without prompts, `--service install` installs it and `--service skip` (the default) does not. `--interval-seconds` (1 to 86400, default 60) and `--limit` (1 to 500, default 100) are passed to `watch`. See [Background service](#background-service).
 
@@ -197,7 +197,7 @@ This keeps the model, endpoint, timeout and `api_key_env`, so no mail is classif
 - `--yes` turns prompts off. Each value comes from its flag or its default. A value without a default, such as `--himalaya-account`, exits 2 and names the flag.
 - A flag always answers its question; setup does not ask it.
 - Choosing "Abort" in step 1 exits 2 with `setup aborted; nothing was changed`.
-- End of input exits 2 with `setup aborted: input ended`. The config is written in step 8, so an abort at the service question keeps it. Run `mailtriage service install` for the service.
+- End of input exits 2 with `setup aborted: input ended`. The config is written in step 8, so an abort at the service question keeps it. Run `mailtriage service install --account NAME` for the service.
 
 ### Updating an account
 
@@ -209,6 +209,12 @@ This keeps the model, endpoint, timeout and `api_key_env`, so no mail is classif
 - the classifier, unless you pass a classifier flag or answer no.
 
 Its identity, time zone, brief and folders become the defaults of their questions.
+
+Step 9 binds the account to its mailbox: `doctor` records the identity, the Himalaya account and the IMAP server settings (see [Account binding](#account-binding)). An update that changes any of them still writes the config and exits 0, but `doctor` then reports a not-ready `state` item, and every later command for that account exits 5. Setting the old values back makes the account usable again. To use a different mailbox, set it up under a new account name:
+
+```sh
+mailtriage setup --update --account home --himalaya-account home
+```
 
 ### Output
 
@@ -238,7 +244,7 @@ Progress and the check summary go to stderr. stdout carries one result object, o
 | 3 | Himalaya missing or not v2.1.0 with IMAP; `account check` failed; the folders could not be listed; a key tool or key command failed; the config could not be written; `launchctl` or `systemctl` failed. |
 | 5 | The config exists and `--update` was not given (without prompts); a service file exists that mailtriage did not write. |
 
-Every error starts with `step N (name): ` and names the flag or command that fixes it, for example `step 2 (Himalaya): --himalaya-account is required without prompts`. Step 10 errors (`step 10 (service): `) happen after the config is written; they name the `mailtriage service install` command to run once the cause is fixed.
+Every error except the two abort messages (`setup aborted; nothing was changed`, `setup aborted: input ended`) starts with `step N (name): ` and names the flag or command that fixes it, for example `step 2 (Himalaya): --himalaya-account is required without prompts`. Step 10 errors (`step 10 (service): `) happen after the config is written; they name the `mailtriage service install` command to run once the cause is fixed.
 
 ## Manual setup
 
@@ -590,7 +596,7 @@ export OPENROUTER_API_KEY
 mailtriage doctor --account work --json
 ```
 
-The variable lasts until the shell exits. To load an existing `.env` file of `NAME=value` lines into the shell, run `set -a; . ./.env; set +a`. To fill it from the macOS Keychain in every new shell, add this line to `~/.zshrc` (a key command does the same without a variable):
+The variable lasts until the shell exits. To fill it from the macOS Keychain in every new shell, add this line to `~/.zshrc` (a key command does the same without a variable):
 
 ```sh
 export OPENROUTER_API_KEY="$(security find-generic-password -s mailtriage -a openrouter -w)"
@@ -662,7 +668,7 @@ Each command prints `{"schema_version":1,"service":{...}}`.
 
 ### Your own supervisor
 
-On a server you may prefer a system-wide unit that runs as a dedicated user. A systemd example, in `/etc/systemd/system/mailtriage-work.service`:
+On a server you may prefer a system-wide unit that runs as a dedicated user. First give the config a key command: set `provider.api_key_command` to a command that prints the key for that user, for example from `pass` or another key store (see [The OpenRouter key](#the-openrouter-key)). The unit then holds no secret. A systemd example, in `/etc/systemd/system/mailtriage-work.service`:
 
 ```ini
 [Unit]
@@ -672,7 +678,6 @@ After=network-online.target
 
 [Service]
 User=mailtriage
-EnvironmentFile=/etc/mailtriage/openrouter.env
 ExecStart=/usr/local/bin/mailtriage watch --config /etc/mailtriage/mailtriage.json --account work --json
 Restart=on-failure
 RestartSec=30
@@ -682,17 +687,13 @@ WantedBy=multi-user.target
 ```
 
 ```sh
-sudo touch /etc/mailtriage/openrouter.env
-sudo chmod 600 /etc/mailtriage/openrouter.env
-sudoedit /etc/mailtriage/openrouter.env      # one line: OPENROUTER_API_KEY=sk-or-...
 sudo systemctl daemon-reload
 sudo systemctl enable --now mailtriage-work.service
 ```
 
-- With a key command in the config, leave out `EnvironmentFile=`.
+- The key command runs as the user named in `User=`, with no terminal. That user's key store must hold the key and release it without a prompt.
+- If the config uses `api_key_env` instead, the variable must reach the mailtriage process; mailtriage does not read it from a file.
 - `mailtriage service` does not manage this unit. `service status` reports it as not installed, but its `last_pass` still shows the latest pass.
-- The environment file holds `NAME=value` lines without `export`. systemd reads it as root before it switches to the user named in `User=`, so the file can stay owned by root with mode 0600.
-- Avoid `Environment=OPENROUTER_API_KEY=...` in the unit file: unit files are world-readable.
 - The user named in `User=` needs write access to `state_dir` and to the directory that holds `mailtriage.json`. mailtriage creates `mailtriage.lock` there and rewrites the file for `filing enable`, `filing disable` and `categories apply`.
 - Supervisors start jobs with a short default `PATH` (launchd: `/usr/bin:/bin:/usr/sbin:/sbin`), which is why `engine.binary` should be an absolute path.
 

@@ -100,8 +100,9 @@ stdout:
   account binding. `error` and `fix` appear only when `ready` is false.
 - `service`: `null` when skipped, else the `service install` object below.
 
-Errors are `ServiceError`s whose message starts with `step N (name): ` and
-names the flag or command that fixes it. Codes: 2 input, missing flag without
+Errors are `ServiceError`s. Except for the two abort messages below, the
+message starts with `step N (name): ` and names the flag or command that fixes
+it. Codes: 2 input, missing flag without
 prompts, abort (`setup aborted; nothing was changed`, `setup aborted: input
 ended`); 3 Himalaya, key tool or service manager failure, unwritable config; 5
 config exists without `--update`, unmarked service file.

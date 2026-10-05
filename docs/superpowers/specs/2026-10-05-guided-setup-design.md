@@ -53,7 +53,8 @@ must be set for step 4; if it is not, the error names `--config`.
      dir is `~/Library/Application Support` on macOS (`XDG_CONFIG_HOME` is
      ignored there), and on Linux `$XDG_CONFIG_HOME` when that is an absolute
      path, else `~/.config`. `HIMALAYA_CONFIG` may hold several paths separated
-     by `:`.
+     by `:`; setup passes exactly one `--config`, so it refuses several paths
+     with exit 2 and asks for `--himalaya-config`.
    - Account: list with `himalaya account list`. With `--json` it prints
      `{"accounts":[{"name":"home","default":false,"backends":["imap"]},…]}`,
      sorted by name; an account without a backend block has `"backends":[]`.

@@ -182,7 +182,7 @@ message content.
 ### macOS (Keychain and launchd)
 
 1. Move any existing `~/.config/mailtriage` aside, then run
-   `mailtriage setup` in Terminal. Choose the macOS Keychain and enter the key
+   `mailtriage setup --account work` in Terminal. Choose the macOS Keychain and enter the key
    when `security` asks for it. Answer yes to the background service.
 2. Run `mailtriage doctor --account work --json` and
    `mailtriage service status --account work --json`.
@@ -208,7 +208,7 @@ message content.
 
 1. In a desktop session with a Secret Service provider (for example GNOME
    Keyring), move any existing `~/.config/mailtriage` aside and run
-   `mailtriage setup`. Choose Secret Service and enter the key when
+   `mailtriage setup --account work`. Choose Secret Service and enter the key when
    `secret-tool` asks for it. Answer yes to the background service.
 2. Run `mailtriage doctor --account work --json` and
    `mailtriage service status --account work --json`.
