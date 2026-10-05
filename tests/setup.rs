@@ -759,6 +759,121 @@ fn changing_the_key_store_keeps_the_rest_of_the_classifier() {
     assert_eq!(f.config()["provider"], before);
 }
 
+/// Final review I4: a classifier flag that is not a key flag keeps the key
+/// where it is, and key flags make no sense with the offline classifier.
+#[test]
+fn a_model_flag_keeps_the_key_source() {
+    let f = Fixture::new();
+    fs::write(f.bin.join("pass.key"), "sk-or-pass\n").unwrap();
+    let update = [
+        "setup",
+        "--yes",
+        "--update",
+        "--json",
+        "--himalaya-account",
+        "work",
+        "--model",
+        "typesafe/jev-1.14",
+    ];
+    for store in ["env", "pass"] {
+        let _ = fs::remove_file(f.config_path());
+        let _ = fs::remove_dir_all(f.config_path().with_file_name("state"));
+        let (out, _) = f.run(
+            &[
+                "setup",
+                "--yes",
+                "--json",
+                "--himalaya-account",
+                "work",
+                "--key-store",
+                store,
+            ],
+            "",
+        );
+        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+        let before = f.config()["provider"].clone();
+        let (out, v) = f.run(&update, "");
+        assert_eq!(out.status.code(), Some(0), "{store}: {}", stderr(&out));
+        assert_eq!(v["setup"]["key_store"], Value::Null, "{store}");
+        let after = f.config()["provider"].clone();
+        assert_eq!(after["model"], "typesafe/jev-1.14");
+        assert_eq!(after["api_key_env"], before["api_key_env"], "{store}");
+        assert_eq!(
+            after.get("api_key_command"),
+            before.get("api_key_command"),
+            "{store}"
+        );
+    }
+    let (out, v) = f.run(
+        &[
+            "setup",
+            "--yes",
+            "--update",
+            "--json",
+            "--himalaya-account",
+            "work",
+            "--provider",
+            "fake",
+            "--key-store",
+            "env",
+        ],
+        "",
+    );
+    assert_eq!(out.status.code(), Some(2), "{v}");
+    assert!(
+        message(&v).starts_with("step 5 (key): --key-store has no effect with --provider fake"),
+        "{v}"
+    );
+}
+
+/// Final review I4: declining to keep the classifier offers the current key
+/// source as the key store menu's default.
+#[test]
+fn the_key_store_menu_defaults_to_the_current_source() {
+    let f = Fixture::new();
+    fs::write(f.bin.join("pass.key"), "sk-or-pass\n").unwrap();
+    let options =
+        secrets::key_store_options(cfg!(target_os = "macos"), |tool| f.bin.join(tool).exists());
+    for (store, label) in [
+        ("env", "An environment variable only"),
+        ("pass", "pass (the standard Unix password manager)"),
+    ] {
+        let _ = fs::remove_file(f.config_path());
+        let _ = fs::remove_dir_all(f.config_path().with_file_name("state"));
+        let (out, _) = f.run(
+            &[
+                "setup",
+                "--yes",
+                "--json",
+                "--himalaya-account",
+                "work",
+                "--key-store",
+                store,
+            ],
+            "",
+        );
+        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+        // Enter for the Himalaya account, identity, time zone, brief and
+        // folders; decline keeping the classifier; Enter for the provider,
+        // the model, the key store menu, then the variable or reusing the
+        // stored key, and filing.
+        let input = format!("{}n\n{}", "\n".repeat(5), "\n".repeat(5));
+        let (out, v) = f.run_with(
+            &["setup", "--interactive", "--json", "--account", "work"],
+            &input,
+            &[("OPENROUTER_API_KEY", "sk-or-env")],
+        );
+        assert_eq!(out.status.code(), Some(0), "{store}: {}", stderr(&out));
+        assert_eq!(v["setup"]["key_store"], store);
+        let position = options.iter().position(|o| o.flag() == store).unwrap() + 1;
+        assert!(
+            stderr(&out).contains(&format!("  {position}) {label} (default)")),
+            "{}",
+            stderr(&out)
+        );
+    }
+}
+
 #[test]
 fn updating_an_account_interactively_keeps_its_mailbox() {
     let f = Fixture::new();

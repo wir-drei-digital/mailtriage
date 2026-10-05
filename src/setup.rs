@@ -795,12 +795,21 @@ fn classifier_step(
     p: &mut Prompter,
     current: Option<&ProviderConfig>,
 ) -> Result<(ProviderConfig, Option<KeyStore>)> {
-    let flags = args.provider.is_some()
-        || args.model.is_some()
-        || args.key_store.is_some()
-        || args.key_command.is_some()
-        || args.key_env.is_some()
-        || args.key_stored;
+    let key_flag = [
+        (args.key_store.is_some(), "--key-store"),
+        (args.key_command.is_some(), "--key-command"),
+        (args.key_env.is_some(), "--key-env"),
+        (args.key_stored, "--key-stored"),
+    ]
+    .into_iter()
+    .find_map(|(given, flag)| given.then_some(flag));
+    if let (Some(flag), Some("fake")) = (key_flag, args.provider.as_deref()) {
+        return Err(err(
+            2,
+            format!("{STEP_KEY}: {flag} has no effect with --provider fake; drop it"),
+        ));
+    }
+    let flags = args.provider.is_some() || args.model.is_some() || key_flag.is_some();
     if let Some(current) = current.filter(|_| !flags) {
         let keep = !p.enabled()
             || p.confirm(
@@ -854,8 +863,23 @@ fn classifier_step(
             }
         },
     )?;
-    let store = key_step(args, p, &mut provider)?;
+    // A current OpenRouter key stays where it is unless a key flag moves
+    // it: `--model` or `--provider openrouter` never switch its source.
+    let current = current.filter(|c| c.kind == "openrouter");
+    if flags && key_flag.is_none() && current.is_some() {
+        return Ok((provider, None));
+    }
+    let store = key_step(args, p, &mut provider, current.map(current_store))?;
     Ok((provider, Some(store)))
+}
+
+/// Where a current OpenRouter provider gets its key: the tool-backed store
+/// whose read command it runs, another command, or the environment.
+fn current_store(provider: &ProviderConfig) -> KeyStore {
+    match &provider.api_key_command {
+        Some(command) => secrets::store_of(command).unwrap_or(KeyStore::Command),
+        None => KeyStore::Env,
+    }
 }
 
 fn describe(provider: &ProviderConfig) -> String {
@@ -867,8 +891,10 @@ fn describe(provider: &ProviderConfig) -> String {
 }
 
 /// The store from `--key-store`, implied by `--key-command`/`--key-env`,
-/// or chosen from the menu (first option without prompts).
-fn chosen_store(args: &SetupArgs, p: &mut Prompter) -> Result<KeyStore> {
+/// or chosen from the menu (first option without prompts). The menu's
+/// default is the `current` store when it is offered (a command whose
+/// store is not offered defaults to `command`), else the first option.
+fn chosen_store(args: &SetupArgs, p: &mut Prompter, current: Option<KeyStore>) -> Result<KeyStore> {
     let implied =
         match (args.key_command.is_some(), args.key_env.is_some()) {
             (true, true) => return Err(err(
@@ -900,20 +926,30 @@ fn chosen_store(args: &SetupArgs, p: &mut Prompter) -> Result<KeyStore> {
             if !p.enabled() {
                 return Ok(options[0]);
             }
+            let offered = |store| options.iter().position(|&o| o == store);
+            let default = current
+                .and_then(|store| offered(store).or_else(|| offered(KeyStore::Command)))
+                .unwrap_or(0);
             let labels: Vec<String> = options.iter().map(|o| o.label().to_owned()).collect();
             Ok(options[p.choose(
                 "Where should mailtriage get the OpenRouter key?",
                 &labels,
-                0,
+                default,
             )?])
         }
     }
 }
 
 /// How the provider gets the key. Setup never reads the key except to
-/// confirm that a command prints one.
-fn key_step(args: &SetupArgs, p: &mut Prompter, provider: &mut ProviderConfig) -> Result<KeyStore> {
-    let store = chosen_store(args, p)?;
+/// confirm that a command prints one. `current` is the store of the
+/// OpenRouter provider being changed, if any.
+fn key_step(
+    args: &SetupArgs,
+    p: &mut Prompter,
+    provider: &mut ProviderConfig,
+    current: Option<KeyStore>,
+) -> Result<KeyStore> {
+    let store = chosen_store(args, p, current)?;
     match store {
         KeyStore::Keychain | KeyStore::SecretService | KeyStore::Pass => {
             let tool_name = store.tool().expect("tool-backed store");
