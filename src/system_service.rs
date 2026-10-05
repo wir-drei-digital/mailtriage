@@ -388,11 +388,23 @@ pub fn parse_launchctl_print(text: &str) -> ManagerState {
         match key {
             "state" => state.running = value == "running",
             "pid" => state.pid = value.parse().ok(),
-            "last exit code" => state.last_exit_status = value.parse().ok(),
+            "last exit code" => state.last_exit_status = leading_integer(value),
             _ => {}
         }
     }
     state
+}
+
+/// The integer a value starts with: `78` of `78: EX_CONFIG`; `None` for
+/// `(never exited)`.
+fn leading_integer(value: &str) -> Option<i64> {
+    let value = value.trim_start();
+    let digits = value.strip_prefix('-').unwrap_or(value);
+    let end = value.len() - digits.len()
+        + digits
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(digits.len());
+    value[..end].parse().ok()
 }
 
 pub fn parse_systemctl_show(text: &str) -> ManagerState {
@@ -572,6 +584,25 @@ mod tests {
         let state = parse_launchctl_print(text);
         assert!(state.loaded && !state.running);
         assert_eq!((state.pid, state.last_exit_status), (None, None));
+    }
+
+    /// Final review M1: launchd prints a code with its name, such as
+    /// `78: EX_CONFIG`.
+    #[test]
+    fn launchctl_last_exit_code_is_its_leading_integer() {
+        for (value, expected) in [
+            ("0", Some(0)),
+            ("78: EX_CONFIG", Some(78)),
+            ("1: Operation not permitted", Some(1)),
+            ("(never exited)", None),
+        ] {
+            let text = format!("gui/501/x = {{\n\tlast exit code = {value}\n}}\n");
+            assert_eq!(
+                parse_launchctl_print(&text).last_exit_status,
+                expected,
+                "{value}"
+            );
+        }
     }
 
     #[test]

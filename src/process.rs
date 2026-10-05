@@ -23,7 +23,7 @@ pub enum Ending {
     Overflowed,
 }
 
-#[derive(Debug)]
+/// No `Debug`: `stdout` may hold the key a key command printed.
 pub struct Bounded {
     /// Everything read before the child ended or was killed.
     pub stdout: Vec<u8>,
@@ -169,5 +169,24 @@ pub(crate) fn read_bounded<R: Read>(
         if !sink(&buffer[..size]) {
             return Ok(());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Final review M2: `Bounded` holds a key command's stdout, so it must
+    /// not implement `Debug`. With a `Debug` impl both impls below apply and
+    /// the call is ambiguous, which fails to compile.
+    #[test]
+    fn bounded_output_is_not_debug() {
+        trait AmbiguousIfDebug<A> {
+            fn check() {}
+        }
+        impl<T: ?Sized> AmbiguousIfDebug<()> for T {}
+        struct IsDebug;
+        impl<T: ?Sized + std::fmt::Debug> AmbiguousIfDebug<IsDebug> for T {}
+        <Bounded as AmbiguousIfDebug<_>>::check();
     }
 }

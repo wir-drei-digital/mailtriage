@@ -94,8 +94,10 @@ must be set for step 4; if it is not, the error names `--config`.
 9. **Check.** Run `doctor` for the account and print each readiness item with,
    for anything not ready, the one command that fixes it.
 10. **Service.** Offer to install the background service (default yes when
-    prompting). Without prompts: `--service install|skip` (default `skip`),
-    `--interval-seconds`, `--limit`.
+    prompting; no when the key comes from an environment variable, which the
+    service does not inherit). Without prompts: `--service install|skip`
+    (default `skip`), `--interval-seconds`, `--limit`. Not installed when the
+    check reported a not-ready `state` item.
 
 ### Prompts and output
 
@@ -118,7 +120,7 @@ must be set for step 4; if it is not, the error names `--config`.
 | 0 | Setup completed (doctor may still report items not ready; they are listed). |
 | 2 | Invalid input, a missing required flag without prompts, invalid account name, unsupported platform for the requested service. |
 | 3 | Himalaya missing or not v2.1.0, `account check` failed, a key tool failed, `launchctl`/`systemctl` failed. |
-| 5 | Config exists without `--update`, or a service file exists that mailtriage did not write. |
+| 5 | Config exists without `--update`, the account's stored binding would change (checked before writing; nothing is written), or a service file exists that mailtriage did not write. |
 
 Every error names the step and the flag or command that fixes it.
 
@@ -213,7 +215,7 @@ The command line uses absolute paths: the current `mailtriage` executable,
 | Restart | `KeepAlive` → `SuccessfulExit` false, `ThrottleInterval` 30 | `Restart=on-failure`, `RestartSec=30` |
 | Permissions | `Umask` 63 (077) | `UMask=0077` |
 | Logs | `<config dir>/logs/<account>.log` and `.err` | journald |
-| Load | `launchctl bootstrap gui/<uid> <plist>` | `systemctl --user daemon-reload`, `systemctl --user enable --now <unit>` |
+| Load | `launchctl bootstrap gui/<uid> <plist>` (after `launchctl bootout` when loaded) | `systemctl --user daemon-reload`, `systemctl --user enable <unit>`, `systemctl --user restart <unit>`, so a changed unit takes effect (plan decision 10) |
 | Unload | `launchctl bootout gui/<uid>/<label>`, then delete the file | `systemctl --user disable --now <unit>`, then delete the file |
 
 - Files mailtriage writes carry a marker (an `XMailtriageManaged` key in the

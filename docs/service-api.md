@@ -92,20 +92,43 @@ stdout:
 ```
 
 - `key_source`: `command`, `env`, or `null` for `fake`.
-- `key_store`: the `--key-store` flag value chosen in this run; `null` when the
-  classifier was kept or is `fake`.
+- `key_store`: the `--key-store` flag value chosen in this run; `null` when no
+  store was chosen: the classifier was kept, `--model` or `--provider
+  openrouter` changed it without a key flag (the key source is kept), or it is
+  `fake`.
 - `filing`: `off`, `dry_run` or `live`.
 - `doctor.items[].check`: `provider`, `key`, `mail`, and `filing` when filing is
-  on; `state` (not ready) when `doctor` itself failed, for example on a changed
-  account binding. `error` and `fix` appear only when `ready` is false.
-- `service`: `null` when skipped, else the `service install` object below.
+  on; `state` (not ready) when `doctor` itself failed, for example when the
+  state database cannot be opened. `error` and `fix` appear only when `ready`
+  is false. A `key` fix for a command key names the current store:
+  `mailtriage setup --update --account NAME --key-store pass` (`command` for a
+  command that is no store's read command).
+- `service`: `null` when skipped, or when the `state` item is not ready (setup
+  then installs nothing), else the `service install` object below.
+- Printed `mailtriage` commands (fixes, next steps, the categories hint) pass
+  `--config '<written path>'` when `config::resolve_path(None,
+  MAILTRIAGE_CONFIG, cwd, HOME)` would not resolve to the written config
+  (compared canonically); a `./mailtriage.json` that shadows it gets one
+  warning line. The step-10 retry always passes `--config`, `--interval-seconds`
+  and `--limit`.
+
+Before step 8 writes, `service::stored_binding_matches(config, &AppConfig,
+account) -> Result<Option<bool>>` compares the binding stored in the state
+database (resolved as `Service::open` resolves it, opened read-only, never
+created) with the one the new config gives the account, computed as `ensure`
+computes it. `Some(false)` exits 5 with `step 3 (account): account NAME is
+bound to its previous mailbox (identity, Himalaya account or IMAP server
+changed); keep them, or set this mailbox up under a new name with --account
+NEW`, and nothing is written. `None` (no database or no row) and read errors
+let setup go on; step 9 then reports what `doctor` finds.
 
 Errors are `ServiceError`s. Except for the two abort messages below, the
 message starts with `step N (name): ` and names the flag or command that fixes
 it. Codes: 2 input, missing flag without
-prompts, abort (`setup aborted; nothing was changed`, `setup aborted: input
-ended`); 3 Himalaya, key tool or service manager failure, unwritable config; 5
-config exists without `--update`, unmarked service file.
+prompts, key flags with `--provider fake`, abort (`setup aborted; nothing was
+changed`, `setup aborted: input ended`); 3 Himalaya, key tool or service
+manager failure, unwritable config; 5 config exists without `--update`, a
+binding-changing update, unmarked service file.
 
 ## `doctor` key fields
 
@@ -119,6 +142,18 @@ config exists without `--update`, unmarked service file.
 `OpenRouter API key environment variable is empty`. For `command`, `doctor` runs
 the key command (once per `Service`; `secrets::KeyCache`).
 
+## Classification without a key
+
+`sync`, `classify` and `reclassify` resolve the OpenRouter key once through the
+service's `KeyCache` before they lease any job. When it fails they lease
+nothing (no attempt is used, jobs stay queued) and add
+`"classification": {"skipped": true, "reason": KEY_ERROR}` with one of the
+fixed key-error strings above; `partial` is then `true`. `sync` still runs
+discovery and the filing steps, with `fetched`, `classified`, `cached` and
+`failed` 0. `classify` stores the message and reports `outcome: "skipped"`;
+`reclassify` requeues the matched messages and reports `reclassified: 0`. The
+field is absent when classification ran, and for the `fake` provider.
+
 ## `service` results
 
 The CLI wraps each in `{"schema_version":1,"service":{...}}`.
@@ -126,7 +161,10 @@ The CLI wraps each in `{"schema_version":1,"service":{...}}`.
 - `system_service::install_account(&Service, config, account, interval, limit,
   &Context)`: `{action:"installed", manager:"launchd"|"systemd", account,
   unit_path, log_paths, command}`, plus `note` when the provider is `openrouter`
-  without `api_key_command`. `log_paths` is `[]` for systemd. `command` is the
+  without `api_key_command`: the `setup --update --config … --account …
+  --key-store …` command for the platform's own store (`keychain`; `secret-service`
+  or `pass`) and a warning not to put the key into the plist or unit.
+  `log_paths` is `[]` for systemd. `command` is the
   `watch` argument list with absolute paths.
 - `system_service::uninstall(&Context, account)`: `{action:"uninstalled" |
   "not_installed", manager, account, unit_path}`.

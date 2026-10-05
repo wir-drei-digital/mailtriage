@@ -19,21 +19,21 @@ Hermes, or any other agent, calls `mailtriage` as an ordinary process. It needs 
      - `--key-store keychain`, `secret-service` or `pass` with `--key-stored`: a person has already stored the key with that store's command (see [Key stores](guide.md#key-stores)). Setup records the read command and checks that it prints a key.
      - `--key-command 'COMMAND'`: a shell command that prints the key. Setup runs it once to check it.
      - `--key-store env`, with `--key-env NAME` when the variable is not `OPENROUTER_API_KEY`: mailtriage reads the key from the variable in its own environment.
-   - `--service install` also installs `watch` as a launchd agent or systemd user unit (see [Background service](guide.md#background-service)). The default is `skip`.
+   - `--service install` also installs `watch` as a launchd agent or systemd user unit (see [Background service](guide.md#background-service)). The default is `skip`. Setup installs no service when `doctor` reports a not-ready `state` item.
    - Optional: `--account`, `--identity`, `--timezone`, `--brief`, `--mailbox` (repeat for several folders), `--filing off|dry-run`, `--interval-seconds`, `--limit`.
-   - To change an existing config, add `--update`.
+   - To change an existing config, add `--update`. A classifier flag such as `--model` keeps where the key comes from; only a key flag (`--key-store`, `--key-command`, `--key-env`, `--key-stored`) changes it. Key flags with `--provider fake` exit 2.
    - To write the configuration by hand instead, follow [Manual setup](guide.md#manual-setup). Use absolute paths in `engine.binary` and `engine.config`: the agent's `PATH` may not contain Himalaya, and `~` is not expanded.
 
-   Setup prints one result object on stdout (see [Output](guide.md#output)) and exits 0, even when `doctor` items are not ready. Read `setup.doctor.ready` and each item's `fix`. On failure, the message starts with `step N (name): ` and names the flag or command that fixes it:
+   Setup prints one result object on stdout (see [Output](guide.md#output)) and exits 0, even when `doctor` items are not ready. Read `setup.doctor.ready` and each item's `fix`. A command in a `fix` or on stderr passes `--config` when one run from setup's working directory and environment without it would find another config or none. On failure, the message starts with `step N (name): ` and names the flag or command that fixes it:
 
    | Code | Cause | What to do |
    | --- | --- | --- |
-   | 2 | A required flag is missing, a value is invalid, key flags conflict, or a key tool needs a terminal. | Add or correct the flag named in the message, then run setup again. Do not repeat the same call. |
+   | 2 | A required flag is missing, a value is invalid, key flags conflict or are given with `--provider fake`, or a key tool needs a terminal. | Add or correct the flag named in the message, then run setup again. Do not repeat the same call. |
    | 3 | Himalaya is missing or not v2.1.0, `himalaya account check` failed, the folders could not be listed, a key tool or key command failed, or `launchctl`/`systemctl` failed. | Report the message to the user. It names the command that shows the cause; fixing it needs a person (credentials, Himalaya, the key store). |
-   | 5 | The config already exists, or a service file exists that mailtriage did not write. | For the config, add `--update` if the user wants it changed. For a service file, report the path to the user. |
+   | 5 | The config already exists, the account is bound to another mailbox (`step 3 (account): account NAME is bound to its previous mailbox …`; nothing was written), or a service file exists that mailtriage did not write. | For the config, add `--update` if the user wants it changed. For a bound account, keep its identity, Himalaya account and IMAP server, or ask the user before setting the mailbox up under a new name with `--account NEW`. For a service file, report the path to the user. |
 
 3. Give the user that runs mailtriage read and write access to `state_dir` and to the directory that holds `mailtriage.json`. mailtriage creates `mailtriage.lock` there and rewrites the file for `filing enable`, `filing disable` and `categories apply`. That user also needs read access to the Himalaya configuration and whatever its password command reads.
-4. Prefer a key store or a key command (`provider.api_key_command`): mailtriage then runs the command itself, and nothing needs to be set in the agent's environment. Only with `--key-store env` must the variable named by `provider.api_key_env` reach the mailtriage process, which inherits its environment from the agent. mailtriage does not read a `.env` file or any other key file. `sync`, `watch`, `classify` and `reclassify` need the key; `list`, `read`, `correct`, `done`, `reopen` and the `filing` commands do not.
+4. Prefer a key store or a key command (`provider.api_key_command`): mailtriage then runs the command itself, and nothing needs to be set in the agent's environment. Only with `--key-store env` must the variable named by `provider.api_key_env` reach the mailtriage process, which inherits its environment from the agent. mailtriage does not read a `.env` file or any other key file. `sync`, `watch`, `classify` and `reclassify` need the key; `list`, `read`, `correct`, `done`, `reopen` and the `filing` commands do not. Without the key they classify nothing and use no retry attempt: the result carries `"classification": {"skipped": true, "reason": "..."}` with the key error (as in `doctor`'s `provider.key_error`) and exits 4, and the mail stays queued until a pass has the key.
 5. Check the setup from the agent's own environment:
 
    ```sh
@@ -73,7 +73,7 @@ The result is `{"schema_version":1,"service":{...}}` (fields in [Service command
 - `last_pass`, the account's latest `sync` or `watch` pass, read from the state database. It works without any service.
   - `null`: no pass has run yet.
   - `finished_at`: when the pass ended. Older than a few intervals means `watch` is not running or is stuck.
-  - `exit_code`: 0 is a complete pass; 4 is partial (some folders or messages failed; `list --view all` shows each message's `error`); any other code is the error's exit code from the table below.
+  - `exit_code`: 0 is a complete pass; 4 is partial (some folders or messages failed, and `list --view all` shows each message's `error`; or the key was unavailable, which `doctor` shows); any other code is the error's exit code from the table below.
   - `mode`: the filing mode of that pass (`off`, `dry_run` or `live`).
 
 ## Reading mail
@@ -114,7 +114,7 @@ JSON on stdout is the machine-readable result. With `--json`, errors are also pr
 | 0 | Success. A query exits 0 even if messages need attention. | Use the result. |
 | 2 | Invalid input or configuration: unknown account, category or message, bad flag value, invalid `mailtriage.json`. | Do not repeat the same call. Fix the arguments, or report a configuration problem to the user. |
 | 3 | Operational failure, for example Himalaya could not run. | Run `doctor`. Retry at the next scheduled pass; report it if it persists. |
-| 4 | Partial result: failed messages, scan errors or filing errors. The result is valid but incomplete. | Read `failed`, `scan_errors` and `filing.errors`. Later passes retry failed messages; do not loop. |
+| 4 | Partial result: failed messages, scan errors, filing errors, or classification skipped because the key is unavailable. The result is valid but incomplete. | Read `failed`, `scan_errors`, `filing.errors` and `classification`. Later passes retry failed messages; do not loop. A skipped classification needs the key fixed: report `classification.reason` to the user. |
 | 5 | Conflict. | Read `error.message` and act on it as in the next table. |
 
 Exit code 5 messages:
