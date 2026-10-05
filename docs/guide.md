@@ -568,7 +568,7 @@ mailtriage gets the key in one of two ways:
 
 mailtriage does not read a `.env` file or any other key file. Never put the key in `mailtriage.json`. `mailtriage setup` sets up either source; see [Key stores](#key-stores).
 
-The commands that classify need the key: `sync`, `watch`, `classify` and `reclassify`. They resolve it once, before they take any message. Without it they still run but classify nothing: no message is taken, so no retry attempt is used and the mail stays queued. The result gains `"classification": {"skipped": true, "reason": "..."}`, where `reason` is one of the fixed key errors below, and is partial (exit 4). `sync` still scans the folders and, with filing on, runs the filing steps. Once the key works, the next pass classifies the queued mail; changing `api_key_command` queues nothing again. `doctor` reports whether the key is present (`provider.key_present`) and why not (`provider.key_error`). `list`, `read`, `correct`, `done`, `reopen`, `export`, `categories` and `filing` commands do not use the key.
+The commands that classify need the key: `sync`, `watch`, `classify` and `reclassify`. They resolve it once, and only when a message is due for classification, before they take it; a pass with nothing to classify never runs the key command and needs no key. Without it they still run but classify nothing: no message is taken, so no retry attempt is used and the mail stays queued. The result gains `"classification": {"skipped": true, "reason": "..."}`, where `reason` is one of the fixed key errors below, and is partial (exit 4). `sync` still scans the folders and, with filing on, runs the filing steps. Once the key works, the next pass classifies the queued mail; changing `api_key_command` queues nothing again. `doctor` reports whether the key is present (`provider.key_present`) and why not (`provider.key_error`). `list`, `read`, `correct`, `done`, `reopen`, `export`, `categories` and `filing` commands do not use the key.
 
 ### Key command rules
 
@@ -576,7 +576,7 @@ The commands that classify need the key: `sync`, `watch`, `classify` and `reclas
 - Its stdin is closed and its stderr is discarded.
 - It has 10 seconds and at most 4 KB (4096 bytes) of output.
 - It must exit 0. The key is the first line of its output, with surrounding whitespace removed.
-- It runs at most once per command. `watch` runs it again for each pass, so a rotated key is used from the next pass on.
+- It runs at most once per command, and only when a message is due for classification, so an idle `watch` raises no key prompt. `watch` runs it again for each pass that has mail to classify, so a rotated key is used from the next pass on.
 - `doctor` runs it to check it.
 - The key never appears in output, logs or errors. Errors are fixed messages:
 

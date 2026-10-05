@@ -145,14 +145,19 @@ the key command (once per `Service`; `secrets::KeyCache`).
 ## Classification without a key
 
 `sync`, `classify` and `reclassify` resolve the OpenRouter key once through the
-service's `KeyCache` before they lease any job. When it fails they lease
-nothing (no attempt is used, jobs stay queued) and add
+service's `KeyCache` before they lease any job, and only when a job is eligible
+to lease (`sync`: `queued_outside` is not empty; `classify`:
+`Store::leasable`; `reclassify`: a message is selected). With nothing to
+classify the key command does not run and the result is not partial. When the
+key cannot be resolved they lease nothing (no attempt is used, jobs stay
+queued) and add
 `"classification": {"skipped": true, "reason": KEY_ERROR}` with one of the
 fixed key-error strings above; `partial` is then `true`. `sync` still runs
 discovery and the filing steps, with `fetched`, `classified`, `cached` and
 `failed` 0. `classify` stores the message and reports `outcome: "skipped"`;
 `reclassify` requeues the matched messages and reports `reclassified: 0`. The
-field is absent when classification ran, and for the `fake` provider.
+field is absent when classification ran or nothing was due, and for the `fake`
+provider.
 
 ## `service` results
 

@@ -106,6 +106,12 @@ fn an_unavailable_key_leaves_mail_queued_until_the_key_works() {
         c.provider.api_key_env = "OPENROUTER_API_KEY".into();
         c.provider.api_key_command = Some(key_command(&log, "exit 1"));
     });
+    // An idle inbox needs no key: the command does not run (no pinentry or
+    // Keychain prompt every interval), and the pass is complete.
+    let idle = h.sync();
+    assert_eq!(idle["partial"], false, "{idle}");
+    assert!(idle.get("classification").is_none(), "{idle}");
+    assert!(!log.exists());
     h.fake
         .deliver("INBOX", &mail("a", "Invoice", "Please pay by Friday."));
     h.fake
@@ -151,6 +157,13 @@ fn an_unavailable_key_leaves_mail_queued_until_the_key_works() {
     assert_eq!(out["partial"], false, "{out}");
     assert!(out.get("classification").is_none(), "{out}");
     assert_eq!(jobs(&h.path), vec![("complete".to_owned(), 1); 2]);
+    // With nothing left to classify, a broken key is neither run nor reported.
+    let runs = fs::read_to_string(&log).unwrap().lines().count();
+    h.edit(|c| c.provider.api_key_command = Some(key_command(&log, "exit 1")));
+    let out = h.sync();
+    assert_eq!(out["partial"], false, "{out}");
+    assert!(out.get("classification").is_none(), "{out}");
+    assert_eq!(fs::read_to_string(&log).unwrap().lines().count(), runs);
 }
 
 #[test]
@@ -165,6 +178,14 @@ fn classify_and_reclassify_lease_nothing_without_a_key() {
     c.provider.api_key_env = "OPENROUTER_API_KEY".into();
     c.provider.api_key_command = Some(key_command(&log, "exit 1"));
     config::save(&path, &c).unwrap();
+    // Nothing to reclassify: no key is needed.
+    let out = Service::open(&path)
+        .unwrap()
+        .reclassify("work", None, false, 100)
+        .unwrap();
+    assert_eq!(out["partial"], false, "{out}");
+    assert!(out.get("classification").is_none(), "{out}");
+    assert!(!log.exists());
     let raw = mail("c", "Contract", "Please sign the attached contract.");
     let out = Service::open(&path)
         .unwrap()
@@ -190,4 +211,18 @@ fn classify_and_reclassify_lease_nothing_without_a_key() {
         .unwrap()
         .clone();
     assert!(attempts.is_empty(), "{attempts:?}");
+    // The same message again while its job is not due: nothing to classify,
+    // so the key command does not run.
+    let runs = fs::read_to_string(&log).unwrap().lines().count();
+    database(&path)
+        .execute("UPDATE jobs SET next_after='2999-01-01T00:00:00+00:00'", [])
+        .unwrap();
+    let out = Service::open(&path)
+        .unwrap()
+        .classify("work", &raw, "rfc822")
+        .unwrap();
+    assert_eq!(out["outcome"], "cached", "{out}");
+    assert_eq!(out["partial"], false, "{out}");
+    assert!(out.get("classification").is_none(), "{out}");
+    assert_eq!(fs::read_to_string(&log).unwrap().lines().count(), runs);
 }

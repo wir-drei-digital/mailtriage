@@ -326,7 +326,11 @@ impl Service {
         }
         .map_err(|_| err(2, "invalid message input"))?;
         let id = self.store.ingest(name, &message, &generation)?;
-        let skipped = self.classification_skipped();
+        let skipped = if self.store.leasable(&id, &generation)? {
+            self.classification_skipped()
+        } else {
+            None
+        };
         let outcome = match &skipped {
             Some(_) => "skipped".to_owned(),
             None => self.process_one(name, &account, &generation, &id, None)?,
@@ -339,7 +343,9 @@ impl Service {
     /// Why classification cannot run in this command: the OpenRouter key is
     /// unavailable. Resolved once per `Service` through the key cache, before
     /// any job is leased, so an unavailable key consumes no attempts and its
-    /// mail stays queued. The reason is a fixed key-error string.
+    /// mail stays queued. The reason is a fixed key-error string. Callers ask
+    /// only when a job is eligible to lease, so an idle pass never runs the
+    /// key command.
     fn classification_skipped(&self) -> Option<String> {
         let provider = &self.config.provider;
         if provider.kind != "openrouter" {
@@ -563,18 +569,14 @@ impl Service {
             self.recover_intents(ctx, &map, &mut summary)?;
         }
         // 6. Fetch and classify, skipped while the key is unavailable.
-        let skipped = self.classification_skipped();
-        let done = match &skipped {
-            Some(_) => Processed::default(),
-            None => self.fetch_and_classify(
-                name,
-                &account,
-                &generation,
-                engine.as_deref(),
-                filing.map(|_| &map),
-                limit,
-            )?,
-        };
+        let (done, skipped) = self.fetch_and_classify(
+            name,
+            &account,
+            &generation,
+            engine.as_deref(),
+            filing.map(|_| &map),
+            limit,
+        )?;
         // 7–10. Arrivals and re-evaluation, bootstrap and hydration, plan and
         // apply, done inference.
         if let Some(ctx) = filing {
@@ -799,6 +801,8 @@ impl Service {
     /// message with an occurrence in a source folder gets its placement (mail
     /// seen only in a category folder is placed by arrival resolution), and a
     /// message whose fetch would read through a conflicting alias stays queued.
+    /// With jobs to lease and the key unavailable, nothing is leased and the
+    /// key error is returned as the reason classification was skipped.
     fn fetch_and_classify(
         &mut self,
         name: &str,
@@ -807,11 +811,17 @@ impl Service {
         h: Option<&dyn MailEngine>,
         map: Option<&FolderMap>,
         limit: usize,
-    ) -> Result<Processed> {
+    ) -> Result<(Processed, Option<String>)> {
         let mut done = Processed::default();
         let no_conflicts = BTreeSet::new();
         let blocked = map.map_or(&no_conflicts, |m| &m.alias_conflicts);
-        for id in self.store.queued_outside(name, limit, blocked)? {
+        let ids = self.store.queued_outside(name, limit, blocked)?;
+        if !ids.is_empty() {
+            if let Some(reason) = self.classification_skipped() {
+                return Ok((done, Some(reason)));
+            }
+        }
+        for id in ids {
             let needed_fetch = self.required(name, &id)?.normalized.is_none();
             match self
                 .process_one(name, account, generation, &id, h)?
@@ -833,7 +843,7 @@ impl Service {
                 }
             }
         }
-        Ok(done)
+        Ok((done, None))
     }
     fn required(&self, name: &str, id: &str) -> Result<Record> {
         self.store
@@ -1560,11 +1570,15 @@ impl Service {
         }
         let matched = ids.len();
         self.store.requeue(name, &ids, &generation)?;
-        let skipped = self.classification_skipped();
-        let selected: Vec<_> = match skipped {
-            Some(_) => vec![],
-            None => ids.into_iter().take(limit).collect(),
+        let mut selected: Vec<_> = ids.into_iter().take(limit).collect();
+        let skipped = if selected.is_empty() {
+            None
+        } else {
+            self.classification_skipped()
         };
+        if skipped.is_some() {
+            selected.clear();
+        }
         let h = self.engine(&account)?;
         let mut failed = 0;
         for id in &selected {

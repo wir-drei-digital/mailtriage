@@ -349,6 +349,10 @@ impl Store {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
+    /// Whether `lease` would take the job now (same condition, no change).
+    pub fn leasable(&self, id: &str, generation: &str) -> Result<bool> {
+        Ok(self.db.query_row("SELECT EXISTS(SELECT 1 FROM jobs WHERE message_id=? AND generation=? AND ((state IN ('queued','retry') AND next_after<=?) OR (state='leased' AND lease_until<=?)))",params![id,generation,now(),now()],|r| r.get(0))?)
+    }
     pub fn lease(&mut self, id: &str, generation: &str, seconds: u64) -> Result<bool> {
         let tx = self.db.transaction()?;
         let count=tx.execute("UPDATE jobs SET state='leased',attempts=attempts+1,lease_until=? WHERE message_id=? AND generation=? AND ((state IN ('queued','retry') AND next_after<=?) OR (state='leased' AND lease_until<=?))",params![(Utc::now()+Duration::seconds(seconds as i64)).to_rfc3339(),id,generation,now(),now()])?;
