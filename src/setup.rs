@@ -13,7 +13,8 @@ use crate::{
     prompt::Prompter,
     provider,
     secrets::{self, KeyStore},
-    service::{err, Service, ServiceError},
+    service::{self, err, Service, ServiceError},
+    system_service::{self, Context, Manager},
 };
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
@@ -36,6 +37,7 @@ const HIMALAYA_MAX_OUTPUT: usize = 1024 * 1024;
 const STEP_ACCOUNT: &str = "step 3 (account)";
 const STEP_CLASSIFIER: &str = "step 5 (classifier)";
 const STEP_KEY: &str = "step 5 (key)";
+const STEP_SERVICE: &str = "step 10 (service)";
 
 /// Answers given as flags. `None` (or empty) means: ask, or without
 /// prompts take the default, or fail naming the flag.
@@ -59,6 +61,11 @@ pub struct SetupArgs {
     pub key_env: Option<String>,
     pub key_stored: bool,
     pub filing: Option<FilingMode>,
+    /// `Some(true)` installs the background service, `Some(false)` skips
+    /// it; `None` asks (default yes) or, without prompts, skips it.
+    pub service: Option<bool>,
+    pub interval_seconds: u64,
+    pub limit: usize,
 }
 
 /// What step 1 decided.
@@ -230,6 +237,8 @@ pub fn run(args: &SetupArgs, path: &Path, p: &mut Prompter) -> Result<Value> {
     // 9. Check.
     let doctor = doctor_step(p, &path, &name, &cfg.provider, &engine);
     next_steps(p, &name, mode);
+    // 10. Service.
+    let service = service_step(args, p, &path, &name)?;
     Ok(json!({"schema_version": 1, "setup": {
         "config": path,
         "account": name,
@@ -240,7 +249,7 @@ pub fn run(args: &SetupArgs, path: &Path, p: &mut Prompter) -> Result<Value> {
         "key_store": store.map(KeyStore::flag),
         "filing": filing::mode_str(mode),
         "doctor": doctor,
-        "service": Value::Null,
+        "service": service,
     }}))
 }
 
@@ -1185,6 +1194,77 @@ fn next_steps(p: &mut Prompter, name: &str, mode: FilingMode) {
             "Go live only after the provider checklist (docs/verification.md): `mailtriage filing enable --account {name} --mode live`."
         ));
     }
+}
+
+/// Step 10: the background service. Asked with prompts (default yes);
+/// without prompts only `--service install` installs it.
+fn service_step(args: &SetupArgs, p: &mut Prompter, path: &Path, name: &str) -> Result<Value> {
+    let wanted = match args.service {
+        Some(wanted) => wanted,
+        None if p.enabled() => match Context::detect() {
+            Ok(_) => p.confirm(
+                &format!(
+                    "Run mailtriage in the background now (`watch` every {} seconds)?",
+                    args.interval_seconds
+                ),
+                true,
+            )?,
+            Err(e) => {
+                p.say(&format!(
+                    "Skipping the background service: {}.",
+                    error_text(&e)
+                ));
+                false
+            }
+        },
+        None => false,
+    };
+    if !wanted {
+        return Ok(Value::Null);
+    }
+    let installed = Context::detect().and_then(|ctx| {
+        let service = Service::open(path)?;
+        let out = system_service::install_account(
+            &service,
+            path,
+            name,
+            args.interval_seconds,
+            args.limit,
+            &ctx,
+        )?;
+        Ok((ctx, out))
+    });
+    // The config is already written, so the fix is the service command
+    // alone; the exit code is the original error's.
+    let (ctx, out) = installed.map_err(|e| {
+        let retry = shell_line(&[
+            OsStr::new("mailtriage"),
+            OsStr::new("service"),
+            OsStr::new("install"),
+            OsStr::new("--config"),
+            path.as_os_str(),
+            OsStr::new("--account"),
+            OsStr::new(name),
+        ]);
+        err(
+            service::exit_code(&e),
+            format!(
+                "{STEP_SERVICE}: {}; the config is written: fix this, then run `{retry}`",
+                error_text(&e)
+            ),
+        )
+    })?;
+    p.say(&format!(
+        "Installed the background service ({}).",
+        ctx.manager.name()
+    ));
+    if let Some(note) = out["note"].as_str() {
+        p.say(note);
+    }
+    if ctx.manager == Manager::Systemd {
+        p.say("To keep it running while you are logged out: loginctl enable-linger $USER");
+    }
+    Ok(out)
 }
 
 fn key_source_value(provider: &ProviderConfig) -> Value {

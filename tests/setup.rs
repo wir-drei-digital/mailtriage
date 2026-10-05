@@ -2,13 +2,15 @@
 //! `mailtriage setup` through the binary, with a fake Himalaya first on PATH
 //! and HOME in a temp dir. Prompts are driven with `--interactive` and piped
 //! stdin; every other run uses `--yes`.
+mod common;
+use common::{write_tool, LAUNCHCTL, SYSTEMCTL};
 use mailtriage::secrets;
 use serde_json::{json, Value};
 use std::{
     fs,
     io::Write,
     os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Command, Output, Stdio},
 };
 
@@ -80,12 +82,6 @@ else:
 
 const TOML: &str = "[accounts.home]\nemail = \"home@example.test\"\nimap.server = \"imaps://home.example.test\"\n\n[accounts.work]\ndefault = true\nemail = \"work@example.test\"\nimap.server = \"imaps://mail.example.test\"\nimap.sasl.plain.username = \"work@example.test\"\nimap.sasl.plain.password.raw = \"fixture-pass\"\n";
 
-fn write_tool(dir: &Path, name: &str, script: &str) {
-    let path = dir.join(name);
-    fs::write(&path, script).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-}
-
 fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
@@ -130,6 +126,8 @@ impl Fixture {
         ]));
         fs::create_dir_all(f.himalaya_toml().parent().unwrap()).unwrap();
         fs::write(f.himalaya_toml(), TOML).unwrap();
+        // Fake key tools first on PATH, so no test reaches a real keychain.
+        f.add_key_tools();
         f
     }
 
@@ -158,8 +156,18 @@ impl Fixture {
     }
 
     /// Runs mailtriage with this fixture's HOME, PATH and time zone, extra
-    /// environment `env`, and `stdin` piped in.
+    /// environment `env`, and `stdin` piped in; prompted runs without
+    /// `--service` get `--service skip`.
     fn run_with(&self, args: &[&str], stdin: &str, env: &[(&str, &str)]) -> (Output, Value) {
+        let mut args = args.to_vec();
+        if args.contains(&"--interactive") && !args.contains(&"--service") {
+            args.extend(["--service", "skip"]);
+        }
+        self.run_exact(&args, stdin, env)
+    }
+
+    /// `run_with` without the automatic `--service skip`.
+    fn run_exact(&self, args: &[&str], stdin: &str, env: &[(&str, &str)]) -> (Output, Value) {
         let mut command = Command::new(env!("CARGO_BIN_EXE_mailtriage"));
         command
             .current_dir(&self.cwd)
@@ -1086,4 +1094,94 @@ fn secret_service_is_the_default_on_linux_when_available() {
     );
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert_eq!(v["setup"]["key_store"], "secret-service");
+}
+
+#[test]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn setup_can_install_the_background_service() {
+    let f = Fixture::new();
+    write_tool(&f.bin, "launchctl", LAUNCHCTL);
+    write_tool(&f.bin, "systemctl", SYSTEMCTL);
+    let (out, v) = f.run(
+        &[
+            &WORK_ENV[..],
+            &["--service", "install", "--interval-seconds", "300"],
+        ]
+        .concat(),
+        "",
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let service = &v["setup"]["service"];
+    assert_eq!(service["action"], "installed");
+    let text = fs::read_to_string(service["unit_path"].as_str().unwrap()).unwrap();
+    assert!(text.contains("300"), "{text}");
+    // The key comes from an environment variable the service does not have.
+    assert!(service["note"]
+        .as_str()
+        .unwrap()
+        .contains("OPENROUTER_API_KEY"));
+    if cfg!(target_os = "linux") {
+        assert!(stderr(&out).contains("loginctl enable-linger"));
+    }
+}
+
+#[test]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn prompting_offers_the_service_with_yes_as_default() {
+    let f = Fixture::new();
+    write_tool(&f.bin, "launchctl", LAUNCHCTL);
+    write_tool(&f.bin, "systemctl", SYSTEMCTL);
+    // Eight defaults, key variable, filing, then Enter for the service.
+    let input = "\n".repeat(11);
+    let (out, v) = f.run_exact(
+        &["setup", "--interactive", "--json", "--key-store", "env"],
+        &input,
+        &[],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(v["setup"]["service"]["action"], "installed");
+}
+
+#[test]
+fn without_service_flags_nothing_is_installed() {
+    let f = Fixture::new();
+    let (out, v) = f.run(&WORK_ENV, "");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(v["setup"]["service"], Value::Null);
+}
+
+#[test]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn service_errors_name_step_10_and_keep_their_exit_code() {
+    let install = [&WORK_ENV[..], &["--service", "install"]].concat();
+    // An unmarked file at the unit path: exit 5, and the file stays.
+    let f = Fixture::new();
+    write_tool(&f.bin, "launchctl", LAUNCHCTL);
+    write_tool(&f.bin, "systemctl", SYSTEMCTL);
+    let unit = if cfg!(target_os = "macos") {
+        f.home
+            .join("Library/LaunchAgents/digital.wirdrei.mailtriage.work.plist")
+    } else {
+        f.home.join(".config/systemd/user/mailtriage-work.service")
+    };
+    fs::create_dir_all(unit.parent().unwrap()).unwrap();
+    fs::write(&unit, "the user's own file\n").unwrap();
+    let (out, v) = f.run(&install, "");
+    assert_eq!(out.status.code(), Some(5), "{v}");
+    let m = message(&v);
+    assert!(m.starts_with("step 10 (service): "), "{m}");
+    assert!(
+        m.contains("then run `mailtriage service install --config "),
+        "{m}"
+    );
+    assert!(m.ends_with(" --account work`"), "{m}");
+    assert_eq!(fs::read_to_string(&unit).unwrap(), "the user's own file\n");
+    assert!(f.config_path().exists());
+    // A failing manager tool: exit 3.
+    let f = Fixture::new();
+    write_tool(&f.bin, "launchctl", "#!/bin/sh\nexit 1\n");
+    write_tool(&f.bin, "systemctl", "#!/bin/sh\nexit 1\n");
+    let (out, v) = f.run(&install, "");
+    assert_eq!(out.status.code(), Some(3), "{v}");
+    assert!(message(&v).starts_with("step 10 (service): "), "{v}");
 }

@@ -7,6 +7,7 @@ use mailtriage::{
     secrets::KeyStore,
     service::{is_config_change, Backfill, ListOptions, RetryTarget, Service, ServiceError},
     setup,
+    system_service::{self, Context},
 };
 use serde_json::{json, Value};
 use std::{
@@ -78,6 +79,11 @@ enum Command {
         #[command(subcommand)]
         command: FilingCommand,
     },
+    /// Run `watch` in the background (launchd on macOS, systemd on Linux).
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
+    },
 }
 
 #[derive(Args)]
@@ -127,6 +133,13 @@ struct SetupArg {
     key_stored: bool,
     #[arg(long, value_parser = ["off", "dry-run"])]
     filing: Option<String>,
+    /// Install the background service at the end (default: ask; skip without prompts).
+    #[arg(long, value_parser = ["install", "skip"])]
+    service: Option<String>,
+    #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..=86400))]
+    interval_seconds: u64,
+    #[arg(long, default_value_t = 100, value_parser = parse_limit)]
+    limit: usize,
 }
 
 impl SetupArg {
@@ -155,6 +168,9 @@ impl SetupArg {
                     FilingMode::DryRun
                 }
             }),
+            service: self.service.as_deref().map(|s| s == "install"),
+            interval_seconds: self.interval_seconds,
+            limit: self.limit,
         }
     }
 }
@@ -291,6 +307,26 @@ enum FilingCommand {
     Adopt(FolderArg),
     /// Recent filing events, newest first.
     Log(LogArg),
+}
+
+#[derive(Subcommand)]
+enum ServiceCommand {
+    /// Install and start `watch` for an account.
+    Install(ServiceInstallArg),
+    /// Stop and remove the account's service.
+    Uninstall(AccountArg),
+    /// Whether the service is installed and running, and the last sync pass.
+    Status(AccountArg),
+}
+
+#[derive(Args)]
+struct ServiceInstallArg {
+    #[arg(long)]
+    account: String,
+    #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..=86400))]
+    interval_seconds: u64,
+    #[arg(long, default_value_t = 100, value_parser = parse_limit)]
+    limit: usize,
 }
 
 #[derive(Args)]
@@ -589,6 +625,7 @@ fn execute(cli: &Cli) -> Result<Value, CliError> {
             .export(&arg.account)
             .map_err(service_error),
         Command::Filing { command } => filing(&cli.config_path()?, command),
+        Command::Service { command } => service_command(&cli.config_path()?, command),
     }
 }
 
@@ -646,6 +683,39 @@ fn filing(config: &Path, command: &FilingCommand) -> Result<Value, CliError> {
         FilingCommand::Log(arg) => service.filing_log(&arg.account, arg.id.as_deref(), arg.limit),
     }
     .map_err(service_error)
+}
+
+fn service_command(path: &Path, command: &ServiceCommand) -> Result<Value, CliError> {
+    let result = match command {
+        ServiceCommand::Install(arg) => Context::detect().and_then(|ctx| {
+            let service = Service::open(path)?;
+            system_service::install_account(
+                &service,
+                path,
+                &arg.account,
+                arg.interval_seconds,
+                arg.limit,
+                &ctx,
+            )
+        }),
+        ServiceCommand::Uninstall(arg) => {
+            if !config::valid_account_name(&arg.account) {
+                return Err(CliError::input("account name cannot name a service"));
+            }
+            Context::detect().and_then(|ctx| system_service::uninstall(&ctx, &arg.account))
+        }
+        ServiceCommand::Status(arg) => Service::open(path).and_then(|service| {
+            system_service::status_account(
+                &service,
+                path,
+                &arg.account,
+                Context::detect().ok().as_ref(),
+            )
+        }),
+    };
+    result
+        .map(|service| json!({"schema_version": 1, "service": service}))
+        .map_err(service_error)
 }
 
 fn read_input(path: &Path, max_bytes: usize) -> Result<Vec<u8>, CliError> {

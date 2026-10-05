@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 /// Schema migrations: (version reached, SQL). Each runs in its own
 /// `BEGIN IMMEDIATE` transaction that re-reads `user_version` first.
-const MIGRATIONS: [(u32, &str); 4] = [
+const MIGRATIONS: [(u32, &str); 5] = [
     (
         1,
         "CREATE TABLE metadata(key TEXT PRIMARY KEY, value INTEGER NOT NULL);
@@ -79,6 +79,10 @@ CREATE INDEX event_account ON filing_events(account, id);
 ",
     ),
     (4, "ALTER TABLE filing_intents ADD COLUMN race_until_uid INTEGER;"),
+    (
+        5,
+        "CREATE TABLE pass_heartbeats(account TEXT PRIMARY KEY, finished_at TEXT NOT NULL, partial INTEGER NOT NULL, exit_code INTEGER NOT NULL, mode TEXT NOT NULL);",
+    ),
 ];
 
 /// Runs one migration under the write lock, unless another process applied
@@ -127,7 +131,7 @@ impl Store {
         db.busy_timeout(StdDuration::from_secs(5))?;
         db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;")?;
         let version: u32 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 4 {
+        if version > 5 {
             bail!("database schema is newer than this binary");
         }
         for (to, sql) in MIGRATIONS {
@@ -136,6 +140,40 @@ impl Store {
             }
         }
         Ok(Self { db })
+    }
+    /// Records how the account's latest sync pass ended.
+    pub fn record_heartbeat(
+        &self,
+        account: &str,
+        partial: bool,
+        exit_code: i32,
+        mode: &str,
+    ) -> Result<()> {
+        self.db.execute(
+            "INSERT INTO pass_heartbeats(account,finished_at,partial,exit_code,mode) VALUES(?,?,?,?,?)
+             ON CONFLICT(account) DO UPDATE SET finished_at=excluded.finished_at,partial=excluded.partial,
+             exit_code=excluded.exit_code,mode=excluded.mode",
+            params![account, now(), partial, exit_code, mode],
+        )?;
+        Ok(())
+    }
+    /// The latest pass: `{finished_at, partial, exit_code, mode}`.
+    pub fn heartbeat(&self, account: &str) -> Result<Option<Value>> {
+        Ok(self
+            .db
+            .query_row(
+                "SELECT finished_at,partial,exit_code,mode FROM pass_heartbeats WHERE account=?",
+                [account],
+                |r| {
+                    Ok(json!({
+                        "finished_at": r.get::<_, String>(0)?,
+                        "partial": r.get::<_, bool>(1)?,
+                        "exit_code": r.get::<_, i64>(2)?,
+                        "mode": r.get::<_, String>(3)?,
+                    }))
+                },
+            )
+            .optional()?)
     }
     pub fn revision(&self) -> Result<i64> {
         Ok(self

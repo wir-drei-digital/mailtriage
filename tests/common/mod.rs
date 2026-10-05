@@ -71,3 +71,20 @@ impl Harness {
 pub fn mail(message_id: &str, subject: &str, body: &str) -> Vec<u8> {
     format!("Message-ID: <{message_id}@test>\r\nFrom: Alex <alex@example.com>\r\nTo: work@example.com\r\nSubject: {subject}\r\nContent-Type: text/plain\r\n\r\n{body}\r\n").into_bytes()
 }
+
+/// Fake `launchctl`: `bootstrap` loads, `bootout` unloads (exit 3 when not
+/// loaded), `print` describes a loaded job with tab-indented properties, as
+/// the real tool does. Calls go to `launchctl.log` next to the script.
+pub const LAUNCHCTL: &str = "#!/bin/sh\ndir=\"$(dirname \"$0\")\"\necho \"$*\" >> \"$dir/launchctl.log\"\ncase \"$1\" in\n  bootstrap) touch \"$dir/loaded\" ;;\n  bootout) [ -f \"$dir/loaded\" ] || exit 3; rm -f \"$dir/loaded\" ;;\n  print) [ -f \"$dir/loaded\" ] || exit 113; printf '%s = {\\n\\tstate = running\\n\\tpid = 4242\\n\\tlast exit code = 0\\n\\tendpoints = {\\n\\t\\tstate = active\\n\\t}\\n}\\n' \"$2\" ;;\n  *) exit 64 ;;\nesac\n";
+
+/// Fake `systemctl --user`: `enable`, `restart`, `disable --now`, `show`.
+pub const SYSTEMCTL: &str = "#!/bin/sh\ndir=\"$(dirname \"$0\")\"\necho \"$*\" >> \"$dir/systemctl.log\"\ncase \"$2\" in\n  daemon-reload) ;;\n  enable) touch \"$dir/enabled\" ;;\n  restart) touch \"$dir/active\" ;;\n  disable) rm -f \"$dir/enabled\" \"$dir/active\" ;;\n  show) if [ -f \"$dir/active\" ]; then printf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\nMainPID=4343\\nExecMainStatus=0\\n'; else printf 'LoadState=not-found\\nActiveState=inactive\\nSubState=dead\\nMainPID=0\\nExecMainStatus=0\\n'; fi ;;\n  *) exit 64 ;;\nesac\n";
+
+/// Writes an executable script.
+#[cfg(unix)]
+pub fn write_tool(dir: &std::path::Path, name: &str, script: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(name);
+    fs::write(&path, script).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+}

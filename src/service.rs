@@ -68,6 +68,17 @@ fn config_err(message: impl Into<String>) -> anyhow::Error {
     .into()
 }
 
+/// The process exit code the CLI reports for `error`.
+pub fn exit_code(error: &anyhow::Error) -> i32 {
+    if let Some(e) = error.downcast_ref::<ServiceError>() {
+        return e.code;
+    }
+    if error.downcast_ref::<engine::ConfigChanged>().is_some() {
+        return 5;
+    }
+    3
+}
+
 /// Whether `error` means `mailtriage.json` or the mail engine's configuration
 /// changed while the command ran. Rerunning with the current configuration
 /// is the remedy, so `watch` skips such a pass and continues; a changed
@@ -450,13 +461,38 @@ impl Service {
             }
         }
     }
-    /// One pass in the spec's "Sync pass order"; the steps Tasks 7 and 8 add
-    /// are marked where they belong.
+    /// One pass in the spec's "Sync pass order". A pass that holds the
+    /// account lock and names a configured account records a heartbeat: how
+    /// it ended (0, 4 partial, or the error's exit code) and its mode.
     pub fn sync(&mut self, name: &str, limit: usize) -> Result<Value> {
         if !(1..=1000).contains(&limit) {
             return Err(err(2, "sync limit must be 1..=1000"));
         }
         let _lock = self.lock(name)?;
+        let result = self.sync_locked(name, limit);
+        if let Some(account) = self.config.accounts.get(name) {
+            let mode = if account.engine_config().is_some() {
+                account.filing.mode
+            } else {
+                FilingMode::Off
+            };
+            let (partial, code) = match &result {
+                Ok(value) => {
+                    let partial = value.get("partial").and_then(Value::as_bool) == Some(true);
+                    (partial, if partial { 4 } else { 0 })
+                }
+                Err(e) => (false, exit_code(e)),
+            };
+            // A heartbeat that cannot be written never hides the pass result.
+            let _ = self
+                .store
+                .record_heartbeat(name, partial, code, filing::mode_str(mode));
+        }
+        result
+    }
+    /// The pass itself, under the account lock; the steps Tasks 7 and 8 add
+    /// are marked where they belong.
+    fn sync_locked(&mut self, name: &str, limit: usize) -> Result<Value> {
         let (account, generation) = self.ensure(name)?;
         // 1. Engine check and filing mode.
         let engine = self.engine(&account)?;
