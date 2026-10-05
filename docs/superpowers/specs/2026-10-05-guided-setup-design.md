@@ -1,7 +1,7 @@
 # Guided setup, key command and background service
 
 Date: 2026-10-05
-Status: Design approved in conversation; written spec awaiting review.
+Status: Implemented.
 Builds on: [IMAP category filing](2026-10-04-imap-category-filing-design.md).
 
 ## Goal
@@ -47,14 +47,25 @@ must be set for step 4; if it is not, the error names `--config`.
    - Binary: `--himalaya-binary`, else the first `himalaya` on `PATH`; stored as
      an absolute path. Must report v2.1.0 with `+imap`, else exit 3.
    - Config: `--himalaya-config`, else `HIMALAYA_CONFIG`, else Himalaya's
-     default path. The plan's first task confirms the default path(s) for
-     v2.1.0 from its source and records them here.
-   - Account: list with `himalaya account list` (shape confirmed in the plan's
-     first task). Choose one, or "create one", which runs `himalaya configure`
+     default path. Without `--config` and `HIMALAYA_CONFIG`, Himalaya v2.1.0
+     uses the first existing file of `<platform config dir>/himalaya/config.toml`,
+     `~/.config/himalaya/config.toml` and `~/.himalayarc`. The platform config
+     dir is `~/Library/Application Support` on macOS (`XDG_CONFIG_HOME` is
+     ignored there), and on Linux `$XDG_CONFIG_HOME` when that is an absolute
+     path, else `~/.config`. `HIMALAYA_CONFIG` may hold several paths separated
+     by `:`.
+   - Account: list with `himalaya account list`. With `--json` it prints
+     `{"accounts":[{"name":"home","default":false,"backends":["imap"]},…]}`,
+     sorted by name; an account without a backend block has `"backends":[]`.
+     The account's email is only in the TOML (`[accounts.<name>] email`), not
+     in this list. Choose one, or "create one", which runs `himalaya configure`
      attached to the terminal. Without a terminal, `--himalaya-account` is
      required (exit 2 naming the flag) and `configure` is never run.
    - Validate with `himalaya account check`; failure exits 3 and shows
-     Himalaya's command to fix it, never its output.
+     Himalaya's command to fix it, never its output. With `--json`, `account
+     check` prints `{"account":"A","backends":[{"backend":"imap","ok":false,"error":"…"}]}`
+     and exits 0 even when the check fails, so setup reads `ok`. An unknown
+     account exits 1.
 3. **Account details.**
    - mailtriage account name: `--account`, default the Himalaya account name.
      Must be ASCII letters, digits, `-` or `_` (it is used in service and file
@@ -273,7 +284,8 @@ the state database and works without any service.
 ## Docs
 
 - README setup leads with `mailtriage setup`; the manual steps remain as a
-  reference.
+  reference (in `docs/guide.md`, which holds the full reference; the README is
+  short).
 - `docs/hermes.md`: non-interactive setup for agents (`--yes`, flags,
   `--key-stored` or `--key-env`), `service status` for health.
 

@@ -39,8 +39,8 @@ choose state_dir relative .state. `categories validate` accepts JSON category
 array or {categories:[...]}; can use default config work account and validate.
 `watch` is CLI-owned repeated Service::open + sync, signal graceful stop, default
 60s interval, bounded limit default100; sleeps in short intervals for signal.
-`--json` supported globally after subcommand too. Use explicit default config
-path ./mailtriage.json, overridable global --config. Clear field accepts category
+`--json` supported globally after subcommand too. The config path follows the
+resolution order below; `init` writes `--config` or ./mailtriage.json. Clear field accepts category
 alias mapping to category_id. Main errors printable JSON with safe message.
 
 Error mapping: downcast `service::ServiceError {pub code:i32,pub message:String}`
@@ -53,3 +53,98 @@ Develop CLI against these signatures. Do not edit lib.rs/service.rs/store.rs;
 coordinator provides them. Own src/main.rs src/cli.rs README.md examples/, docs/
 hermes.md, .github/workflows/ci.yml and tests/cli.rs. Offline tests run explicit
 fake provider using temporary config. release.yml optional with artifacts.
+
+## Config resolution
+
+`config::resolve_path(flag, env, cwd, home)` gives the config for every command
+except `init` and `setup`: `--config`, else `MAILTRIAGE_CONFIG` (ignored when
+empty), else `<cwd>/mailtriage.json` if it exists, else
+`~/.config/mailtriage/mailtriage.json`. `config::setup_path(flag, env, home)`
+is the same without the working-directory step; `setup` uses it. Without
+`HOME` the last step fails with `cannot find the config: HOME is not set; pass
+--config PATH` (exit 2). `Service::open` on a missing file exits 2 with
+``configuration not found; run `mailtriage setup` or pass --config``.
+
+## `setup` result
+
+`setup::run(&SetupArgs, &Path, &mut Prompter) -> Result<Value>`. Prompts and
+progress go to the prompter's output (stderr in the CLI); the value is the only
+stdout:
+
+```json
+{"schema_version":1,"setup":{
+  "config": "/abs/path/mailtriage.json",
+  "account": "work",
+  "mailboxes": ["INBOX"],
+  "provider": "openrouter",
+  "model": "typesafe/jev-1.13",
+  "key_source": "command",
+  "key_store": "keychain",
+  "filing": "dry_run",
+  "doctor": {"ready": false, "items": [
+    {"check": "provider", "ready": true},
+    {"check": "key", "ready": false,
+     "error": "OpenRouter API key environment variable is missing",
+     "fix": "export OPENROUTER_API_KEY=<your OpenRouter key> where mailtriage runs"},
+    {"check": "mail", "ready": true},
+    {"check": "filing", "ready": true}]},
+  "service": null}}
+```
+
+- `key_source`: `command`, `env`, or `null` for `fake`.
+- `key_store`: the `--key-store` flag value chosen in this run; `null` when the
+  classifier was kept or is `fake`.
+- `filing`: `off`, `dry_run` or `live`.
+- `doctor.items[].check`: `provider`, `key`, `mail`, and `filing` when filing is
+  on; `state` (not ready) when `doctor` itself failed, for example on a changed
+  account binding. `error` and `fix` appear only when `ready` is false.
+- `service`: `null` when skipped, else the `service install` object below.
+
+Errors are `ServiceError`s whose message starts with `step N (name): ` and
+names the flag or command that fixes it. Codes: 2 input, missing flag without
+prompts, abort (`setup aborted; nothing was changed`, `setup aborted: input
+ended`); 3 Himalaya, key tool or service manager failure, unwritable config; 5
+config exists without `--update`, unmarked service file.
+
+## `doctor` key fields
+
+`provider` carries `kind`, `model`, `configuration_valid`, `key_source`
+(`command` when `api_key_command` is set, else `env`; `null` for `fake`) and
+`key_present`. When the key is missing, `key_error` holds one fixed string:
+`API key command failed (exit N)` (`exit signal` when killed),
+`API key command timed out`, `API key command printed no key`,
+`API key command could not start`,
+`OpenRouter API key environment variable is missing`, or
+`OpenRouter API key environment variable is empty`. For `command`, `doctor` runs
+the key command (once per `Service`; `secrets::KeyCache`).
+
+## `service` results
+
+The CLI wraps each in `{"schema_version":1,"service":{...}}`.
+
+- `system_service::install_account(&Service, config, account, interval, limit,
+  &Context)`: `{action:"installed", manager:"launchd"|"systemd", account,
+  unit_path, log_paths, command}`, plus `note` when the provider is `openrouter`
+  without `api_key_command`. `log_paths` is `[]` for systemd. `command` is the
+  `watch` argument list with absolute paths.
+- `system_service::uninstall(&Context, account)`: `{action:"uninstalled" |
+  "not_installed", manager, account, unit_path}`.
+- `system_service::status_account(&Service, config, account,
+  Option<&Context>)`: `{manager:"launchd"|"systemd"|"none", account, installed,
+  loaded, running, pid, last_exit_status, unit_path, log_paths, last_pass}`.
+  `last_pass` is `{finished_at, partial, exit_code, mode}` or `null`.
+- `Context::detect()` fails with exit 2 on platforms other than macOS and
+  Linux and exit 3 on Linux without `systemctl`; `status` then reports
+  `manager:"none"`. Unknown account: exit 2. Unmarked file at the unit path:
+  exit 5. A failed `launchctl`/`systemctl` call: exit 3.
+
+## Heartbeat (schema v5)
+
+Migration 5 adds `pass_heartbeats(account TEXT PRIMARY KEY, finished_at TEXT
+NOT NULL, partial INTEGER NOT NULL, exit_code INTEGER NOT NULL, mode TEXT NOT
+NULL)`. `Service::sync` upserts one row per pass that took the account lock and
+names a configured account: `exit_code` 0, 4 for partial, else the error's code
+(the `ServiceError` code, 5 for an engine configuration change, else 3);
+`partial` is false for a failed pass; `mode` is the pass's filing mode (`off`
+without an engine). A failed heartbeat write never changes the pass result.
+`Store::heartbeat(account)` returns the row as `last_pass`.
