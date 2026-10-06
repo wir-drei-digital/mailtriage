@@ -4,5 +4,10 @@
 pub mod args;
 pub mod autostart;
 pub mod cli;
+pub mod controller;
+pub mod icons;
+pub mod instances;
 pub mod model;
 pub mod paths;
+pub mod restart;
+pub mod tray;
