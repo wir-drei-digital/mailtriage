@@ -851,9 +851,9 @@ Without the cache directory (no `HOME`, and on Linux no absolute `XDG_CACHE_HOME
 
 Copies older than the release that brought automatic updates cannot update themselves. Once:
 
-1. Install the first release with automatic updates by hand, from its archive or with `cargo install`.
+1. Install the first release with automatic updates by hand into a directory you own: from its archive into `~/.local/bin` (see [Binaries mailtriage does not replace](#binaries-mailtriage-does-not-replace)), or with `cargo install` into `~/.cargo/bin`. Remove an older copy installed with `sudo`, for example `sudo rm /usr/local/bin/mailtriage`, so it does not come first on your `PATH`: `service install` records the binary that runs it, and a root-owned binary is never updated. `command -v mailtriage` must show the new path.
 2. Run `mailtriage service install --account NAME` once for every account, so each service runs the new binary. The old processes have no restart rule and would keep running the old code.
-3. After the next pass, check that `mailtriage service status --account NAME --json` shows the new version in `last_pass.version`.
+3. After the next pass, check that `mailtriage service status --account NAME --json` shows the new version in `last_pass.version` and `update.replaceable: true`. When `replaceable` is `false`, `update.reason` says why.
 
 From then on, mailtriage updates itself.
 
