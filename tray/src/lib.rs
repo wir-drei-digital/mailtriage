@@ -3,4 +3,5 @@
 //! it and send actions back.
 pub mod args;
 pub mod cli;
+pub mod model;
 pub mod paths;
