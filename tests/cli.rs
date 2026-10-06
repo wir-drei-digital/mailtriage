@@ -209,6 +209,22 @@ fn conflicts_name_their_reason_in_the_json_error_object() {
         value["error"],
         json!({"code":5,"message":"configuration is being edited","reason":"config_busy"})
     );
+    // A command that only reads the configuration under its shared lock.
+    let (output, value) = run(
+        root,
+        &[
+            "correct",
+            "--account",
+            "work",
+            "--id",
+            "any",
+            "--action-required",
+            "true",
+            "--json",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(5));
+    assert_eq!(value["error"]["reason"], "config_busy", "{value}");
     drop(editing);
 
     // The account's binding changed after the first command stored it.

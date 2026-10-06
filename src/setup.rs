@@ -13,7 +13,7 @@ use crate::{
     prompt::Prompter,
     provider,
     secrets::{self, KeyStore},
-    service::{self, err, Service, ServiceError},
+    service::{self, err, err_kind, ErrorKind, Service, ServiceError},
     system_service::{self, Context, Manager},
 };
 use anyhow::{anyhow, Result};
@@ -223,8 +223,9 @@ pub fn run(args: &SetupArgs, path: &Path, p: &mut Prompter) -> Result<Value> {
     // changed (exit 5), so such an update writes nothing. A state database
     // that cannot be read is left to step 9, which reports it.
     if let Ok(Some(false)) = service::stored_binding_matches(path, &cfg, &name) {
-        return Err(err(
+        return Err(err_kind(
             5,
+            ErrorKind::BindingConflict,
             format!(
                 "{STEP_ACCOUNT}: account {name} is bound to its previous mailbox (identity, Himalaya account or IMAP server changed); keep them, or set this mailbox up under a new name with --account NEW"
             ),

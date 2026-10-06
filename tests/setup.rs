@@ -399,6 +399,7 @@ fn a_binding_changing_update_is_refused_before_writing() {
             "{m}"
         );
         assert!(m.contains("--account NEW"), "{m}");
+        assert_eq!(v["error"]["reason"], "binding_conflict", "{extra:?}: {v}");
         assert_eq!(fs::read(f.config_path()).unwrap(), before, "{extra:?}");
     }
     // An update that keeps the binding still works.
@@ -413,6 +414,7 @@ fn a_binding_changing_update_is_refused_before_writing() {
     );
     assert_eq!(out.status.code(), Some(5), "{v}");
     assert!(message(&v).starts_with("step 3 (account): "), "{v}");
+    assert_eq!(v["error"]["reason"], "binding_conflict", "{v}");
     assert!(!f.config_path().exists());
     let (out, _) = f.run(&WORK_ENV, "");
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));

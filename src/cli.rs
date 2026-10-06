@@ -931,17 +931,13 @@ mod tests {
     }
 
     #[test]
-    fn service_errors_carry_the_reason_of_their_kind() {
-        for (kind, reason) in [
-            (ErrorKind::Other, None),
-            (ErrorKind::ConfigChanged, Some("config_changed")),
-            (ErrorKind::ConfigBusy, Some("config_busy")),
-            (ErrorKind::AccountBusy, Some("account_busy")),
-            (ErrorKind::BindingConflict, Some("binding_conflict")),
-        ] {
-            let e = service_error(service_err(5, kind));
-            assert_eq!((e.code, e.message.as_str(), e.reason), (5, "m", reason));
-        }
+    fn service_errors_pass_their_reason_through() {
+        let e = service_error(service_err(5, ErrorKind::AccountBusy));
+        assert_eq!(
+            (e.code, e.message.as_str(), e.reason),
+            (5, "m", Some("account_busy"))
+        );
+        assert_eq!(service_error(service_err(5, ErrorKind::Other)).reason, None);
         assert_eq!(service_error(anyhow::anyhow!("x")).reason, None);
         assert_eq!(CliError::input("x").reason, None);
         assert_eq!(CliError::operational().reason, None);

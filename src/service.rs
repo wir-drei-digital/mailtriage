@@ -1698,7 +1698,11 @@ fn check_binding(
     expected: &str,
 ) -> Result<()> {
     if binding_identity(account, engine)? != expected {
-        return Err(err(5, "Himalaya mailbox identity changed during operation"));
+        return Err(err_kind(
+            5,
+            ErrorKind::BindingConflict,
+            "Himalaya mailbox identity changed during operation",
+        ));
     }
     Ok(())
 }
@@ -2014,7 +2018,7 @@ mod golden {
 
 #[cfg(test)]
 mod error_reasons {
-    use super::{config_err, err, err_kind, ErrorKind, ServiceError};
+    use super::{check_binding, ErrorKind, ServiceError};
 
     #[test]
     fn each_kind_maps_to_its_stable_reason() {
@@ -2028,21 +2032,12 @@ mod error_reasons {
         );
     }
 
+    /// A mailbox identity that changed mid-operation is a binding conflict.
     #[test]
-    fn errors_carry_their_code_kind_and_message() {
-        let e = err_kind(5, ErrorKind::AccountBusy, "busy");
+    fn a_binding_changed_during_operation_is_a_binding_conflict() {
+        let cfg = crate::config::default_config();
+        let e = check_binding(&cfg.accounts["work"], None, "previous").unwrap_err();
         let e = e.downcast_ref::<ServiceError>().unwrap();
-        assert_eq!(
-            (e.code, e.kind, e.message.as_str()),
-            (5, ErrorKind::AccountBusy, "busy")
-        );
-        let e = err(2, "plain");
-        assert_eq!(
-            e.downcast_ref::<ServiceError>().unwrap().kind,
-            ErrorKind::Other
-        );
-        let e = config_err("changed");
-        let e = e.downcast_ref::<ServiceError>().unwrap();
-        assert_eq!((e.code, e.kind), (5, ErrorKind::ConfigChanged));
+        assert_eq!((e.code, e.kind), (5, ErrorKind::BindingConflict));
     }
 }
