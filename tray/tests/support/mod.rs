@@ -128,3 +128,19 @@ impl FakeCli {
             .collect()
     }
 }
+
+/// Fake `launchctl` for the login item: `enable` clears the disabled
+/// label, `print-disabled` lists it while `disabled` exists. Calls go to
+/// `launchctl.log`.
+pub const AUTOSTART_LAUNCHCTL: &str = r#"#!/bin/sh
+dir="$(dirname "$0")"
+echo "$*" >> "$dir/launchctl.log"
+case "$1" in
+  enable) rm -f "$dir/disabled" ;;
+  print-disabled)
+    printf '\tdisabled services = {\n'
+    if [ -f "$dir/disabled" ]; then printf '\t\t"digital.wirdrei.mailtriage-tray" => disabled\n'; fi
+    printf '\t}\n' ;;
+  *) exit 64 ;;
+esac
+"#;
