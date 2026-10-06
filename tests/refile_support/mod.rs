@@ -205,3 +205,10 @@ pub fn preview(h: &Harness, category: Option<&str>, folder: Option<&str>) -> Val
 pub fn code(e: &anyhow::Error) -> Option<i32> {
     e.downcast_ref::<ServiceError>().map(|s| s.code)
 }
+
+/// `filing refile --apply`.
+pub fn apply(h: &Harness, category: Option<&str>, folder: Option<&str>) -> Value {
+    h.service()
+        .filing_refile_apply("work", opts(category, folder))
+        .unwrap()
+}

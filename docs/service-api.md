@@ -192,3 +192,41 @@ names a configured account: `exit_code` 0, 4 for partial, else the error's code
 `partial` is false for a failed pass; `mode` is the pass's filing mode (`off`
 without an engine). A failed heartbeat write never changes the pass result.
 `Store::heartbeat(account)` returns the row as `last_pass`.
+
+## `filing refile` (schema v6)
+
+```rust
+// mailtriage::service::RefileOptions (= filing::refile::command::RefileOptions)
+pub struct RefileOptions {
+  pub category: Option<String>, // only candidates whose new category is this id
+  pub folder: Option<String>,   // a folder's native name, or its configured name
+  pub limit: usize,             // 1..=500, default 50; lists candidates only
+}
+impl Service {
+  // Preview: no locks, no engine calls; may bring the generation up to date.
+  pub fn filing_refile(&mut self, account: &str, opts: RefileOptions) -> Result<Value>;
+  // Filing `live` only; shared configuration lock; `mailtriage.json` must be unchanged.
+  pub fn filing_refile_apply(&mut self, account: &str, opts: RefileOptions) -> Result<Value>;
+}
+```
+
+Preview result (filing `off`: the same shape, empty):
+
+```json
+{"schema_version":1,"account":"work","mode":"live",
+ "candidates":[{"id":"msg_…","folder":"INBOX.Other","target":"INBOX.Updates","category":"updates","reason":"category_changed"}],
+ "total":1,
+ "folders":[{"folder":"Other","native":"INBOX.Other","retired":false,"candidates":1,"waiting":0}],
+ "waiting":0,
+ "skipped":{"not_filed_by_mailtriage":0,"corrected":0,"pinned":0,"blocked":0,"done":0,"open_intent":0,"explicit_target":0,"multiple_copies":0,"incomplete_input":0,"retired_frozen":0,"target_unusable":0,"target_inbox_or_source":0}}
+```
+
+`reason` is `category_changed` or `folder_retired`. Candidates and waiting messages are ordered by native folder, then UID; `folders` by native name. `--category` filters `candidates` and `skipped`, not `waiting`.
+
+Apply result: `{"schema_version":1,"account":"work","marked":N,"waiting_marked":W}`. `marked` counts candidates newly marked, `waiting_marked` waiting messages newly marked (only with `folder` and no `category`). Repeating it marks 0.
+
+Errors: 2 for `--apply` outside `live` (`refile --apply requires filing mode live`), an unknown category, a folder that names no category or retired folder (`unknown folder: not a category or retired folder`) or several (`folder name matches several folders; pass the native name: A, B`), a limit outside 1..=500, an unknown account; 3 when the state database is unavailable; 5 when `mailtriage.json` changed (`reason: config_changed`) or the placements kept changing (`placements changed concurrently; retry`).
+
+Schema v6 (migration 6): `placements.refile_once`, `placements.filed_home_folder`/`filed_home_epoch`/`filed_home_uid` (the occurrence a COPYUID-proven mailtriage move produced; kept only while it is the known home), `filing_intents.consumes_refile`, `folders.drain_until_uid` (NULL: frozen; 0: retained in the last pass; N: draining until UID N). The newer-schema guard is 6.
+
+Also: `filing status` gains `refile_marked` and `refile_candidates`; `categories apply` gains `hint` (null with filing `off`); `filing plan` refile moves carry `"reason":"refile"`; events `refile_marked`, `refile_cleared {reason}`, `refile_cancelled {intent_id, reason}`, and `moved` with `"reason":"refile"`.

@@ -4,7 +4,7 @@
 use crate::domain::{AccountConfig, FilingMode};
 use crate::filing::observe::{self, sources_of, OfflineEngine};
 use crate::filing::refile::rules::{self, Candidate, Skip, Verdict};
-use crate::filing::{inputs, mode_str, FolderRecord, PassContext};
+use crate::filing::{inputs, mode_str, FilingWrite, FolderRecord, PassContext, Placement};
 use crate::service::{err, filing_mode};
 use crate::store::{now, Store};
 use anyhow::Result;
@@ -31,7 +31,6 @@ impl Default for RefileOptions {
 
 /// One matching message: its id, current (native) folder, home UID, and the
 /// revision and mark the report read.
-#[allow(dead_code)] // Read by `apply` (next task).
 struct Row {
     id: String,
     folder: String,
@@ -134,6 +133,79 @@ pub fn candidate_total(
     Ok(report(store, name, cfg, generation, None, None)?
         .candidates
         .len())
+}
+
+/// `--apply` (filing `live`, checked by the caller under the configuration
+/// lock): marks the matching candidates — and with `--folder` but no
+/// `--category` the waiting messages too — that are not marked yet, with a
+/// new revision each and one `refile_marked` event, in one transaction.
+pub fn apply(
+    store: &mut Store,
+    name: &str,
+    cfg: &AccountConfig,
+    generation: &str,
+    opts: &RefileOptions,
+) -> Result<Value> {
+    let folder = selected_folder(store, name, cfg, opts)?;
+    let with_waiting = folder.is_some() && opts.category.is_none();
+    for _ in 0..5 {
+        let found = report(
+            store,
+            name,
+            cfg,
+            generation,
+            opts.category.as_deref(),
+            folder.as_deref(),
+        )?;
+        let mut rows: Vec<(&Row, bool)> = found
+            .candidates
+            .iter()
+            .map(|(row, _)| (row, false))
+            .collect();
+        if with_waiting {
+            rows.extend(found.waiting.iter().map(|row| (row, true)));
+        }
+        rows.retain(|(row, _)| !row.marked);
+        let mut reads: Vec<(Placement, bool)> = Vec::new();
+        for (row, waiting) in &rows {
+            match store.placement(name, &row.id)? {
+                Some(p) if p.desired_rev == row.desired_rev => reads.push((p, *waiting)),
+                _ => break,
+            }
+        }
+        if reads.len() != rows.len() {
+            continue; // changed since the report: read it again
+        }
+        let waiting_marked = reads.iter().filter(|(_, waiting)| *waiting).count();
+        let marked = reads.len() - waiting_marked;
+        let result = json!({"schema_version": 1, "account": name, "marked": marked, "waiting_marked": waiting_marked});
+        if reads.is_empty() {
+            return Ok(result);
+        }
+        let changed: Vec<Placement> = reads
+            .iter()
+            .map(|(p, _)| Placement {
+                refile_once: true,
+                desired_rev: p.desired_rev + 1,
+                ..p.clone()
+            })
+            .collect();
+        let mut writes: Vec<FilingWrite> = reads
+            .iter()
+            .zip(&changed)
+            .map(|((read, _), placement)| FilingWrite::PlacementFrom { placement, read })
+            .collect();
+        writes.push(FilingWrite::Event {
+            message_id: None,
+            folder: folder.as_deref(),
+            kind: "refile_marked",
+            detail: json!({"marked": marked, "waiting_marked": waiting_marked, "category": opts.category, "folder": folder}),
+        });
+        if store.commit_filing(name, &writes, &now())? {
+            return Ok(result);
+        }
+    }
+    Err(err(5, "placements changed concurrently; retry"))
 }
 
 /// `categories apply`'s `hint`; `null` with filing `off`.

@@ -1490,6 +1490,18 @@ impl Service {
         let (account, generation) = self.ensure(name)?;
         refile::command::preview(&self.store, name, &account, &generation, &opts)
     }
+    /// `filing refile --apply` (refile spec "Command"): with filing `live`,
+    /// under the configuration lock and with `mailtriage.json` unchanged,
+    /// marks the matching set; the next passes move it.
+    pub fn filing_refile_apply(&mut self, name: &str, opts: RefileOptions) -> Result<Value> {
+        let _config_lock = self.shared_config_lock()?;
+        self.require_unchanged()?;
+        let (account, generation) = self.ensure(name)?;
+        if filing_mode(&account) != FilingMode::Live {
+            return Err(err(2, "refile --apply requires filing mode live"));
+        }
+        refile::command::apply(&mut self.store, name, &account, &generation, &opts)
+    }
     pub fn review(&mut self, name: &str, id: &str, done: bool) -> Result<Value> {
         let (_, generation) = self.ensure(name)?;
         let row = self.required(name, id)?;
