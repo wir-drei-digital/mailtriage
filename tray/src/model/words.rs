@@ -127,7 +127,7 @@ pub fn plain_error(message: &str, name: &dyn Fn(&str) -> String) -> String {
     if let Some(ids) = message.strip_prefix("categories need a valid folder: ") {
         let names: Vec<String> = ids.split(", ").map(name).collect();
         return format!(
-            "Choose another mail folder for {}. Each category needs its own folder, without / . * % \" \\ or &.",
+            "Choose another mail folder for {}. Each category needs its own folder. A folder name uses only English letters without accents, digits, spaces and simple punctuation; it has at most 200 characters, does not start with - or a space, does not end with a space, is not called Inbox, and does not contain / . * % \" \\ or &.",
             list(&names)
         );
     }
@@ -313,7 +313,7 @@ mod tests {
         .starts_with("Every category needs"));
         assert_eq!(
             plain_error("categories need a valid folder: news, promo", &name),
-            "Choose another mail folder for Newsletters and Promotions. Each category needs its own folder, without / . * % \" \\ or &."
+            "Choose another mail folder for Newsletters and Promotions. Each category needs its own folder. A folder name uses only English letters without accents, digits, spaces and simple punctuation; it has at most 200 characters, does not start with - or a space, does not end with a space, is not called Inbox, and does not contain / . * % \" \\ or &."
         );
         assert_eq!(plain_error("something else", &name), "something else");
     }

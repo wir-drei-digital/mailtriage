@@ -606,9 +606,9 @@ impl Window {
         effects
     }
 
-    fn discard_or(&mut self, then: Then) -> Vec<Effect> {
+    fn discard_or(&mut self, then: Then, now: Instant) -> Vec<Effect> {
         if !self.dirty() {
-            return self.after_discard(then);
+            return self.after_discard(then, now);
         }
         let question = match (&then, &self.loaded) {
             (Then::Close, _) | (_, None) => "Discard changes?".to_owned(),
@@ -618,10 +618,13 @@ impl Window {
         vec![]
     }
 
-    fn after_discard(&mut self, then: Then) -> Vec<Effect> {
+    /// Drops the unsaved edits, the notice about them and their check (a
+    /// new revision), then does `then`.
+    fn after_discard(&mut self, then: Then, now: Instant) -> Vec<Effect> {
         if let Some(loaded) = &self.loaded {
             self.draft = loaded.draft.clone();
         }
+        self.changed(now);
         match then {
             Then::Close => vec![Effect::Close],
             Then::Reload => {
@@ -672,13 +675,13 @@ impl Window {
                 if self.account.as_deref() == Some(&name) || !self.selector_enabled() {
                     return vec![];
                 }
-                self.discard_or(Then::Switch(name))
+                self.discard_or(Then::Switch(name), now)
             }
             Msg::Reload => {
                 if !self.selector_enabled() {
                     return vec![];
                 }
-                self.discard_or(Then::Reload)
+                self.discard_or(Then::Reload, now)
             }
             Msg::Select(index) => {
                 if index < self.draft.len() {
@@ -821,7 +824,7 @@ impl Window {
                     }
                     vec![]
                 }
-                Some(Dialog::Discard { then, .. }) => self.after_discard(then),
+                Some(Dialog::Discard { then, .. }) => self.after_discard(then, now),
                 other => {
                     self.dialog = other;
                     vec![]
@@ -845,16 +848,13 @@ impl Window {
             }
             Msg::ReloadDiscarding => {
                 self.dialog = None;
-                let account = self.account.clone();
-                self.start_load(account)
+                self.after_discard(Then::Reload, now)
             }
             Msg::TryAgain => {
-                if let (Some(Notice::Busy(_)), None) = (&self.notice, self.running) {
+                if matches!(self.notice, Some(Notice::Busy(_))) && self.apply_blocked().is_none() {
                     self.notice = None;
                     let revision = self.revision;
-                    if self.changes().is_some() {
-                        return self.apply_effect(revision, 0);
-                    }
+                    return self.apply_effect(revision, 0);
                 }
                 vec![]
             }
@@ -888,7 +888,7 @@ impl Window {
                     self.notice = Some(Notice::Finishing);
                     return vec![];
                 }
-                self.discard_or(Then::Close)
+                self.discard_or(Then::Close, now)
             }
             Msg::Status { load, at, result } => {
                 if self.load != Some(load) {
@@ -982,6 +982,9 @@ impl Window {
                     return vec![Effect::DeleteDraft(revision)];
                 }
                 self.checking = None;
+                if self.notice == Some(Notice::Rechecking) {
+                    self.notice = None;
+                }
                 let mut effects = vec![];
                 if let Some(old) = self.accepted_file.replace(revision) {
                     if old != revision {
@@ -1016,6 +1019,11 @@ impl Window {
                                 || !changes.removed.is_empty()
                                 || !changes.folders_changed.is_empty()
                                 || changes.reclassifies);
+                        // The applied draft is saved: no edit to discard
+                        // while the reload runs.
+                        if let Some(loaded) = &mut self.loaded {
+                            loaded.draft = self.draft.clone();
+                        }
                         let account = self.account.clone();
                         let load = self.start_load(account);
                         self.finished(load)
@@ -1488,6 +1496,9 @@ mod tests {
             ))
         );
         assert!(w.read_only(), "read-only during the reload after a save");
+        // The saved draft is no unsaved edit: closing does not ask.
+        assert!(!w.dirty(), "not dirty during the reload after a save");
+        assert_eq!(w.clone().update(Msg::CloseRequested, t0()), [Effect::Close]);
         // The reload keeps what the save said.
         w.update(
             Msg::Status {
@@ -1589,6 +1600,10 @@ mod tests {
             w.update(Msg::ReloadDiscarding, t0()),
             [Effect::Status { load: 2 }]
         );
+        assert_eq!(w.draft[0].name, "News", "the edits are discarded");
+        assert!(!w.dirty());
+        assert!(w.revision > revision, "revisions only grow");
+        assert_eq!(w.check_text(), None, "the discarded draft's check is gone");
     }
 
     #[test]
@@ -1649,6 +1664,108 @@ mod tests {
         assert!(matches!(&effects[..], [Effect::Check { revision: r, .. }] if *r == revision));
         assert_eq!(w.notice, Some(Notice::Rechecking));
         assert_eq!(w.apply_blocked(), Some("Checking your changes…"));
+        // The answer replaces the notice with the check's result.
+        w.update(
+            Msg::Checked {
+                account: "daniel".into(),
+                revision,
+                result: valid(renamed()),
+            },
+            t0(),
+        );
+        assert_eq!(w.notice, None);
+        assert_eq!(w.apply_blocked(), None);
+        assert_eq!(w.check_text().unwrap(), "1 renamed");
+    }
+
+    #[test]
+    fn a_discard_clears_the_notice_and_the_old_check() {
+        // An apply fails on daniel; switching to info discards its error too.
+        let (mut w, revision) = applying();
+        w.update(
+            Msg::Applied {
+                revision,
+                result: Err(failure(None, "category has manual corrections: promo")),
+            },
+            t0(),
+        );
+        assert!(matches!(w.notice, Some(Notice::Error { .. })));
+        w.update(Msg::SelectAccount("info".into()), t0());
+        assert_eq!(w.update(Msg::Confirm, t0()), [Effect::Status { load: 2 }]);
+        assert_eq!(w.notice, None, "daniel's error does not follow the switch");
+        assert!(w.revision > revision, "revisions only grow");
+        assert_eq!(w.check_text(), None);
+        // "Saved." stays through the reload after a save, not a switch.
+        let (mut w, revision) = applying();
+        w.update(
+            Msg::Applied {
+                revision,
+                result: Ok(()),
+            },
+            t0(),
+        );
+        w.update(
+            Msg::Status {
+                load: 2,
+                at: Utc::now(),
+                result: Ok(status()),
+            },
+            t0(),
+        );
+        w.update(
+            Msg::Exported {
+                load: 2,
+                result: Ok(exported("daniel")),
+            },
+            t0(),
+        );
+        assert!(matches!(w.notice, Some(Notice::Saved(_))));
+        assert_eq!(
+            w.update(Msg::SelectAccount("info".into()), t0()),
+            [Effect::Status { load: 3 }]
+        );
+        assert_eq!(w.notice, None, "Saved. does not follow the switch");
+    }
+
+    #[test]
+    fn try_again_applies_only_a_draft_that_can_be_applied() {
+        // Busy, then Reload discards the draft: Try again has nothing to apply.
+        let (mut w, revision) = applying();
+        w.options.retries = 0;
+        w.update(
+            Msg::Applied {
+                revision,
+                result: Err(failure(
+                    Some("config_busy"),
+                    "configuration is being edited",
+                )),
+            },
+            t0(),
+        );
+        assert_eq!(w.notice, Some(Notice::Busy(details())));
+        w.update(Msg::Reload, t0());
+        assert_eq!(w.update(Msg::Confirm, t0()), [Effect::Status { load: 2 }]);
+        assert_eq!(
+            w.update(Msg::TryAgain, t0()),
+            [],
+            "the discarded draft is not applied"
+        );
+        assert_eq!(w.notice, None, "the busy notice goes with its draft");
+        assert_eq!(w.draft[0].name, "News");
+        assert_eq!(w.check_text(), None);
+        // A busy notice does nothing while Apply is blocked, here by the
+        // reload after a save whose check is still the current one.
+        let (mut w, revision) = applying();
+        w.update(
+            Msg::Applied {
+                revision,
+                result: Ok(()),
+            },
+            t0(),
+        );
+        assert!(w.changes().is_some() && w.apply_blocked().is_some());
+        w.notice = Some(Notice::Busy(details()));
+        assert_eq!(w.update(Msg::TryAgain, t0()), []);
     }
 
     #[test]
