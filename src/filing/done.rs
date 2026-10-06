@@ -95,6 +95,7 @@ fn settled(store: &Store, ctx: &PassContext, map: &FolderMap) -> Result<bool> {
     if folders.iter().any(|r| r.pause_reason.is_some()) {
         return Ok(false);
     }
+    let drains = store.drain_states(ctx.account)?;
     for w in &map.watch {
         let Some((epoch, _, complete, _)) = store.checkpoint_state(ctx.account, &w.folder)? else {
             return Ok(false);
@@ -103,6 +104,11 @@ fn settled(store: &Store, ctx: &PassContext, map: &FolderMap) -> Result<bool> {
             .iter()
             .any(|r| r.native == w.folder && r.rescan_epoch == Some(epoch) && !r.rescan_complete);
         if !complete || rescanning {
+            return Ok(false);
+        }
+        // Refile spec "Draining": a draining folder counts as still being scanned.
+        let draining = drains.get(&w.folder).is_some_and(|until| *until > 0);
+        if draining && !store.drain_finished(ctx.account, &w.folder)? {
             return Ok(false);
         }
     }

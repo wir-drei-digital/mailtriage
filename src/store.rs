@@ -659,8 +659,10 @@ fn capture_rescan_set(
         "UPDATE arrivals SET state='vanished',resolved_at=?3 WHERE account=?1 AND folder=?2 AND state='pending'",
         params![account, mailbox, now()],
     )?;
+    // Refile spec "Draining": an epoch change during draining records a new
+    // snapshot (the reset-time UIDNEXT).
     tx.execute(
-        "UPDATE folders SET rescan_epoch=?3,rescan_below_uid=?4,rescan_complete=0,epoch=?3,watch_from_uid=NULL WHERE account=?1 AND native=?2",
+        "UPDATE folders SET rescan_epoch=?3,rescan_below_uid=?4,rescan_complete=0,epoch=?3,watch_from_uid=NULL,drain_until_uid=CASE WHEN drain_until_uid>0 THEN ?4 ELSE drain_until_uid END WHERE account=?1 AND native=?2",
         params![account, mailbox, new, snapshot.uid_next],
     )?;
     Ok(())

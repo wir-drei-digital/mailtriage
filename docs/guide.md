@@ -868,6 +868,55 @@ Check the mailbox before you lift a block or a pause.
 | `merge_conflict` | An unresolved arrival duplicates this message. `filing log --id ID` shows the arrival in `detail.arrival_id`. | `filing retry --id ID` does not lift this block. `filing dismiss --arrival N` marks the arrival reviewed and lifts it. `filing retry --arrival N` fetches the arrival again instead; a repeated conflict blocks again. |
 | Unresolved arrival | Mail that mailtriage could not identify. | `filing retry --arrival N` fetches it again; `filing dismiss --arrival N` marks it reviewed. |
 
+### Refiling after category changes
+
+Automatic filing moves mail only out of the source folders. When you add, remove or re-point categories, the mail that mailtriage already filed stays where it is until you refile it. `filing refile` shows which filed mail would follow its new category, and `--apply` lets the next passes move it:
+
+```sh
+mailtriage filing refile --account work --json
+mailtriage filing refile --account work --category updates --json
+mailtriage filing refile --account work --folder Promotions --apply --json
+```
+
+Refiling moves only mail that is still exactly where a mailtriage move put it, as the server confirmed when the move ran. Mail you moved (even back into the same folder), corrected, pinned or marked done stays where it is, and nothing is ever refiled into `INBOX` or another source folder. Mail filed before this version without a server-reported destination (COPYUID) cannot be refiled.
+
+| Change | What to do |
+| --- | --- |
+| Add a category | `categories apply`, let a few passes classify open mail again, then preview with `filing refile --category NEW` and move with `--apply`. |
+| Rename a category (`name` only) | Nothing moves; its folder stays. |
+| Re-point its `folder` | `categories apply`. The next live pass creates the new folder and retires the old one. `filing refile --folder OLD --apply` moves the old folder's mail, including mail still being classified again. |
+| Remove a category | `categories apply` retires its folder and classifies its open mail again. `filing refile --folder OLD --apply` moves that mail into the remaining categories' folders once it is classified. |
+
+With filing on, `categories apply` returns a `hint` naming the command. The preview makes no mailbox calls and reports:
+
+| Field | Content |
+| --- | --- |
+| `candidates` | Messages that would move, by folder and UID, at most `--limit` (1 to 500, default 50): `id`, `folder` and `target` (server folder names), `category` (the new category) and `reason` (`category_changed`, or `folder_retired` when no category uses the folder any more). |
+| `total` | All candidates, without the limit. |
+| `folders` | One entry per folder holding candidates or waiting mail: `folder` (the configured name, `null` when unknown), `native` (the server name; pass it to `--folder`), `retired`, `candidates`, `waiting`. |
+| `waiting` | Messages still to be classified again; whether they move is decided then. |
+| `skipped` | What stays, counted by reason (below). |
+
+`--folder NAME` takes a folder's server name or its configured name; a configured name two folders share exits 2 and lists their server names. `--category ID` limits the candidates to one new category; waiting mail is reported but not marked, so run the command again once it is classified. With `--folder` and no `--category`, `--apply` also marks the waiting mail, which then moves once classified. `--apply` needs `live`, marks the whole matching set whatever `--limit` says, and is safe to repeat: `marked` and `waiting_marked` count only new marks. The moves happen over the following passes, at most `filing.max_actions_per_pass` per pass, with every safeguard of other moves; a refile adds no flag.
+
+| `skipped` reason | Meaning |
+| --- | --- |
+| `not_filed_by_mailtriage` | The message is not where a mailtriage move put it: you moved it, a rescan or recovery placed it, or it was filed without COPYUID. |
+| `corrected`, `pinned`, `done` | Your correction, pin or Done wins. |
+| `blocked`, `open_intent` | A block or an unfinished move; see `filing status`. |
+| `explicit_target` | A request to move it into a category that no longer exists is pending; `correct --account NAME --id ID --category NEW` replaces it. |
+| `multiple_copies` | It is in more than one folder. |
+| `incomplete_input` | It was classified from incomplete content. |
+| `retired_frozen` | It is in a retired folder mailtriage no longer watches. |
+| `target_unusable` | Its new folder is paused, missing or awaiting `filing adopt`. A marked message waits for it. |
+| `target_inbox_or_source` | Its new category keeps mail in `INBOX` or a source folder. |
+
+A retired folder stays watched while it holds mail that can still be refiled and, after that mail has moved, until mailtriage has scanned everything moved into it before then. After that it is no longer watched and the mail in it is not refiled. mailtriage never renames or deletes it; delete the emptied folder in your mail client when you like.
+
+A mark is dropped, with a `refile_cleared` event naming the reason, when the message is corrected, pinned, marked done, moved, copied, or classified into its own folder, into `INBOX` or a source folder, or from incomplete content. `filing status` reports `refile_marked` and `refile_candidates`. `filing log` shows `refile_marked`, `refile_cleared`, `refile_cancelled` and `moved` events with `"reason": "refile"`.
+
+Exit codes: 2 for `--apply` outside `live`, an unknown `--category`, a `--folder` that names no category or retired folder (or two of them), a `--limit` outside 1 to 500, or an unknown account; 3 when the state database is unavailable; 5 when `mailtriage.json` changed during `--apply` or the placements kept changing.
+
 ### Provider check
 
 Before you use `live` on a real mailbox, the live provider check in the [filing design](superpowers/specs/2026-10-04-imap-category-filing-design.md#live-provider-check) must have recorded a go for your provider (Gmail / Google Workspace, Microsoft 365 / Outlook.com, iCloud, Fastmail / Dovecot) in [the verification receipt](verification.md#live-provider-check-required-before-live-on-a-real-mailbox). No provider has been checked yet, so use `dry_run` until yours is. A no-go will be listed here.

@@ -3,6 +3,7 @@
 //! discovery options of watched folders, rescan completion, bootstrap and
 //! hydration; and, outside a pass, the offline folder map of `filing plan` /
 //! `filing status` and `doctor`'s read-only folder report.
+use super::refile::retired::{self, RetiredRefs};
 use super::{
     is_config_changed, planner::CategoryFolder, FilingSummary, FolderRecord, HydrationBatch,
     Intent, PassContext, RescanFilter,
@@ -129,11 +130,12 @@ pub fn resolve_folders(
         })
         .collect();
     let referenced = referenced_folders(store, ctx.account)?;
+    let refs = RetiredRefs::load(store, ctx)?;
     let mut scope: BTreeSet<String> = map.sources.iter().chain(&natives).cloned().collect();
     scope.extend(
         retiring
             .iter()
-            .filter(|r| referenced.contains(&r.native))
+            .filter(|r| referenced.contains(&r.native) || refs.holds(&r.native))
             .map(|r| r.native.clone()),
     );
     ctx.engine
@@ -160,7 +162,7 @@ pub fn resolve_folders(
             map.watch(w.native.clone(), WatchRole::Category);
         }
     }
-    retire(store, ctx, &mut map, retiring, &referenced)?;
+    retire(store, ctx, &mut map, retiring, &referenced, &refs, summary)?;
     Ok(map)
 }
 
@@ -610,13 +612,16 @@ fn write_failed(
 }
 
 /// Rule 7: a recorded category folder no category uses any more is
-/// `retired`; it stays watched while listed and still referenced.
+/// `retired`; it stays watched while listed and still referenced, or while
+/// refile retention or draining keeps it (refile spec "Retired folders").
 fn retire(
     store: &mut Store,
     ctx: &PassContext,
     map: &mut FolderMap,
     retiring: Vec<FolderRecord>,
     referenced: &BTreeSet<String>,
+    refs: &RetiredRefs,
+    summary: &mut FilingSummary,
 ) -> Result<()> {
     for mut rec in retiring {
         if rec.state != "retired" {
@@ -624,7 +629,10 @@ fn retire(
             rec.checked_at = Some(ctx.now.clone());
             store.save_folder(&rec)?;
         }
-        if referenced.contains(&rec.native) && map.listed.contains(&rec.native) {
+        let listed = map.listed.contains(&rec.native);
+        let referenced = referenced.contains(&rec.native);
+        let kept = retired::step(store, ctx, refs, &rec.native, listed, referenced, summary)?;
+        if listed && (referenced || kept) {
             map.watch(rec.native, WatchRole::Retired);
         }
     }

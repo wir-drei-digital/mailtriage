@@ -246,6 +246,18 @@ pub fn placement_skip(f: &RefileFacts, frozen: &BTreeSet<String>) -> Option<Skip
     .map(|(_, skip)| skip)
 }
 
+/// Refile spec "Retired folders", retention: the home folders of
+/// placements that pass candidate rules 1–5.
+pub fn retained(refile: &RefileInput) -> BTreeSet<String> {
+    let none = BTreeSet::new();
+    refile
+        .facts
+        .values()
+        .filter(|f| placement_skip(f, &none).is_none())
+        .filter_map(|f| f.home_folder.clone())
+        .collect()
+}
+
 /// Candidate rules 1–8 for one planned message.
 pub fn verdict(input: &PlanInput, m: &PlanMessage, refile: &RefileInput) -> Verdict {
     let (Some(f), Some(home)) = (refile.facts.get(&m.message_id), m.home.as_ref()) else {
@@ -347,6 +359,35 @@ mod tests {
             None,
             "mail at its filed home is never frozen out"
         );
+    }
+
+    #[test]
+    fn only_mail_that_passes_rules_one_to_five_retains_its_folder() {
+        let fact = |home: &str| RefileFacts {
+            at_filed_home: true,
+            home_folder: Some(home.into()),
+            single_occurrence: true,
+            ..Default::default()
+        };
+        let mut refile = RefileInput::default();
+        refile.facts.insert("kept".into(), fact("Kept"));
+        let mut done = fact("Done");
+        done.done = true;
+        let mut corrected = fact("Corrected");
+        corrected.corrected = true;
+        let mut pinned = fact("Pinned");
+        pinned.pinned = true;
+        let mut moved = fact("Moved");
+        moved.at_filed_home = false;
+        for (id, f) in [
+            ("done", done),
+            ("corrected", corrected),
+            ("pinned", pinned),
+            ("moved", moved),
+        ] {
+            refile.facts.insert(id.into(), f);
+        }
+        assert_eq!(retained(&refile), BTreeSet::from(["Kept".to_string()]));
     }
 
     #[test]

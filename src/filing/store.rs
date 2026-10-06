@@ -1327,6 +1327,67 @@ impl Store {
         Ok(rows)
     }
 
+    /// Refile spec "Retired folders": `drain_until_uid` where it is set
+    /// (0: retained in an earlier pass; N: draining until UID N).
+    pub fn drain_states(&self, account: &str) -> Result<BTreeMap<String, u64>> {
+        let mut st = self.db.prepare(
+            "SELECT native, drain_until_uid FROM folders WHERE account=? AND drain_until_uid IS NOT NULL",
+        )?;
+        let rows = st
+            .query_map([account], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
+        Ok(rows)
+    }
+
+    pub fn set_drain_until_uid(
+        &mut self,
+        account: &str,
+        native: &str,
+        until: Option<u64>,
+    ) -> Result<()> {
+        self.db.execute(
+            "UPDATE folders SET drain_until_uid=? WHERE account=? AND native=?",
+            params![until, account, native],
+        )?;
+        Ok(())
+    }
+
+    /// Draining is finished once discovery passed the snapshot in the
+    /// checkpoint's epoch (a reset records a new snapshot), no reset rescan
+    /// runs, no arrival in the folder is pending, and no known home in it
+    /// lost its occurrence unnoticed.
+    pub fn drain_finished(&self, account: &str, native: &str) -> Result<bool> {
+        Ok(self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM folders f JOIN checkpoints c ON c.account=f.account AND c.mailbox=f.native
+  WHERE f.account=?1 AND f.native=?2 AND f.drain_until_uid>0 AND c.last_uid>=f.drain_until_uid-1
+  AND NOT (f.rescan_complete=0 AND f.rescan_epoch IS NOT NULL))
+ AND NOT EXISTS(SELECT 1 FROM arrivals WHERE account=?1 AND folder=?2 AND state='pending')
+ AND NOT EXISTS(SELECT 1 FROM placements p JOIN checkpoints c ON c.account=p.account AND c.mailbox=p.home_folder AND c.epoch=p.home_epoch
+  WHERE p.account=?1 AND p.home_folder=?2 AND p.location_state='known'
+  AND NOT EXISTS(SELECT 1 FROM occurrences o WHERE o.account=p.account AND o.mailbox=p.home_folder AND o.epoch=p.home_epoch AND o.uid=p.home_uid AND o.message_id=p.message_id))",
+            params![account, native],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Freezes a retired folder for refile: no drain state and no filed
+    /// home in it, so it is never retained again; in one transaction.
+    pub fn freeze_retired(&mut self, account: &str, native: &str) -> Result<()> {
+        let tx = self.db.transaction()?;
+        let changed = tx.execute(
+            "UPDATE folders SET drain_until_uid=NULL WHERE account=?1 AND native=?2 AND drain_until_uid IS NOT NULL",
+            params![account, native],
+        )? + tx.execute(
+            "UPDATE placements SET filed_home_folder=NULL,filed_home_epoch=NULL,filed_home_uid=NULL WHERE account=?1 AND filed_home_folder=?2",
+            params![account, native],
+        )?;
+        if changed > 0 {
+            bump(&tx)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn remove_occurrence(
         &mut self,
         account: &str,
