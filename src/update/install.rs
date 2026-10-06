@@ -3,7 +3,7 @@
 //! The rename is the commit point; later problems are warnings.
 use super::{
     archive,
-    cache::Cache,
+    cache::{install_key, Cache},
     github::{self, Net},
     platform::{self, FileIdentity},
     release::{self, CachedRelease},
@@ -286,7 +286,7 @@ pub fn install(
     }
     // 10. Record.
     if let Some(cache) = job.cache {
-        let key = path.to_string_lossy().into_owned();
+        let key = install_key(path);
         let identity = FileIdentity::read(path).ok();
         let recorded = job.hooks.at("record").and_then(|_| {
             cache.update(|c| {

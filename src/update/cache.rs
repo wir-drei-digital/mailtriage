@@ -107,6 +107,11 @@ pub struct InstallEntry {
     pub identity: Option<super::platform::FileIdentity>,
 }
 
+/// The key of the installation at `path` (canonical) in `installs`.
+pub fn install_key(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
 /// The cache in one directory.
 #[derive(Debug, Clone)]
 pub struct Cache {
