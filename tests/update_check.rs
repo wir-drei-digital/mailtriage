@@ -139,7 +139,11 @@ fn success_schedules_a_day_plus_jitter() {
     check::refresh(&net, &cache, Reservation::Required).unwrap();
     let file = cache.read();
     let next = at(&file.next_check_at);
-    assert!(next >= before + Duration::hours(24), "{next}");
+    // Stamps are whole seconds, so allow the truncation.
+    assert!(
+        next >= before + Duration::hours(24) - Duration::seconds(1),
+        "{next}"
+    );
     assert!(next <= Utc::now() + Duration::hours(25), "{next}");
     assert_eq!(file.check_failures, 0);
     assert_eq!(file.last_check_error, None);
