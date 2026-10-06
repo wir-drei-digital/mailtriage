@@ -42,5 +42,5 @@ fn schema_5_adds_the_heartbeat_table() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 5);
+    assert_eq!(version, 6);
 }

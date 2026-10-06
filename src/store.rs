@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 /// Schema migrations: (version reached, SQL). Each runs in its own
 /// `BEGIN IMMEDIATE` transaction that re-reads `user_version` first.
-const MIGRATIONS: [(u32, &str); 5] = [
+const MIGRATIONS: [(u32, &str); 6] = [
     (
         1,
         "CREATE TABLE metadata(key TEXT PRIMARY KEY, value INTEGER NOT NULL);
@@ -83,6 +83,21 @@ CREATE INDEX event_account ON filing_events(account, id);
         5,
         "CREATE TABLE pass_heartbeats(account TEXT PRIMARY KEY, finished_at TEXT NOT NULL, partial INTEGER NOT NULL, exit_code INTEGER NOT NULL, mode TEXT NOT NULL);",
     ),
+    (
+        6,
+        "ALTER TABLE placements ADD COLUMN refile_once INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE placements ADD COLUMN filed_home_folder TEXT;
+ALTER TABLE placements ADD COLUMN filed_home_epoch INTEGER;
+ALTER TABLE placements ADD COLUMN filed_home_uid INTEGER;
+ALTER TABLE filing_intents ADD COLUMN consumes_refile INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE folders ADD COLUMN drain_until_uid INTEGER;
+UPDATE placements SET filed_home_folder=home_folder,filed_home_epoch=home_epoch,filed_home_uid=home_uid
+ WHERE location_state='known' AND home_folder IS NOT NULL AND home_epoch IS NOT NULL AND home_uid IS NOT NULL
+ AND NOT EXISTS(SELECT 1 FROM folders f WHERE f.account=placements.account AND f.native=placements.home_folder AND f.state='retired')
+ AND EXISTS(SELECT 1 FROM filing_intents i WHERE i.id=(SELECT MAX(n.id) FROM filing_intents n
+   WHERE n.account=placements.account AND n.message_id=placements.message_id AND n.kind='move' AND n.state='applied')
+  AND i.target_uid IS NOT NULL AND i.target=placements.home_folder AND i.target_epoch=placements.home_epoch AND i.target_uid=placements.home_uid);",
+    ),
 ];
 
 /// Runs one migration under the write lock, unless another process applied
@@ -131,7 +146,7 @@ impl Store {
         db.busy_timeout(StdDuration::from_secs(5))?;
         db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;")?;
         let version: u32 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 5 {
+        if version > 6 {
             bail!("database schema is newer than this binary");
         }
         for (to, sql) in MIGRATIONS {
@@ -634,6 +649,12 @@ fn capture_rescan_set(
     ] {
         tx.execute(sql, params![account, mailbox, new])?;
     }
+    // Refile spec "Filed home": a UIDVALIDITY change ends every filed home in
+    // the folder; rediscovering the message never restores one.
+    tx.execute(
+        "UPDATE placements SET filed_home_folder=NULL,filed_home_epoch=NULL,filed_home_uid=NULL WHERE account=?1 AND filed_home_folder=?2",
+        params![account, mailbox],
+    )?;
     tx.execute(
         "UPDATE arrivals SET state='vanished',resolved_at=?3 WHERE account=?1 AND folder=?2 AND state='pending'",
         params![account, mailbox, now()],

@@ -12,10 +12,10 @@ use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use uuid::Uuid;
 
-const PLACEMENT_COLUMNS: &str = "account,message_id,source_folder,home_folder,home_epoch,home_uid,location_state,absent_since,desired_target,pinned,eligible_once,desired_rev,filed_at,filed_by,flag_attempted_at,flagged_at,done_inferred,blocked_reason";
+const PLACEMENT_COLUMNS: &str = "account,message_id,source_folder,home_folder,home_epoch,home_uid,location_state,absent_since,desired_target,pinned,eligible_once,desired_rev,filed_at,filed_by,flag_attempted_at,flagged_at,done_inferred,blocked_reason,refile_once,filed_home_folder,filed_home_epoch,filed_home_uid";
 const FOLDER_COLUMNS: &str = "account,native,configured,category_id,origin,state,role_verified,confirmed,subscribed,pause_reason,epoch,watch_from_uid,rescan_epoch,rescan_below_uid,rescan_complete,checked_at,error";
 const ARRIVAL_COLUMNS: &str = "id,account,folder,epoch,uid,message_id,rfc_message_id,state,kind,intent_id,created_at,resolved_at";
-const INTENT_COLUMNS: &str = "id,account,message_id,kind,folder,epoch,uid,target,target_epoch,target_uid_next,target_uid,desired_rev,consumes_eligible,batch,state,attempts,next_after,dispatched_at,created_at,updated_at,error,race_until_uid";
+const INTENT_COLUMNS: &str = "id,account,message_id,kind,folder,epoch,uid,target,target_epoch,target_uid_next,target_uid,desired_rev,consumes_eligible,batch,state,attempts,next_after,dispatched_at,created_at,updated_at,error,race_until_uid,consumes_refile";
 const REVERT_COLUMNS: &str = "id,account,parent_intent,folder,folder_epoch,uid,target,target_epoch,state,target_uid,created_at,updated_at,error";
 
 impl Store {
@@ -1059,12 +1059,12 @@ impl Store {
                 let record = row_record(r)?;
                 let placement = row_placement_at(r, 11)?;
                 let meta = MessageMeta {
-                    rfc_message_id: r.get(29)?,
-                    size: r.get(30)?,
-                    internal_date: r.get(31)?,
+                    rfc_message_id: r.get(33)?,
+                    size: r.get(34)?,
+                    internal_date: r.get(35)?,
                     flags: envelope_flags(&record.envelope),
-                    fingerprinted: r.get(32)?,
-                    source_managed: r.get(33)?,
+                    fingerprinted: r.get(36)?,
+                    source_managed: r.get(37)?,
                 };
                 Ok((record, placement, meta))
             })?
@@ -1093,6 +1093,27 @@ impl Store {
         target_uid_next: u64,
         batch: &str,
         now: &str,
+    ) -> Result<Option<i64>> {
+        self.claim_move_with(
+            account,
+            action,
+            (target_epoch, target_uid_next),
+            batch,
+            now,
+            false,
+        )
+    }
+
+    /// `claim_move` with the target snapshot as `(epoch, UIDNEXT)`; the
+    /// intent records whether it consumes a refile mark (refile spec).
+    pub fn claim_move_with(
+        &mut self,
+        account: &str,
+        action: &Action,
+        (target_epoch, target_uid_next): (u64, u64),
+        batch: &str,
+        now: &str,
+        consumes_refile: bool,
     ) -> Result<Option<i64>> {
         let Action::Move {
             message_id,
@@ -1123,9 +1144,9 @@ impl Store {
         if !ok {
             return Ok(None);
         }
-        tx.execute("INSERT INTO filing_intents(account,message_id,kind,folder,epoch,uid,target,target_epoch,target_uid_next,desired_rev,consumes_eligible,batch,state,dispatched_at,created_at,updated_at)
-                VALUES(?,?,'move',?,?,?,?,?,?,?,?,?,'in_flight',?,?,?)",
-            params![account, message_id, from.folder, from.epoch, from.uid, to, target_epoch, target_uid_next, desired_rev, consumes_eligible, batch, now, now, now])?;
+        tx.execute("INSERT INTO filing_intents(account,message_id,kind,folder,epoch,uid,target,target_epoch,target_uid_next,desired_rev,consumes_eligible,consumes_refile,batch,state,dispatched_at,created_at,updated_at)
+                VALUES(?,?,'move',?,?,?,?,?,?,?,?,?,?,'in_flight',?,?,?)",
+            params![account, message_id, from.folder, from.epoch, from.uid, to, target_epoch, target_uid_next, desired_rev, consumes_eligible, consumes_refile, batch, now, now, now])?;
         let id = tx.last_insert_rowid();
         tx.commit()?;
         Ok(Some(id))
@@ -1517,7 +1538,9 @@ enum BlockWrite<'a> {
 
 /// `save_placement` inside a caller's transaction; does not bump the
 /// revision. `done_inferred` is never written here: only done inference,
-/// reopening and explicit review change it.
+/// reopening and explicit review change it. Refile spec "Filed home": the
+/// filed home is stored only while it is the known home, so every other
+/// change of the home clears it.
 fn write_placement(
     tx: &Connection,
     p: &Placement,
@@ -1531,8 +1554,9 @@ fn write_placement(
             (changed, changed.then_some(read))
         }
     };
+    let filed = p.at_filed_home();
     let n = tx.execute(
-        "UPDATE placements SET source_folder=?3,home_folder=?4,home_epoch=?5,home_uid=?6,location_state=?7,absent_since=?8,desired_target=?9,pinned=?10,eligible_once=?11,desired_rev=?12,filed_at=?13,filed_by=?14,flag_attempted_at=?15,flagged_at=?16,blocked_reason=CASE WHEN ?17 THEN ?18 ELSE blocked_reason END
+        "UPDATE placements SET source_folder=?3,home_folder=?4,home_epoch=?5,home_uid=?6,location_state=?7,absent_since=?8,desired_target=?9,pinned=?10,eligible_once=?11,desired_rev=?12,filed_at=?13,filed_by=?14,flag_attempted_at=?15,flagged_at=?16,blocked_reason=CASE WHEN ?17 THEN ?18 ELSE blocked_reason END,refile_once=?22,filed_home_folder=?23,filed_home_epoch=?24,filed_home_uid=?25
  WHERE account=?1 AND message_id=?2 AND (?19 IS NULL OR desired_rev=?19) AND (?20=0 OR blocked_reason IS ?21)",
         params![
             p.account,
@@ -1555,7 +1579,11 @@ fn write_placement(
             p.blocked_reason,
             expected_rev,
             read_block.is_some(),
-            read_block.flatten()
+            read_block.flatten(),
+            p.refile_once,
+            p.filed_home_folder.as_deref().filter(|_| filed),
+            p.filed_home_epoch.filter(|_| filed),
+            p.filed_home_uid.filter(|_| filed)
         ],
     )?;
     Ok(n == 1)
@@ -1800,6 +1828,10 @@ fn row_placement_at(r: &Row<'_>, at: usize) -> rusqlite::Result<Placement> {
         flagged_at: r.get(at + 15)?,
         done_inferred: r.get(at + 16)?,
         blocked_reason: r.get(at + 17)?,
+        refile_once: r.get(at + 18)?,
+        filed_home_folder: r.get(at + 19)?,
+        filed_home_epoch: r.get(at + 20)?,
+        filed_home_uid: r.get(at + 21)?,
     })
 }
 
@@ -1880,6 +1912,7 @@ fn row_intent(r: &Row<'_>) -> rusqlite::Result<Intent> {
         updated_at: r.get(19)?,
         error: r.get(20)?,
         race_until_uid: r.get(21)?,
+        consumes_refile: r.get(22)?,
     })
 }
 
