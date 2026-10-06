@@ -100,14 +100,18 @@ impl Fixture {
         self.start_with(&self.config)
     }
 
-    fn stop(&self) -> anyhow::Result<Value> {
+    fn stop_with(&self, config: &Path) -> anyhow::Result<Value> {
         service_control::stop(
             &self.ctx,
-            &self.service(&self.config),
-            &self.config,
+            &self.service(config),
+            config,
             "work",
             &self.proc_root,
         )
+    }
+
+    fn stop(&self) -> anyhow::Result<Value> {
+        self.stop_with(&self.config)
     }
 }
 
@@ -289,16 +293,19 @@ fn another_or_unknown_config_is_refused_without_manager_calls() {
     for manager in [Manager::Launchd, Manager::Systemd] {
         let f = Fixture::installed(manager);
         let other = config_file(f.dir.path(), "b c.json");
+        let mismatch = format!(
+            "service for account work runs config {}; pass --config {}",
+            f.config.display(),
+            f.config.display()
+        );
         let (code, reason, message) = failure(f.start_with(&other));
         assert_eq!((code, reason), (5, Some("service_config_mismatch")));
-        assert_eq!(
-            message,
-            format!(
-                "service for account work runs config {}; pass --config {}",
-                f.config.display(),
-                f.config.display()
-            )
-        );
+        assert_eq!(message, mismatch);
+        assert_eq!(f.calls(), inspect_calls(manager));
+        f.clear_log();
+        let (code, reason, message) = failure(f.stop_with(&other));
+        assert_eq!((code, reason), (5, Some("service_config_mismatch")));
+        assert_eq!(message, mismatch);
         assert_eq!(f.calls(), inspect_calls(manager));
         f.touch(match manager {
             Manager::Launchd => "print-fails",
@@ -314,6 +321,57 @@ fn another_or_unknown_config_is_refused_without_manager_calls() {
             f.calls(),
             [inspect_calls(manager), inspect_calls(manager)].concat()
         );
+    }
+}
+
+/// The unit file was rewritten for config B while the loaded job still runs
+/// A: `stop` refuses with either config and stops nothing.
+#[test]
+fn stop_refuses_a_running_job_whose_unit_names_another_config() {
+    for manager in [Manager::Launchd, Manager::Systemd] {
+        let f = Fixture::installed(manager);
+        let b = config_file(f.dir.path(), "b.json");
+        let unit_b = unit_for(f.dir.path(), &b);
+        let text = match manager {
+            Manager::Launchd => system_service::plist(&unit_b),
+            Manager::Systemd => system_service::systemd_unit(&unit_b),
+        };
+        fs::write(f.ctx.unit_path("work"), text).unwrap();
+        if manager == Manager::Systemd {
+            f.touch("needs-reload");
+        }
+        let found = service_control::inspect(&f.ctx, "work", &f.proc_root);
+        assert!(found.running, "{manager:?}");
+        assert_eq!(
+            found.service_config.as_ref(),
+            Some(&f.config),
+            "{manager:?}"
+        );
+        assert_eq!(found.file_config.as_ref(), Some(&b), "{manager:?}");
+        f.clear_log();
+        for (config, runs) in [(&f.config, &b), (&b, &f.config)] {
+            let (code, reason, message) = failure(f.stop_with(config));
+            assert_eq!(
+                (code, reason),
+                (5, Some("service_config_mismatch")),
+                "{manager:?}"
+            );
+            assert_eq!(
+                message,
+                format!(
+                    "service for account work runs config {}; pass --config {}",
+                    runs.display(),
+                    runs.display()
+                )
+            );
+        }
+        // Only the two inspections ran: no bootout, disable or disable --now.
+        assert_eq!(
+            f.calls(),
+            [inspect_calls(manager), inspect_calls(manager)].concat(),
+            "{manager:?}"
+        );
+        assert!(service_control::inspect(&f.ctx, "work", &f.proc_root).running);
     }
 }
 
