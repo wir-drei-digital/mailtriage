@@ -2,7 +2,11 @@
 //! Setup shared by the refile tests: mail that mailtriage filed and whose
 //! category then changes, and readers for placements, events and calls.
 use super::common::{mail, Harness};
-use mailtriage::{domain::Category, filing::Placement};
+use mailtriage::{
+    domain::Category,
+    filing::Placement,
+    service::{RefileOptions, ServiceError},
+};
 use serde_json::Value;
 
 /// The fake classifier files mail mentioning "update" into `updates`, or
@@ -180,4 +184,24 @@ pub fn scoped(h: &Harness, folder: &str) -> bool {
         .rev()
         .find_map(|c| c.strip_prefix("scope ").map(str::to_string))
         .is_some_and(|scope| scope.split(',').any(|f| f == folder))
+}
+
+pub fn opts(category: Option<&str>, folder: Option<&str>) -> RefileOptions {
+    RefileOptions {
+        category: category.map(str::to_string),
+        folder: folder.map(str::to_string),
+        limit: 50,
+    }
+}
+
+/// `filing refile` without `--apply`.
+pub fn preview(h: &Harness, category: Option<&str>, folder: Option<&str>) -> Value {
+    h.service()
+        .filing_refile("work", opts(category, folder))
+        .unwrap()
+}
+
+/// The exit code of a refused service call.
+pub fn code(e: &anyhow::Error) -> Option<i32> {
+    e.downcast_ref::<ServiceError>().map(|s| s.code)
 }

@@ -150,6 +150,9 @@ pub enum RetryTarget {
     Arrival(i64),
 }
 
+/// `filing refile` filters (refile spec "Command").
+pub use crate::filing::refile::command::RefileOptions;
+
 pub struct Service {
     pub config: AppConfig,
     path: PathBuf,
@@ -1308,7 +1311,7 @@ impl Service {
     }
     /// `filing status`: configuration and stored state only, no engine calls.
     pub fn filing_status(&mut self, name: &str) -> Result<Value> {
-        let (account, _) = self.ensure(name)?;
+        let (account, generation) = self.ensure(name)?;
         let state = self.store.filing_state(name)?;
         let map = observe::offline_map(&self.store, name, &account)?;
         let folders = self.store.folder_records(name)?;
@@ -1320,7 +1323,11 @@ impl Service {
         let moving = open_moves(&self.store, name)?;
         let (mut blocked, mut quarantined, mut ambiguous) = (vec![], vec![], vec![]);
         let (mut eligible, mut stale) = (0, vec![]);
+        let mut refile_marked = 0;
         for (_, p, meta) in self.store.records_for_planning(name)? {
+            if p.refile_once {
+                refile_marked += 1;
+            }
             match p.blocked_reason.as_deref() {
                 Some("quarantined") => quarantined.push(p.message_id.clone()),
                 Some(reason) => blocked.push(json!({"id": p.message_id, "blocked_reason": reason})),
@@ -1344,6 +1351,8 @@ impl Service {
                 stale.push(p.message_id);
             }
         }
+        let refile_candidates =
+            refile::command::candidate_total(&self.store, name, &account, &generation)?;
         let unresolved = self.store.arrivals(name, Some("unresolved"))?;
         let last_pass = state.last_pass.clone().unwrap_or(Value::Null);
         Ok(json!({
@@ -1368,6 +1377,8 @@ impl Service {
             "unresolved_arrival_items": listed(&unresolved),
             "eligible_unfiled": eligible,
             "stale_requests": {"count": stale.len(), "ids": listed(&stale)},
+            "refile_marked": refile_marked,
+            "refile_candidates": refile_candidates,
             "alias_conflicts": map.alias_conflicts,
             "problems": last_pass.get("problems").cloned().unwrap_or(json!([])),
             "last_pass": last_pass,
@@ -1472,6 +1483,13 @@ impl Service {
         }
         Err(err(5, "placements changed concurrently; retry"))
     }
+    /// `filing refile` without `--apply` (refile spec "Command"): which
+    /// filed mail would follow its new category. Read-only; it may bring the
+    /// classification generation up to date, as `filing plan` does.
+    pub fn filing_refile(&mut self, name: &str, opts: RefileOptions) -> Result<Value> {
+        let (account, generation) = self.ensure(name)?;
+        refile::command::preview(&self.store, name, &account, &generation, &opts)
+    }
     pub fn review(&mut self, name: &str, id: &str, done: bool) -> Result<Value> {
         let (_, generation) = self.ensure(name)?;
         let row = self.required(name, id)?;
@@ -1523,7 +1541,9 @@ impl Service {
         self.config_bytes_hash = hash(&fs::read(&self.path)?);
         self.config = updated;
         self.ensure(name)?;
-        self.categories(name)
+        let mut out = self.categories(name)?;
+        out["hint"] = refile::command::hint(name, &self.account(name)?);
+        Ok(out)
     }
     /// `categories validate --account`: the configuration checks of `apply`
     /// against the account's current configuration and filing mode, folder
@@ -1838,7 +1858,7 @@ fn open_moves(store: &Store, name: &str) -> Result<BTreeSet<String>> {
 }
 
 /// The filing mode a pass would run: the configured one, `off` without an engine.
-fn filing_mode(account: &AccountConfig) -> FilingMode {
+pub(crate) fn filing_mode(account: &AccountConfig) -> FilingMode {
     match account.engine_config() {
         Some(_) => account.filing.mode,
         None => FilingMode::Off,

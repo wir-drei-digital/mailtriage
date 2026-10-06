@@ -319,7 +319,7 @@ pub fn engine_report(engine: &dyn MailEngine, cfg: &AccountConfig) -> Result<ser
     }))
 }
 
-fn sources_of(cfg: &AccountConfig) -> Vec<String> {
+pub(crate) fn sources_of(cfg: &AccountConfig) -> Vec<String> {
     cfg.engine_config()
         .map(|e| e.mailboxes().to_vec())
         .unwrap_or_default()
