@@ -30,12 +30,12 @@ fn legacy_json(dir: &std::path::Path) -> serde_json::Value {
 }
 
 #[test]
-fn legacy_himalaya_config_loads_as_engine_and_saves_as_v2() {
+fn legacy_himalaya_config_loads_as_engine_and_saves_as_v3() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c.json");
     fs::write(&path, legacy_json(dir.path()).to_string()).unwrap();
     let loaded = config::load(&path).unwrap();
-    assert_eq!(loaded.schema_version, 2);
+    assert_eq!(loaded.schema_version, 3);
     let a = &loaded.accounts["work"];
     assert!(a.himalaya.is_none());
     assert!(matches!(a.engine, Some(EngineConfig::Himalaya(ref h)) if h.mailboxes == ["INBOX"]));
@@ -43,7 +43,7 @@ fn legacy_himalaya_config_loads_as_engine_and_saves_as_v2() {
     config::save(&path, &loaded).unwrap();
     let on_disk: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-    assert_eq!(on_disk["schema_version"], 2);
+    assert_eq!(on_disk["schema_version"], 3);
     assert_eq!(on_disk["accounts"]["work"]["engine"]["kind"], "himalaya");
     assert!(on_disk["accounts"]["work"].get("himalaya").is_none());
     assert_eq!(on_disk["accounts"]["work"]["filing"]["mode"], "off");
@@ -154,7 +154,7 @@ fn source_mailboxes_are_checked_when_filing_is_on() {
 fn unsupported_schema_versions_are_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c.json");
-    for version in [0, 3] {
+    for version in [0, 4] {
         let mut c = serde_json::to_value(config::default_config()).unwrap();
         c["schema_version"] = json!(version);
         fs::write(&path, c.to_string()).unwrap();

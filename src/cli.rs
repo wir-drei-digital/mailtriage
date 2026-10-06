@@ -1,7 +1,7 @@
 use clap::{ArgGroup, Args, Parser, Subcommand};
 use mailtriage::{
     config,
-    domain::{Category, FilingMode},
+    domain::{Category, FilingMode, UpdateMode},
     engine::ConfigChanged,
     prompt::{self, Prompter},
     secrets::KeyStore,
@@ -142,6 +142,9 @@ struct SetupArg {
     interval_seconds: u64,
     #[arg(long, default_value_t = 100, value_parser = parse_limit)]
     limit: usize,
+    /// What `watch` does about new releases (default: keep the config's value; auto for a new config).
+    #[arg(long, value_parser = ["auto", "notify", "off"])]
+    updates: Option<String>,
 }
 
 impl SetupArg {
@@ -173,6 +176,7 @@ impl SetupArg {
             service: self.service.as_deref().map(|s| s == "install"),
             interval_seconds: self.interval_seconds,
             limit: self.limit,
+            updates: self.updates.as_deref().and_then(UpdateMode::parse),
         }
     }
 }

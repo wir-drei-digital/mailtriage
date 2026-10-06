@@ -1,11 +1,13 @@
 use crate::domain::{
     AccountConfig, AppConfig, Category, EngineConfig, FilingConfig, FilingMode, PolicyConfig,
-    ProviderConfig,
+    ProviderConfig, UpdateMode,
 };
 use anyhow::{anyhow, bail, Context, Result};
+use serde_json::Value;
 use std::{
     collections::BTreeMap,
     ffi::OsStr,
+    fmt,
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -78,7 +80,8 @@ pub fn default_config() -> AppConfig {
         },
     );
     AppConfig {
-        schema_version: 2,
+        schema_version: SCHEMA_VERSION,
+        updates: UpdateMode::Auto,
         state_dir: "./mailtriage-state".into(),
         provider: ProviderConfig {
             kind: "fake".into(),
@@ -101,8 +104,38 @@ pub fn default_config() -> AppConfig {
     }
 }
 
-/// Moves the legacy `himalaya` block into `engine` and marks the config as schema 2.
-/// Refuses unknown schema versions so a newer file is never rewritten as schema 2.
+/// The schema every config write produces. Schema 3 adds `updates`;
+/// binaries before it accept only 1 and 2, so they refuse a schema 3 file
+/// instead of rewriting it without `updates`.
+pub const SCHEMA_VERSION: u32 = 3;
+
+/// The message for an invalid `updates` value (exit 2).
+pub const UPDATES_RULE: &str = "updates must be auto, notify or off";
+
+/// A config whose `updates` value is not `auto`, `notify` or `off`.
+#[derive(Debug)]
+pub struct InvalidUpdates;
+impl fmt::Display for InvalidUpdates {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(UPDATES_RULE)
+    }
+}
+impl std::error::Error for InvalidUpdates {}
+
+/// The `updates` value of a parsed config file: missing means `auto`.
+fn updates_value(value: &Value) -> Result<UpdateMode> {
+    match value.get("updates") {
+        None => Ok(UpdateMode::Auto),
+        Some(v) => v
+            .as_str()
+            .and_then(UpdateMode::parse)
+            .ok_or_else(|| InvalidUpdates.into()),
+    }
+}
+
+/// Moves the legacy `himalaya` block into `engine` and marks the config as
+/// schema 3. Refuses unknown schema versions so a newer file is never
+/// rewritten as schema 3.
 pub fn normalize(config: &mut AppConfig) -> Result<()> {
     check_schema_version(config.schema_version)?;
     for (name, account) in config.accounts.iter_mut() {
@@ -113,12 +146,12 @@ pub fn normalize(config: &mut AppConfig) -> Result<()> {
             account.engine = Some(EngineConfig::Himalaya(h));
         }
     }
-    config.schema_version = 2;
+    config.schema_version = SCHEMA_VERSION;
     Ok(())
 }
 
 fn check_schema_version(version: u32) -> Result<()> {
-    if !(1..=2).contains(&version) {
+    if !(1..=SCHEMA_VERSION).contains(&version) {
         bail!("unsupported config schema_version {version}");
     }
     Ok(())
@@ -308,10 +341,33 @@ fn valid_id(id: &str) -> bool {
 }
 pub fn load(path: &Path) -> Result<AppConfig> {
     let data = fs::read(path).with_context(|| format!("read config {}", path.display()))?;
-    let mut config: AppConfig = serde_json::from_slice(&data).context("parse config JSON")?;
+    from_bytes(&data)
+}
+
+/// `load` for bytes already read. An invalid `updates` value is the error
+/// `InvalidUpdates`.
+pub fn from_bytes(data: &[u8]) -> Result<AppConfig> {
+    let value: Value = serde_json::from_slice(data).context("parse config JSON")?;
+    updates_value(&value)?;
+    let mut config: AppConfig = serde_json::from_value(value).context("parse config JSON")?;
     normalize(&mut config)?;
     validate(&config)?;
     Ok(config)
+}
+
+/// The `updates` mode of the config at `path`, read without the rest of
+/// validation, so `watch` can update itself while its passes fail on
+/// another config problem. Errors when the file cannot be read, is not
+/// JSON, has an unsupported `schema_version` or an invalid `updates`.
+pub fn read_updates_mode(path: &Path) -> Result<UpdateMode> {
+    let data = fs::read(path).with_context(|| format!("read config {}", path.display()))?;
+    let value: Value = serde_json::from_slice(&data).context("parse config JSON")?;
+    let version = value
+        .get("schema_version")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow!("config has no schema_version"))?;
+    check_schema_version(u32::try_from(version).unwrap_or(u32::MAX))?;
+    updates_value(&value)
 }
 
 pub fn save(path: &Path, config: &AppConfig) -> Result<()> {

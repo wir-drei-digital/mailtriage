@@ -92,7 +92,7 @@ mailtriage setup
 | 5. Classifier | OpenRouter or the offline `fake` provider, the model, and where the key lives. | `--provider`, `--model`, `--key-store`, `--key-command`, `--key-env`, `--key-stored` |
 | 6. Categories | Six default categories for a new account. | none |
 | 7. Filing | `dry_run` or `off`. | `--filing` |
-| 8. Write | Validates and writes the config. | none |
+| 8. Write | Validates and writes the config, including `updates`. | `--updates` |
 | 9. Check | Runs `doctor` and prints each item with its fix. | none |
 | 10. Service | Offers to run `watch` in the background. | `--service`, `--interval-seconds`, `--limit` |
 
@@ -142,7 +142,7 @@ mailtriage setup
 
 **Step 7, filing.** `--filing dry-run` plans moves and flags and writes nothing; it is the default for a new account, and an updated account defaults to its current mode. `--filing off` only classifies. Setup never selects `live`. An account that is already `live` stays `live` unless you pass `--filing`. To go live, follow the [rollout](#rollout).
 
-**Step 8, write.** Setup validates the whole config and writes it atomically with mode 0600. The state directory is created with mode 0700. If the result is invalid, setup exits 2 and writes nothing. If the state directory already holds a binding for the account and the new answers would change it, setup exits 5 and writes nothing; see [Updating an account](#updating-an-account).
+**Step 8, write.** `--updates auto|notify|off` sets [`updates`](#updates), with no prompt: a new config gets `auto`, and an existing one keeps its value unless `--updates` is given. Setup validates the whole config and writes it atomically with mode 0600, under the configuration lock (`mailtriage.lock`). When another command holds that lock, setup exits 5 (reason `config_busy`); when the file changed since step 1 read it, setup exits 5 (reason `config_changed`). Either way it writes nothing; run it again. The state directory is created with mode 0700. If the result is invalid, setup exits 2 and writes nothing. If the state directory already holds a binding for the account and the new answers would change it, setup exits 5 and writes nothing; see [Updating an account](#updating-an-account).
 
 **Step 9, check.** Setup runs `doctor` for the account. It prints each item (`provider`, `key`, `mail`, and `filing` when filing is on) as `ok`, or as `not ready` with the one command that fixes it. If `doctor` itself fails, for example because the state database cannot be opened, setup reports a single not-ready `state` item instead. Setup exits 0 even when an item is not ready.
 
@@ -226,7 +226,7 @@ mailtriage setup --update --account home --himalaya-account home
 Progress and the check summary go to stderr. stdout carries one result object, on one line with `--json`:
 
 ```json
-{"schema_version":1,"setup":{"account":"work","config":"/Users/alice/.config/mailtriage/mailtriage.json","doctor":{"items":[{"check":"provider","ready":true},{"check":"key","ready":true},{"check":"mail","ready":true},{"check":"filing","ready":true}],"ready":true},"filing":"dry_run","key_source":"command","key_store":"keychain","mailboxes":["INBOX"],"model":"typesafe/jev-1.13","provider":"openrouter","service":null}}
+{"schema_version":1,"setup":{"account":"work","config":"/Users/alice/.config/mailtriage/mailtriage.json","doctor":{"items":[{"check":"provider","ready":true},{"check":"key","ready":true},{"check":"mail","ready":true},{"check":"filing","ready":true}],"ready":true},"filing":"dry_run","key_source":"command","key_store":"keychain","mailboxes":["INBOX"],"model":"typesafe/jev-1.13","provider":"openrouter","service":null,"updates":"auto"}}
 ```
 
 | Field | Content |
@@ -237,6 +237,7 @@ Progress and the check summary go to stderr. stdout carries one result object, o
 | `key_source` | `command`, `env`, or `null` for `fake`. |
 | `key_store` | The `--key-store` value chosen in this run; `null` when no store was chosen: the classifier or its key source was kept, or it is `fake`. |
 | `filing` | `off`, `dry_run` or `live`. |
+| `updates` | The config's `updates` after this run: `auto`, `notify` or `off`. |
 | `doctor` | `ready`, and `items`: each `{check, ready}`, plus `error` and `fix` when not ready. |
 | `service` | `null` when skipped or not installed after a failed `state` check, else the [`service install` result](#service-commands). |
 
@@ -247,7 +248,7 @@ Progress and the check summary go to stderr. stdout carries one result object, o
 | 0 | Setup finished. `doctor` items that are not ready are listed in the result. |
 | 2 | Invalid input; a required flag missing without prompts; an invalid account name; conflicting key flags, or key flags with `--provider fake`; a key tool not on `PATH`; a tool store without a terminal; setup aborted; the service on an unsupported platform. |
 | 3 | Himalaya missing or not v2.1.0 with IMAP; `account check` failed; the folders could not be listed; a key tool or key command failed; the config could not be written; `launchctl` or `systemctl` failed. |
-| 5 | The config exists and `--update` was not given (without prompts); the account is bound to another mailbox (its identity, Himalaya account or IMAP server would change); a service file exists that mailtriage did not write. |
+| 5 | The config exists and `--update` was not given (without prompts); the account is bound to another mailbox (its identity, Himalaya account or IMAP server would change); a service file exists that mailtriage did not write; another command is editing the config (`config_busy`), or it changed since setup read it (`config_changed`). |
 
 Every error except the two abort messages (`setup aborted; nothing was changed`, `setup aborted: input ended`) starts with `step N (name): ` and names the flag or command that fixes it, for example `step 2 (Himalaya): --himalaya-account is required without prompts`. Step 10 errors (`step 10 (service): `) happen after the config is written; they name the `mailtriage service install` command, with `--config` and this run's `--interval-seconds` and `--limit`, to run once the cause is fixed. On a platform without launchd or systemd the fix is to drop `--service install` instead.
 
@@ -384,7 +385,8 @@ A configuration for one account:
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
+  "updates": "auto",
   "state_dir": "state",
   "provider": {
     "kind": "openrouter",
@@ -474,13 +476,14 @@ A configuration for one account:
 }
 ```
 
-Each command that opens the configuration checks the whole file. A file that breaks a rule below is refused with exit code 2 and `invalid configuration; check required fields, categories and provider settings`; the message does not name the field. Relative paths in `state_dir`, `engine.config` and `engine.binary` resolve against the directory that holds `mailtriage.json`.
+Each command that opens the configuration checks the whole file. A file that breaks a rule below is refused with exit code 2 and `invalid configuration; check required fields, categories and provider settings`; the message does not name the field, except for an invalid `updates`, which exits 2 with `updates must be auto, notify or off`. Relative paths in `state_dir`, `engine.config` and `engine.binary` resolve against the directory that holds `mailtriage.json`.
 
 Top level:
 
 | Field | What to set |
 | --- | --- |
-| `schema_version` | `2`, as written by `init` and `setup`. |
+| `schema_version` | `3`, as written by `init`, `setup` and every command that edits the file. mailtriage reads schemas 1 to 3. Releases before automatic updates read only 1 and 2, so they refuse a schema 3 file instead of rewriting it without `updates`. |
+| `updates` | What `watch` does about new releases: `"auto"` installs them, `"notify"` only reports them, `"off"` makes no network call. A config without the key means `"auto"`. See [Updates](#updates). |
 | `state_dir` | Directory for the SQLite database and normalized message text. mailtriage creates it with mode 0700. Keep it on a local filesystem. |
 | `provider` | The classification provider, below. |
 | `policy` | Thresholds and limits, below. The `init` values are a reasonable start. |

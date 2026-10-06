@@ -166,7 +166,10 @@ impl Service {
             )
         })?;
         let bytes = fs::read(&path)?;
-        let mut cfg = config::load(&path).map_err(|_| {
+        let mut cfg = config::load(&path).map_err(|e| {
+            if e.downcast_ref::<config::InvalidUpdates>().is_some() {
+                return err(2, config::UPDATES_RULE);
+            }
             err(
                 2,
                 "invalid configuration; check required fields, categories and provider settings",

@@ -20,7 +20,7 @@ Hermes, or any other agent, calls `mailtriage` as an ordinary process. It needs 
      - `--key-command 'COMMAND'`: a shell command that prints the key. Setup runs it once to check it.
      - `--key-store env`, with `--key-env NAME` when the variable is not `OPENROUTER_API_KEY`: mailtriage reads the key from the variable in its own environment.
    - `--service install` also installs `watch` as a launchd agent or systemd user unit (see [Background service](guide.md#background-service)). The default is `skip`. Setup installs no service when `doctor` reports a not-ready `state` item.
-   - Optional: `--account`, `--identity`, `--timezone`, `--brief`, `--mailbox` (repeat for several folders), `--filing off|dry-run`, `--interval-seconds`, `--limit`.
+   - Optional: `--account`, `--identity`, `--timezone`, `--brief`, `--mailbox` (repeat for several folders), `--filing off|dry-run`, `--interval-seconds`, `--limit`, `--updates auto|notify|off` (what `watch` does about new releases; see [Updates](guide.md#updates)).
    - To change an existing config, add `--update`. A classifier flag such as `--model` keeps where the key comes from; only a key flag (`--key-store`, `--key-command`, `--key-env`, `--key-stored`) changes it. Key flags with `--provider fake` exit 2.
    - To write the configuration by hand instead, follow [Manual setup](guide.md#manual-setup). Use absolute paths in `engine.binary` and `engine.config`: the agent's `PATH` may not contain Himalaya, and `~` is not expanded.
 

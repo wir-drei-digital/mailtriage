@@ -81,6 +81,7 @@ stdout:
   "key_source": "command",
   "key_store": "keychain",
   "filing": "dry_run",
+  "updates": "auto",
   "doctor": {"ready": false, "items": [
     {"check": "provider", "ready": true},
     {"check": "key", "ready": false,
@@ -97,6 +98,8 @@ stdout:
   openrouter` changed it without a key flag (the key source is kept), or it is
   `fake`.
 - `filing`: `off`, `dry_run` or `live`.
+- `updates`: the config's `updates` after this run (`auto`, `notify` or `off`);
+  `--updates` sets it, otherwise an existing config keeps its value.
 - `doctor.items[].check`: `provider`, `key`, `mail`, and `filing` when filing is
   on; `state` (not ready) when `doctor` itself failed, for example when the
   state database cannot be opened. `error` and `fix` appear only when `ready`
@@ -128,7 +131,9 @@ it. Codes: 2 input, missing flag without
 prompts, key flags with `--provider fake`, abort (`setup aborted; nothing was
 changed`, `setup aborted: input ended`); 3 Himalaya, key tool or service
 manager failure, unwritable config; 5 config exists without `--update`, a
-binding-changing update, unmarked service file.
+binding-changing update, unmarked service file, another command holding the
+config lock (`config_busy`), or a config that changed since step 1 read it
+(`config_changed`); step 8 writes under the exclusive config lock.
 
 ## `doctor` key fields
 
