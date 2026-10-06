@@ -4,6 +4,7 @@
 //! engine call.
 use super::observe::FolderMap;
 use super::planner::{Action, Locator, Plan};
+use super::refile;
 use super::{
     is_config_changed, rfc_message_id, FilingSummary, FilingWrite, Intent, IntentPatch,
     PassContext, Placement, Revert,
@@ -61,6 +62,7 @@ pub fn apply(
             let batch = move_batch(
                 store,
                 ctx,
+                map,
                 (folder, *epoch, to),
                 chunk,
                 &plan.refile_moves,
@@ -434,10 +436,12 @@ pub(crate) fn race_problem(folder: &str, summary: &mut FilingSummary) {
 }
 
 /// One move batch: verify, snapshot the target, claim (a refile move as
-/// one), dispatch.
+/// one, checked again right after its claim), dispatch.
+#[allow(clippy::too_many_arguments)] // One move batch with its pass context.
 fn move_batch(
     store: &mut Store,
     ctx: &PassContext,
+    map: &FolderMap,
     (folder, epoch, to): (&str, u64, &str),
     actions: &[&Action],
     refile: &BTreeSet<String>,
@@ -470,14 +474,39 @@ fn move_batch(
             &at,
             consumes_refile,
         )?;
-        if let Some(id) = claim {
-            claimed.push((id, locator(action).uid));
+        let Some(id) = claim else {
+            continue;
+        };
+        if consumes_refile && refile_cancelled(store, ctx, map, id, locator(action))? {
+            continue;
         }
+        claimed.push((id, locator(action).uid));
     }
     if claimed.is_empty() {
         return Ok(());
     }
     dispatch_moves(store, ctx, folder, epoch, to, &claimed, summary)
+}
+
+/// Refile spec "Intents", at claim time: a refile intent that fails its
+/// check is superseded before dispatch.
+fn refile_cancelled(
+    store: &mut Store,
+    ctx: &PassContext,
+    map: &FolderMap,
+    id: i64,
+    from: &Locator,
+) -> Result<bool> {
+    let Some(intent) = store.intent(id)? else {
+        return Ok(false);
+    };
+    match refile::intents::recheck(store, ctx, map, &intent, from)? {
+        Some(reason) => {
+            refile::intents::cancel(store, ctx, &intent, reason)?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
 }
 
 /// Whether a move into `target` may be claimed: its discovery checkpoint is

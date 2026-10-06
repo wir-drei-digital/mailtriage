@@ -10,6 +10,7 @@ use super::apply::{
 use super::arrivals::in_race_window;
 use super::observe::FolderMap;
 use super::planner::{CategoryFolder, Locator};
+use super::refile;
 use super::{
     FilingSummary, FilingWrite, Intent, IntentPatch, LocationState, PassContext, Placement,
 };
@@ -573,6 +574,12 @@ fn retry_or_supersede(
         .ok_or_else(|| anyhow!("message has no placement"))?;
     if p.desired_rev != intent.desired_rev || p.blocked_reason.is_some() {
         return store.update_intent(intent.id, "superseded", IntentPatch::default(), &ctx.now);
+    }
+    // Refile spec "Intents": before every retry a refile intent is checked again.
+    if intent.consumes_refile && map.caps.is_some() {
+        if let Some(reason) = refile::intents::recheck(store, ctx, map, intent, &from)? {
+            return refile::intents::cancel(store, ctx, intent, reason);
+        }
     }
     if intent.attempts >= ctx.max_attempts {
         return block(

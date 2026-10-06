@@ -1044,6 +1044,23 @@ impl Store {
         &self,
         account: &str,
     ) -> Result<Vec<(Record, Placement, MessageMeta)>> {
+        self.planning_rows(account, None)
+    }
+
+    /// `records_for_planning` for one message.
+    pub fn record_for_planning(
+        &self,
+        account: &str,
+        id: &str,
+    ) -> Result<Option<(Record, Placement, MessageMeta)>> {
+        Ok(self.planning_rows(account, Some(id))?.pop())
+    }
+
+    fn planning_rows(
+        &self,
+        account: &str,
+        id: Option<&str>,
+    ) -> Result<Vec<(Record, Placement, MessageMeta)>> {
         let placement: Vec<String> = PLACEMENT_COLUMNS
             .split(',')
             .map(|c| format!("p.{c}"))
@@ -1051,11 +1068,11 @@ impl Store {
         let mut st = self.db.prepare(&format!(
             "SELECT m.id,m.account,NULL,m.envelope,m.status,m.classification,m.overrides,m.review_state,m.observed_at,m.error,m.generation,{},
  m.rfc_message_id,m.size,m.internal_date,m.fingerprint IS NOT NULL,m.source_managed
- FROM placements p JOIN messages m ON m.id=p.message_id WHERE p.account=? ORDER BY p.message_id",
+ FROM placements p JOIN messages m ON m.id=p.message_id WHERE p.account=?1 AND (?2 IS NULL OR p.message_id=?2) ORDER BY p.message_id",
             placement.join(",")
         ))?;
         let rows = st
-            .query_map([account], |r| {
+            .query_map(params![account, id], |r| {
                 let record = row_record(r)?;
                 let placement = row_placement_at(r, 11)?;
                 let meta = MessageMeta {

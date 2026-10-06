@@ -61,14 +61,38 @@ pub fn plan_input(
     map: &FolderMap,
     preview: bool,
 ) -> Result<PlanInput> {
+    let rows = store.records_for_planning(ctx.account)?;
+    input_of(store, ctx, map, preview, rows)
+}
+
+/// `plan_input` with only the placement of `id` (refile intent checks).
+pub fn message_input(
+    store: &Store,
+    ctx: &PassContext,
+    map: &FolderMap,
+    id: &str,
+) -> Result<PlanInput> {
+    let rows = store
+        .record_for_planning(ctx.account, id)?
+        .into_iter()
+        .collect();
+    input_of(store, ctx, map, false, rows)
+}
+
+fn input_of(
+    store: &Store,
+    ctx: &PassContext,
+    map: &FolderMap,
+    preview: bool,
+    rows: Vec<(Record, Placement, MessageMeta)>,
+) -> Result<PlanInput> {
     let open: BTreeSet<(String, String)> = store
         .intents(ctx.account, true)?
         .into_iter()
         .map(|i| (i.message_id, i.kind))
         .collect();
     let has_open = |id: &str, kind: &str| open.contains(&(id.to_string(), kind.to_string()));
-    let messages = store
-        .records_for_planning(ctx.account)?
+    let messages = rows
         .into_iter()
         .map(|(record, p, meta)| {
             let mut m = plan_message(&p, &meta, effective(&record, ctx.generation));

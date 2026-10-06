@@ -155,6 +155,24 @@ pub fn input(
     build(store, account, cfg, gone, rows, &counts, None)
 }
 
+/// `input` for the placement of `id` only; its open move intent `exclude`
+/// (the refile intent being checked) does not count.
+pub fn input_for(
+    store: &Store,
+    account: &str,
+    cfg: &AccountConfig,
+    gone: &BTreeSet<String>,
+    id: &str,
+    exclude: i64,
+) -> Result<RefileInput> {
+    let rows: Vec<_> = store
+        .record_for_planning(account, id)?
+        .into_iter()
+        .collect();
+    let counts = BTreeMap::from([(id.to_string(), store.occurrences_of(account, id)?.len())]);
+    build(store, account, cfg, gone, rows, &counts, Some(exclude))
+}
+
 /// Facts of `rows`; the open move intent `exclude` does not count.
 fn build(
     store: &Store,
