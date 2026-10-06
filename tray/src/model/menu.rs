@@ -25,6 +25,29 @@ pub enum Action {
     Quit,
 }
 
+impl Action {
+    /// The id of this action's menu item: its kind, then its argument
+    /// (log paths come from JSON, so they are text). Equal actions have
+    /// equal ids and different actions different ones, so a click that
+    /// arrives after the menu was redrawn does what its label said, or
+    /// nothing when the item is gone ([`Menu::action`]).
+    pub fn id(&self) -> String {
+        let with = |kind: &str, argument: &str| format!("{kind}:{argument}");
+        match self {
+            Action::Refresh => "refresh".into(),
+            Action::Start(account) => with("start", account),
+            Action::Stop(account) => with("stop", account),
+            Action::Install(account) => with("install", account),
+            Action::OpenLog(path) => with("open-log", &path.to_string_lossy()),
+            Action::CopyLogCommand(text) => with("copy-log-command", text),
+            Action::EditCategories(account) => with("edit-categories", account),
+            Action::ToggleAutostart => "toggle-autostart".into(),
+            Action::CopyDetails(text) => with("copy-details", text),
+            Action::Quit => "quit".into(),
+        }
+    }
+}
+
 /// A service command in flight, shown instead of its menu item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verb {
@@ -69,6 +92,23 @@ pub struct Menu {
     pub summary: String,
     pub icon: IconState,
     pub entries: Vec<Entry>,
+}
+
+impl Menu {
+    /// The action of the item whose id ([`Action::id`]) is `id`; `None`
+    /// when this menu has no such item.
+    pub fn action(&self, id: &str) -> Option<Action> {
+        fn find(entries: &[Entry], id: &str) -> Option<Action> {
+            entries.iter().find_map(|entry| match entry {
+                Entry::Item { action, .. } | Entry::Check { action, .. } => {
+                    (action.id() == id).then(|| action.clone())
+                }
+                Entry::Submenu { entries, .. } => find(entries, id),
+                Entry::Text(_) | Entry::Separator => None,
+            })
+        }
+        find(&self.entries, id)
+    }
 }
 
 /// A short line under the summary, with "Show details" when it has some.

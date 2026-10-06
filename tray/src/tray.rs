@@ -10,7 +10,7 @@ use crate::{
     instances::{self, Windows, WINDOWS_ENV},
     model::{
         health::IconState,
-        menu::{Action, Entry, Menu},
+        menu::{Entry, Menu},
     },
     paths,
     restart::{self, Restarter},
@@ -42,30 +42,33 @@ enum UserEvent {
     Done(Box<Done>),
 }
 
-/// Appends `entries` through `append`; each clickable entry's id is `a<N>`,
-/// its index in `actions`.
-fn add(entries: &[Entry], actions: &mut Vec<Action>, append: &mut dyn FnMut(&dyn IsMenuItem)) {
+/// Appends `entries` through `append`; each clickable entry's id is its
+/// action's id, which a click resolves against the menu shown at that
+/// moment (`Menu::action`).
+fn add(entries: &[Entry], append: &mut dyn FnMut(&dyn IsMenuItem)) {
     for entry in entries {
         match entry {
             Entry::Text(text) => append(&MenuItem::new(text, false, None)),
             Entry::Item { label, action } => {
-                let id = format!("a{}", actions.len());
-                actions.push(action.clone());
-                append(&MenuItem::with_id(id, label, true, None));
+                append(&MenuItem::with_id(action.id(), label, true, None));
             }
             Entry::Check {
                 label,
                 checked,
                 action,
             } => {
-                let id = format!("a{}", actions.len());
-                actions.push(action.clone());
-                append(&CheckMenuItem::with_id(id, label, true, *checked, None));
+                append(&CheckMenuItem::with_id(
+                    action.id(),
+                    label,
+                    true,
+                    *checked,
+                    None,
+                ));
             }
             Entry::Separator => append(&PredefinedMenuItem::separator()),
             Entry::Submenu { label, entries } => {
                 let submenu = Submenu::new(label, true);
-                add(entries, actions, &mut |item| {
+                add(entries, &mut |item| {
                     let _ = submenu.append(item);
                 });
                 append(&submenu);
@@ -74,13 +77,26 @@ fn add(entries: &[Entry], actions: &mut Vec<Action>, append: &mut dyn FnMut(&dyn
     }
 }
 
-fn draw(menu: &Menu) -> (NativeMenu, Vec<Action>) {
+fn draw(menu: &Menu) -> NativeMenu {
     let native = NativeMenu::new();
-    let mut actions = vec![];
-    add(&menu.entries, &mut actions, &mut |item| {
+    add(&menu.entries, &mut |item| {
         let _ = native.append(item);
     });
-    (native, actions)
+    native
+}
+
+/// The tray icon. Without it the tray would be invisible yet keep
+/// `tray.lock`, so a failure ends the loop with exit code 3, which
+/// releases the lock.
+fn icon_or_exit(control_flow: &mut ControlFlow) -> Option<TrayIcon> {
+    match TrayIconBuilder::new().with_tooltip("mailtriage").build() {
+        Ok(icon) => Some(icon),
+        Err(e) => {
+            eprintln!("mailtriage-tray: cannot show the tray icon: {e}");
+            *control_flow = ControlFlow::ExitWithCode(3);
+            None
+        }
+    }
 }
 
 fn set_icon(tray: &TrayIcon, state: IconState) {
@@ -174,7 +190,6 @@ fn event_loop(
     let mut clipboard = arboard::Clipboard::new().ok();
     let mut tray: Option<TrayIcon> = None;
     let mut shown: Option<Menu> = None;
-    let mut actions: Vec<Action> = vec![];
     let mut next_refresh = Instant::now() + controller::REFRESH_EVERY;
     let _lock = lock;
     event_loop.run(move |event, _, control_flow| {
@@ -183,18 +198,16 @@ fn event_loop(
         match event {
             // The icon exists only once the loop runs.
             Event::NewEvents(StartCause::Init) => {
-                tray = TrayIconBuilder::new()
-                    .with_tooltip("mailtriage")
-                    .build()
-                    .ok();
+                tray = icon_or_exit(control_flow);
+                if tray.is_none() {
+                    return;
+                }
                 work.extend([Work::Refresh, Work::AutostartStatus]);
             }
+            // A click on a menu redrawn since resolves by its id: to the
+            // same action, or to nothing when the item is gone.
             Event::UserEvent(UserEvent::Menu(id)) => {
-                let action = id
-                    .strip_prefix('a')
-                    .and_then(|n| n.parse::<usize>().ok())
-                    .and_then(|n| actions.get(n).cloned());
-                if let Some(action) = action {
+                if let Some(action) = shown.as_ref().and_then(|menu| menu.action(&id)) {
                     work = controller.act(action, now);
                 }
             }
@@ -211,7 +224,15 @@ fn event_loop(
                         tray = None;
                         let error =
                             restart::exec(restart::command(&path, resolved, &controller.windows));
+                        // Still the old code: show the tray again and try
+                        // the file later, as after a failed probe.
                         eprintln!("mailtriage-tray: restart failed: {error}");
+                        r.exec_failed(Instant::now());
+                        tray = icon_or_exit(control_flow);
+                        shown = None;
+                        if tray.is_none() {
+                            return;
+                        }
                     }
                 }
             }
@@ -230,16 +251,14 @@ fn event_loop(
         }
         let menu = controller.menu(now, Local::now().fixed_offset());
         if let (Some(icon), true) = (&tray, shown.as_ref() != Some(&menu)) {
-            let (native, drawn) = draw(&menu);
-            icon.set_menu(Some(Box::new(native)));
+            icon.set_menu(Some(Box::new(draw(&menu))));
             let _ = icon.set_tooltip(Some(&menu.summary));
             if shown.as_ref().map(|m| m.icon) != Some(menu.icon) {
                 set_icon(icon, menu.icon);
             }
-            actions = drawn;
             shown = Some(menu);
         }
-        if *control_flow != ControlFlow::Exit {
+        if !matches!(*control_flow, ControlFlow::ExitWithCode(_)) {
             *control_flow = ControlFlow::WaitUntil(next_refresh);
         }
     })

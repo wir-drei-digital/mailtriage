@@ -13,7 +13,7 @@ use mailtriage_tray::{
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Output, Stdio},
     sync::Mutex,
     time::Instant,
 };
@@ -174,6 +174,80 @@ fn a_service_action_is_busy_until_it_ends_and_refreshes_afterwards() {
         .any(|l| l.starts_with("Could not")));
 }
 
+/// The action of the item labelled `label`, in `account`'s submenu or, for
+/// `None`, at the top of the menu.
+fn action_of(menu: &Menu, account: Option<&str>, label: &str) -> Action {
+    let entries = match account {
+        None => &menu.entries,
+        Some(account) => menu
+            .entries
+            .iter()
+            .find_map(|e| match e {
+                Entry::Submenu { label, entries } if label.starts_with(account) => Some(entries),
+                _ => None,
+            })
+            .unwrap(),
+    };
+    entries
+        .iter()
+        .find_map(|e| match e {
+            Entry::Item { label: l, action }
+            | Entry::Check {
+                label: l, action, ..
+            } if l == label => Some(action.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no item {label:?}"))
+}
+
+/// Every clickable action of `entries`, submenus included.
+fn actions(entries: &[Entry]) -> Vec<Action> {
+    entries
+        .iter()
+        .flat_map(|e| match e {
+            Entry::Item { action, .. } | Entry::Check { action, .. } => vec![action.clone()],
+            Entry::Submenu { entries, .. } => actions(entries),
+            _ => vec![],
+        })
+        .collect()
+}
+
+#[test]
+fn a_click_on_a_redrawn_menu_does_what_its_label_said_or_nothing() {
+    let fake = FakeCli::new();
+    fake.respond_fixture("service-status", "status.json");
+    let mut c = controller(&fake);
+    settle(&mut c, vec![Work::Refresh], now());
+    fake.fail("service-stop", 5, "busy", Some("service_busy"));
+    let work = c.act(Action::Stop("daniel".into()), now());
+    settle(&mut c, work, now());
+    // The menu as shown, with a notice and its "Show details" on top.
+    let shown = c.menu(now(), local());
+    let edit = action_of(&shown, Some("daniel"), "Edit categories…").id();
+    let refresh = action_of(&shown, None, "Refresh now").id();
+    let autostart = action_of(&shown, None, "Start at login").id();
+    let details = action_of(&shown, None, "Show details").id();
+    // The notice expires while the menu is open: every item moves up.
+    let redrawn = c.menu(now() + Duration::seconds(61), local());
+    assert!(!texts(&redrawn).contains(&"Show details".to_owned()));
+    assert_eq!(
+        redrawn.action(&edit),
+        Some(Action::EditCategories("daniel".into()))
+    );
+    assert_eq!(redrawn.action(&refresh), Some(Action::Refresh));
+    assert_eq!(redrawn.action(&autostart), Some(Action::ToggleAutostart));
+    // An item that is gone, or an id no item has, does nothing.
+    assert_eq!(redrawn.action(&details), None);
+    assert_eq!(redrawn.action("a3"), None);
+    // Equal actions have equal ids, different actions different ones.
+    let all: Vec<Action> = [actions(&shown.entries), actions(&redrawn.entries)].concat();
+    for a in &all {
+        for b in &all {
+            assert_eq!(a.id() == b.id(), a == b, "{a:?} and {b:?}");
+        }
+    }
+}
+
 #[test]
 fn a_failed_refresh_keeps_the_menu_for_two_minutes_marked_stale() {
     let fake = FakeCli::new();
@@ -301,16 +375,42 @@ fn cache_of(home: &Path) -> PathBuf {
     }
 }
 
+/// Runs `command` and waits at most `limit`. A tray that did not stop at its
+/// lock would run until killed: it is killed at the deadline and the test
+/// fails, so `cargo test` never hangs on a menu-bar tray.
+fn output_within(command: &mut Command, limit: std::time::Duration) -> Output {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + limit;
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("{command:?} did not exit within {limit:?}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    child.wait_with_output().unwrap()
+}
+
 #[test]
 fn a_second_tray_exits_0() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path();
     let _held = instances::tray_lock(&cache_of(home)).unwrap().unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_mailtriage-tray"))
-        .env("HOME", home)
-        .env("XDG_CACHE_HOME", home.join("xdg-cache"))
-        .output()
-        .unwrap();
+    let out = output_within(
+        Command::new(env!("CARGO_BIN_EXE_mailtriage-tray"))
+            // Should the lock check ever break, the tray that starts runs
+            // no real `mailtriage`.
+            .args(["--mailtriage", "/usr/bin/false"])
+            .env("HOME", home)
+            .env("XDG_CACHE_HOME", home.join("xdg-cache")),
+        std::time::Duration::from_secs(10),
+    );
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
@@ -424,6 +524,41 @@ fn a_replaced_tray_that_runs_restarts_and_one_that_fails_waits() {
     // A new file is probed at once.
     replace(&path, "#!/bin/sh\necho 'mailtriage-tray 9.9.9'\n");
     assert_eq!(r.check(t + std::time::Duration::from_secs(31)), Some(path));
+}
+
+#[test]
+fn a_restart_whose_exec_failed_keeps_the_old_code_and_waits() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mailtriage-tray");
+    write_script(&path, "#!/bin/sh\necho 'mailtriage-tray 0.1.0'\n");
+    let mut r = Restarter::new(path.clone(), restart::identity(&path).unwrap());
+    let log = dir.path().join("probes");
+    replace(
+        &path,
+        &format!(
+            "#!/bin/sh\necho x >> '{}'\necho 'mailtriage-tray 9.9.9'\n",
+            log.display()
+        ),
+    );
+    let probes = || fs::read_to_string(&log).unwrap().lines().count();
+    let t = Instant::now();
+    let after = |secs| t + std::time::Duration::from_secs(secs);
+    assert_eq!(r.check(t), Some(path.clone()));
+    // `exec` failed: no new probe and no `exec` for a minute…
+    r.exec_failed(t);
+    assert_eq!(r.check(after(59)), None);
+    assert_eq!(probes(), 1);
+    assert_eq!(r.check(after(60)), Some(path.clone()));
+    assert_eq!(probes(), 2);
+    // …then two minutes after the second failure.
+    r.exec_failed(after(60));
+    assert_eq!(r.check(after(60 + 119)), None);
+    assert_eq!(probes(), 2);
+    assert_eq!(r.check(after(60 + 120)), Some(path.clone()));
+    // A new file is probed at once.
+    r.exec_failed(after(180));
+    replace(&path, "#!/bin/sh\necho 'mailtriage-tray 9.9.10'\n");
+    assert_eq!(r.check(after(181)), Some(path));
 }
 
 #[test]

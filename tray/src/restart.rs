@@ -140,11 +140,24 @@ impl Restarter {
         if ready {
             return Some(self.path.clone());
         }
+        self.fail(now, current);
+        None
+    }
+
+    /// The `exec` of the path `check` returned failed: the old code keeps
+    /// running, and the file waits as after a failed probe.
+    pub fn exec_failed(&mut self, now: Instant) {
+        let current = identity(&self.path).ok();
+        self.fail(now, current);
+    }
+
+    /// Waits 1 minute after the first failure, doubling up to 1 hour,
+    /// unless the file (`current`) changes again.
+    fn fail(&mut self, now: Instant, current: Option<Identity>) {
         self.failures += 1;
         let backoff = Duration::from_secs(60) * 2u32.saturating_pow(self.failures - 1);
         self.retry_at = Some(now + backoff.min(Duration::from_secs(3600)));
         self.failed = current;
-        None
     }
 }
 
