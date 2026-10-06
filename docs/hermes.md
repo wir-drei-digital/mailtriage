@@ -76,6 +76,8 @@ The result is `{"schema_version":1,"service":{...}}` (fields in [Service command
   - `exit_code`: 0 is a complete pass; 4 is partial (some folders or messages failed, and `list --view all` shows each message's `error`; or the key was unavailable, which `doctor` shows); any other code is the error's exit code from the table below.
   - `mode`: the filing mode of that pass (`off`, `dry_run` or `live`).
 
+`service status --json` without `--account` checks every account at once: `{"schema_version":1,"config":"…","services":[…]}`, one object per account, sorted by name (fields in [Status of every account](guide.md#status-of-every-account)). Read `config_matches` before acting on a service: `false` means it runs another config (`service_config` names it), and `null` means its config cannot be told.
+
 ## Reading mail
 
 Use `list` to decide what to inspect, then `read` only the messages you need:

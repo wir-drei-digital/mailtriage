@@ -671,6 +671,34 @@ Each command prints `{"schema_version":1,"service":{...}}`.
 
 `last_pass` comes from the state database and works without any service. Every `sync` and every `watch` pass that holds the account lock records it. A healthy service shows `running: true` and a `last_pass.finished_at` no older than a few intervals.
 
+### Status of every account
+
+```sh
+mailtriage service status --json
+```
+
+Without `--account`, `service status` reports every account of the config, one object per account, sorted by account name:
+
+```json
+{"schema_version":1,"config":"/Users/alice/.config/mailtriage/mailtriage.json","services":[{"account":"personal",…},{"account":"work",…}]}
+```
+
+`config` is the config that `service status` read, as a canonical absolute path. With `--account`, the result has the same `config` and a single `service` object. Every service object has the fields above and these:
+
+| Field | Content |
+| --- | --- |
+| `service_config` | The `--config` the service runs with. launchd: from `launchctl print`. systemd: from the running process (`/proc/<pid>/cmdline`), else from the `ExecStart` systemd has loaded. A job the manager has not loaded: from the service file. `null` when not installed, or when it cannot be read. |
+| `file_config` | The `--config` in the service file, or `null`. |
+| `needs_daemon_reload` | systemd only: `true` when the unit file changed after systemd loaded it (`NeedDaemonReload`), else `false`; `null` when unknown or not installed. |
+| `config_matches` | `true` when the service runs this config. `false` when it, or its file, names another config. `null` when that cannot be established, for example when `launchctl` or `systemctl` fails or systemd needs a reload. `true` when not installed. |
+| `enabled` | Whether the manager starts the service again, for example at login: `true`, `false`, or `null` when unknown. |
+| `enablement` | The state behind `enabled`. launchd: `enabled`, `disabled`, or `unknown` when `launchctl print-disabled` fails. systemd: what `systemctl --user is-enabled <unit>` prints; `enabled` and `enabled-runtime` count as enabled, `disabled`, `masked` and `masked-runtime` as not, anything else (such as `static`) as unknown. `not_installed` when not installed. |
+| `interval_seconds` | The `--interval-seconds` in the service file, or `null`. |
+| `filing_mode` | The account's configured filing mode: `off`, `dry_run` or `live`. |
+| `identity` | The account's `identity` from the config. |
+
+Two configs can name the same account. The service of an account belongs to one config at a time: `service install` from the other config rewrites it. `config_matches: false` shows that the service runs the other config; `service_config` names it.
+
 ### Your own supervisor
 
 On a server you may prefer a system-wide unit that runs as a dedicated user. First give the config a key command: set `provider.api_key_command` to a command that prints the key for that user, for example from `pass` or another key store (see [The OpenRouter key](#the-openrouter-key)). The unit then holds no secret. A systemd example, in `/etc/systemd/system/mailtriage-work.service`:

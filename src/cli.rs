@@ -8,7 +8,7 @@ use mailtriage::{
     service::{
         is_config_change, Backfill, ErrorKind, ListOptions, RetryTarget, Service, ServiceError,
     },
-    setup,
+    service_control, setup,
     system_service::{self, Context},
 };
 use serde_json::{json, Value};
@@ -321,8 +321,16 @@ enum ServiceCommand {
     Install(ServiceInstallArg),
     /// Stop and remove the account's service.
     Uninstall(AccountArg),
-    /// Whether the service is installed and running, and the last sync pass.
-    Status(AccountArg),
+    /// Whether each account's service is installed and running, which
+    /// config it runs, and the last sync pass.
+    Status(StatusArg),
+}
+
+#[derive(Args)]
+struct StatusArg {
+    /// Only this account (default: every account of the config).
+    #[arg(long)]
+    account: Option<String>,
 }
 
 #[derive(Args)]
@@ -708,6 +716,19 @@ fn filing(config: &Path, command: &FilingCommand) -> Result<Value, CliError> {
 }
 
 fn service_command(path: &Path, command: &ServiceCommand) -> Result<Value, CliError> {
+    if let ServiceCommand::Status(arg) = command {
+        return Service::open(path)
+            .and_then(|service| {
+                service_control::status(
+                    &service,
+                    path,
+                    arg.account.as_deref(),
+                    Context::detect().ok().as_ref(),
+                    Path::new(service_control::PROC_ROOT),
+                )
+            })
+            .map_err(service_error);
+    }
     let result = match command {
         ServiceCommand::Install(arg) => Context::detect().and_then(|ctx| {
             let service = Service::open(path)?;
@@ -726,14 +747,7 @@ fn service_command(path: &Path, command: &ServiceCommand) -> Result<Value, CliEr
             }
             Context::detect().and_then(|ctx| system_service::uninstall(&ctx, &arg.account))
         }
-        ServiceCommand::Status(arg) => Service::open(path).and_then(|service| {
-            system_service::status_account(
-                &service,
-                path,
-                &arg.account,
-                Context::detect().ok().as_ref(),
-            )
-        }),
+        ServiceCommand::Status(_) => unreachable!("handled above"),
     };
     result
         .map(|service| json!({"schema_version": 1, "service": service}))

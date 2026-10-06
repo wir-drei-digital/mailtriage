@@ -240,7 +240,7 @@ fn systemd_arg(arg: &str) -> String {
     }
 }
 
-fn is_marked(manager: Manager, text: &str) -> bool {
+pub(crate) fn is_marked(manager: Manager, text: &str) -> bool {
     match manager {
         Manager::Launchd => text.contains(PLIST_MARKER),
         Manager::Systemd => text.lines().next() == Some(UNIT_MARKER),

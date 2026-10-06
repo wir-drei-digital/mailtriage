@@ -251,3 +251,97 @@ JSON additions:
   which `--expect-digest` compares, not one of the file) and `changes`.
 - `categories apply` returns export's shape, so it gains `digest` too.
 - `categories apply --expect-digest D` passes `Some(D)`.
+
+## `service_control`
+
+`src/service_control.rs` (`mailtriage::service_control`) adds to
+`system_service` what `service status` reports about the config a service runs,
+its enablement and the fields the tray reads. It writes no service file.
+
+```rust
+pub const PROC_ROOT: &str = "/proc";
+
+pub struct WatchArgs { pub config: PathBuf, pub interval_seconds: Option<u64> }
+pub fn watch_args(args: &[String]) -> Option<WatchArgs>;
+
+// Decoders: the argument list, `None` when it cannot be read or decoded.
+pub fn plist_arguments(text: &str) -> Option<Vec<String>>;       // ProgramArguments
+pub fn unit_arguments(text: &str) -> Option<Vec<String>>;        // ExecStart= of the unit file
+pub fn launchctl_arguments(text: &str) -> Option<Vec<String>>;   // `arguments = {…}` of `launchctl print`
+pub fn exec_start_arguments(value: &str) -> Option<Vec<String>>; // argv[] of `systemctl show -p ExecStart`
+pub fn process_arguments(proc_root: &Path, pid: u32) -> Option<Vec<String>>; // <proc_root>/<pid>/cmdline
+
+pub fn launchd_enablement(output: Option<&str>, label: &str) -> (Option<bool>, String);
+pub fn systemd_enablement(output: Option<&str>) -> (Option<bool>, String);
+
+pub struct Inspection {
+  pub installed: bool, pub loaded: Option<bool>, pub running: bool, pub pid: Option<u32>,
+  pub service_config: Option<PathBuf>, pub file_config: Option<PathBuf>,
+  pub named: Vec<Option<PathBuf>>, pub needs_daemon_reload: Option<bool>,
+  pub enabled: Option<bool>, pub enablement: String, pub interval_seconds: Option<u64>,
+}
+pub fn inspect(ctx: &Context, account: &str, proc_root: &Path) -> Inspection;
+pub fn other_config(found: &Inspection, resolved: &Path) -> Option<PathBuf>;
+pub fn config_matches(found: &Inspection, manager: Manager, resolved: &Path) -> Option<bool>;
+pub fn status(service: &Service, config_path: &Path, account: Option<&str>,
+  ctx: Option<&Context>, proc_root: &Path) -> Result<Value>;
+```
+
+- `watch_args` takes the values after `--config` and `--interval-seconds`
+  wherever they stand; `None` when `--config` is missing, has no value or
+  appears twice. An `--interval-seconds` that is not a number gives `None` for
+  `interval_seconds` only.
+- `plist_arguments` and `unit_arguments` invert `plist` and `systemd_unit`
+  (XML entities; systemd quoting, `%%` and `$$`), so the paths come back exact.
+- `process_arguments` reads the start time (field 22 of `stat`) before and
+  after `cmdline` and returns `None` when the two differ, so a PID reused in
+  between is never read.
+- `exec_start_arguments` accepts only the shape `service install` writes:
+  11 words, `watch`, `--config`, `--account` and `--interval-seconds` at their
+  places. A path that `show` printed without quotes therefore gives `None`,
+  never a shorter path.
+- `inspect` reads the unit file; a missing or unmarked file is not installed
+  (`enabled: Some(false)`, `enablement: "not_installed"`, everything else
+  empty). It then runs `launchctl print gui/<uid>/<label>` and
+  `launchctl print-disabled gui/<uid>`, or `systemctl --user show <unit>
+  --property=LoadState,ActiveState,SubState,MainPID,ExecStart,NeedDaemonReload`
+  and `systemctl --user is-enabled <unit>`, each with a 30 s limit and 1 MiB of
+  output. `interval_seconds` comes from the unit file.
+
+`service_config` and the configs `config_matches` compares
+(`Inspection::named`, in this order):
+
+| Manager and job | `service_config` | Configs compared for `config_matches` |
+| --- | --- | --- |
+| launchd, `print` exits 0 | `arguments` block | it, file |
+| launchd, `print` exits 113 (not loaded) | unit file | file |
+| launchd, any other failure | `null` | `null`, file |
+| systemd, loaded and running | `/proc/<MainPID>/cmdline`, start time unchanged | it, loaded `ExecStart`, file |
+| systemd, loaded, not running | loaded `ExecStart` | it, file |
+| systemd, not loaded | unit file | file |
+| systemd, `show` fails | `null` | `null`, file |
+
+- `config_matches` is `Some(true)` when not installed. A compared config that
+  is not `resolved` (canonicalized when it exists) gives `Some(false)`, and
+  `other_config` returns the first such config. Otherwise any `None` gives
+  `None`, and so does systemd's `NeedDaemonReload` unless it is `no`; else
+  `Some(true)`.
+- `launchd_enablement`: the label listed as `disabled` or `true` gives
+  `(Some(false), "disabled")`; `enabled`, `false` or not listed gives
+  `(Some(true), "enabled")`; another value or a failed query (`None`) gives
+  `(None, "unknown")`.
+- `systemd_enablement` takes the first line of `is-enabled`, whatever its exit
+  code: `enabled` and `enabled-runtime` give `Some(true)`, `disabled`, `masked`
+  and `masked-runtime` `Some(false)`, any other state `None`, each with that
+  state as `enablement`. No output, or a command that could not run, gives
+  `(None, "unknown")`.
+
+`status` is `service status`: `{schema_version:1, config, services:[…]}` with
+one object per account in name order, or `{schema_version:1, config, service}`
+with `account`. `config` is the canonical config path. Each object is
+`system_service::status_account`'s plus `service_config`, `file_config`,
+`config_matches`, `enabled`, `enablement`, `interval_seconds`, `filing_mode`
+(the configured mode, `filing::mode_str`) and `identity`, and
+`needs_daemon_reload` on systemd only. Without a `Context` (no supported
+manager) every account reads as not installed. An unknown account exits 2. The
+CLI prints the value as it is, with `PROC_ROOT`.
