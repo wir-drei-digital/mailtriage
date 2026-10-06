@@ -2,9 +2,12 @@
 //! docs/superpowers/specs/2026-10-06-auto-update-design.md): release
 //! information, installing a release, restarting `watch` onto a replaced
 //! binary, and reporting what is installed.
+pub mod archive;
 pub mod cache;
 pub mod check;
 pub mod github;
+pub mod install;
+pub mod platform;
 pub mod release;
 pub mod schedule;
 pub mod version;

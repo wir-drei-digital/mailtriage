@@ -101,6 +101,10 @@ pub struct InstallEntry {
     pub failures: u32,
     #[serde(default)]
     pub next_attempt_at: Option<String>,
+    /// The file's identity when `version` was recorded; another identity
+    /// means `--version` must run again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<super::platform::FileIdentity>,
 }
 
 /// The cache in one directory.

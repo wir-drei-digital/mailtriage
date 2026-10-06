@@ -253,3 +253,50 @@ pub fn sha256_hex(data: &[u8]) -> String {
         .map(|b| format!("{b:02x}"))
         .collect()
 }
+
+use std::path::Path;
+
+/// A gzip tar archive of regular files with mode 0755.
+pub fn archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
+        Vec::new(),
+        flate2::Compression::fast(),
+    ));
+    for (name, data) in entries {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(data.len() as u64);
+        header.set_mode(0o755);
+        header.set_entry_type(tar::EntryType::Regular);
+        builder.append_data(&mut header, name, *data).unwrap();
+    }
+    builder.into_inner().unwrap().finish().unwrap()
+}
+
+/// A release archive as the release workflow builds it.
+pub fn release_archive(binary: &[u8]) -> Vec<u8> {
+    archive(&[
+        ("mailtriage", binary),
+        ("LICENSE", b"MIT License\n"),
+        ("README.md", b"# mailtriage\n"),
+    ])
+}
+
+/// The fake release binary: `--version` prints `mailtriage VERSION`; any
+/// other call appends its arguments to `marker`.
+pub fn fake_binary(version: &str, marker: &Path) -> Vec<u8> {
+    format!(
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'mailtriage {version}'; exit 0; fi\necho \"$@\" >> '{}'\n",
+        marker.display()
+    )
+    .into_bytes()
+}
+
+/// Writes `data` to `path` with `mode` through a new file renamed over
+/// it, so `path` gets a new inode.
+pub fn replace_file(path: &Path, data: &[u8], mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = path.with_extension("replacing");
+    std::fs::write(&tmp, data).unwrap();
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode)).unwrap();
+    std::fs::rename(&tmp, path).unwrap();
+}

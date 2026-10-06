@@ -1,0 +1,375 @@
+//! Installing a release (spec steps 4 to 10): under the installation lock,
+//! download, verify, unpack, smoke-test, then replace the binary by rename.
+//! The rename is the commit point; later problems are warnings.
+use super::{
+    archive,
+    cache::Cache,
+    github::{self, Net},
+    platform::{self, FileIdentity},
+    release::{self, CachedRelease},
+    schedule, version, Component,
+};
+use anyhow::{anyhow, bail, Context, Result};
+use chrono::Utc;
+use fs2::FileExt;
+use semver::Version;
+use sha2::{Digest, Sha256};
+use std::{
+    fs::{self, File, OpenOptions},
+    io::{self, Write},
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    path::{Path, PathBuf},
+    thread,
+    time::{Duration, Instant},
+};
+
+/// The installation lock, in the installation path's directory. Created
+/// when missing and never deleted.
+pub const LOCK_FILE: &str = ".mailtriage-update.lock";
+/// Temporary files of an update attempt: `.tmp` (the staged binary) and
+/// `.prev` (the backup before it is published).
+pub const TEMP_PREFIX: &str = ".mailtriage-update-";
+/// The hidden test hook (debug builds only).
+pub const TEST_HOOK: &str = "MAILTRIAGE_UPDATE_TEST_HOOK";
+/// The hidden override of `update`'s lock wait in milliseconds (debug builds only).
+pub const TEST_LOCK_WAIT: &str = "MAILTRIAGE_UPDATE_TEST_LOCK_WAIT_MS";
+
+/// Points where tests inject faults. Production code uses `EnvHooks`,
+/// which does nothing in release builds.
+pub trait Hooks {
+    /// Called before the step named `point`; an error fails that step.
+    fn at(&self, point: &str) -> Result<()>;
+}
+
+/// No hooks.
+pub struct NoHooks;
+
+impl Hooks for NoHooks {
+    fn at(&self, _point: &str) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// In debug builds, `MAILTRIAGE_UPDATE_TEST_HOOK` names a program that runs
+/// with the hook point as its only argument; a non-zero exit fails the
+/// step. Release builds never read the variable.
+pub struct EnvHooks;
+
+impl Hooks for EnvHooks {
+    #[cfg(debug_assertions)]
+    fn at(&self, point: &str) -> Result<()> {
+        use std::process::{Command, Stdio};
+        let Some(program) = std::env::var_os(TEST_HOOK) else {
+            return Ok(());
+        };
+        let status = Command::new(program)
+            .arg(point)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .status()?;
+        if !status.success() {
+            bail!("the test hook failed at {point}");
+        }
+        Ok(())
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn at(&self, _point: &str) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// How long `update` waits for the installation lock: 60 s.
+pub fn update_lock_wait() -> Duration {
+    #[cfg(debug_assertions)]
+    if let Some(ms) = std::env::var(TEST_LOCK_WAIT)
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        return Duration::from_millis(ms);
+    }
+    Duration::from_secs(60)
+}
+
+/// The held installation lock.
+pub struct InstallLock {
+    _file: File,
+}
+
+/// Takes the installation lock of `dir`, trying for up to `wait` (zero:
+/// once). `None` when another updater holds it.
+pub fn lock(dir: &Path, wait: Duration) -> Result<Option<InstallLock>> {
+    let path = dir.join(LOCK_FILE);
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("cannot open {}", path.display()))?;
+    let deadline = Instant::now() + wait;
+    loop {
+        if file.try_lock_exclusive().is_ok() {
+            return Ok(Some(InstallLock { _file: file }));
+        }
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Removes leftover temporary files of earlier attempts in `dir`. Only
+/// called under the installation lock, so no cooperating updater is using them.
+pub fn remove_leftovers(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let stale = entry.file_name().to_string_lossy().starts_with(TEMP_PREFIX)
+            && entry
+                .file_type()
+                .is_ok_and(|t| t.is_file() || t.is_symlink());
+        if stale {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// What to install where.
+pub struct Job<'a> {
+    pub net: &'a Net,
+    pub component: Component,
+    /// The canonical installation path.
+    pub path: &'a Path,
+    pub release: &'a CachedRelease,
+    /// Compared with the candidate when the installed version cannot be
+    /// read: the running version, so an unreadable file is never
+    /// downgraded below it.
+    pub fallback: &'a Version,
+    /// Where step 10 records the installation; `None` records nothing.
+    pub cache: Option<&'a Cache>,
+    pub hooks: &'a dyn Hooks,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Outcome {
+    /// The candidate is not newer than the installed version.
+    Current {
+        installed: Option<Version>,
+    },
+    Installed(Installed),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Installed {
+    pub from: Option<Version>,
+    pub to: Version,
+    /// Where the previous binary is: `<path>.previous`, or the temporary
+    /// backup when publishing it failed.
+    pub previous_path: PathBuf,
+    /// Problems after the commit point; the update still counts as done.
+    pub warnings: Vec<String>,
+}
+
+/// Steps 4 to 10 under the held installation lock. `before_download` runs
+/// once the candidate is known to be newer (`watch` writes its reservation
+/// there); its error stops the install. Errors leave the installation path
+/// and `<path>.previous` untouched and remove this attempt's files.
+pub fn install(
+    job: &Job,
+    _lock: &InstallLock,
+    before_download: &mut dyn FnMut() -> Result<()>,
+) -> Result<Outcome> {
+    let path = job.path;
+    let dir = path
+        .parent()
+        .context("the installation path has no directory")?;
+    // 4. Stale files, then the installed version and identity.
+    remove_leftovers(dir);
+    let installed_identity =
+        FileIdentity::read(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let installed = platform::probe(path, job.component).ok();
+    let candidate = Version::parse(&job.release.version).context("invalid release version")?;
+    if !version::is_newer(&candidate, installed.as_ref().unwrap_or(job.fallback)) {
+        return Ok(Outcome::Current { installed });
+    }
+    let platform_name = release::platform().unwrap_or("this platform");
+    let asset = job
+        .release
+        .archives
+        .get(job.component.name)
+        .cloned()
+        .flatten()
+        .ok_or_else(|| anyhow!("release v{candidate} has no {platform_name} archive"))?;
+    let sums = job
+        .release
+        .sums
+        .clone()
+        .ok_or_else(|| anyhow!("release v{candidate} has no SHA256SUMS"))?;
+    before_download()?;
+    // 5. Download. 6. Verify.
+    let sums_text = job
+        .net
+        .download(&sums.url, sums.size, github::MAX_SUMS_BYTES)
+        .map_err(|e| anyhow!("cannot download SHA256SUMS of v{candidate}: {e}"))?;
+    let expected = release::expected_sha256(&String::from_utf8_lossy(&sums_text), &asset.name)
+        .map_err(|e| anyhow!("release v{candidate}: {e}"))?;
+    let bytes = job
+        .net
+        .download(&asset.url, asset.size, github::MAX_ASSET_BYTES)
+        .map_err(|e| anyhow!("cannot download {}: {e}", asset.name))?;
+    if hex(&Sha256::digest(&bytes)) != expected {
+        bail!("checksum mismatch for {}", asset.name);
+    }
+    // 7. Unpack into an exclusively created file.
+    let binary = archive::extract(&bytes, job.component.name, &archive::RELEASE)
+        .map_err(|e| anyhow!("{}: {e}", asset.name))?;
+    drop(bytes);
+    let mut scratch = Scratch(Vec::new());
+    let staged = scratch.add(dir.join(format!("{TEMP_PREFIX}{}.tmp", uuid::Uuid::new_v4())));
+    write_staged(&staged, &binary)
+        .map_err(|e| anyhow!("cannot write the new binary into {}: {e}", dir.display()))?;
+    let staged_identity = FileIdentity::read(&staged)?;
+    // 8. Smoke test.
+    match platform::probe(&staged, job.component) {
+        Ok(found) if found == candidate => {}
+        Ok(found) => {
+            bail!("the new binary does not run here: printed version {found}, expected {candidate}")
+        }
+        Err(cause) => bail!("the new binary does not run here: {cause}"),
+    }
+    // 9.1 Revalidate.
+    job.hooks.at("revalidate")?;
+    if FileIdentity::read(path).ok() != Some(installed_identity)
+        || FileIdentity::read(&staged).ok() != Some(staged_identity)
+    {
+        bail!("the installed binary changed during the update; try again");
+    }
+    // 9.2 Backup copy; `.previous` is not touched yet.
+    let backup = scratch.add(dir.join(format!("{TEMP_PREFIX}{}.prev", uuid::Uuid::new_v4())));
+    job.hooks
+        .at("backup")
+        .and_then(|_| copy_or_link(path, &backup).map_err(Into::into))
+        .map_err(|e| anyhow!("cannot back up {}: {e}", path.display()))?;
+    // 9.3 The commit point.
+    job.hooks
+        .at("commit")
+        .and_then(|_| fs::rename(&staged, path).map_err(Into::into))
+        .map_err(|e| anyhow!("cannot replace {}: {e}", path.display()))?;
+    scratch.keep();
+    let mut warnings = Vec::new();
+    // 9.4 Publish the backup.
+    let previous = previous_path(path);
+    let previous_path = match job
+        .hooks
+        .at("publish")
+        .and_then(|_| fs::rename(&backup, &previous).map_err(Into::into))
+    {
+        Ok(()) => previous,
+        Err(e) => {
+            warnings.push(format!(
+                "installed; the previous binary stays at {} because {} could not be replaced: {e}",
+                backup.display(),
+                previous.display()
+            ));
+            backup
+        }
+    };
+    // 9.5 Make the renames durable.
+    if let Err(e) = job
+        .hooks
+        .at("sync_dir")
+        .and_then(|_| File::open(dir)?.sync_all().map_err(Into::into))
+    {
+        warnings.push(format!("installed; syncing {} failed: {e}", dir.display()));
+    }
+    // 10. Record.
+    if let Some(cache) = job.cache {
+        let key = path.to_string_lossy().into_owned();
+        let identity = FileIdentity::read(path).ok();
+        let recorded = job.hooks.at("record").and_then(|_| {
+            cache.update(|c| {
+                let entry = c.installs.entry(key).or_default();
+                entry.version = Some(candidate.to_string());
+                entry.at = Some(schedule::stamp(Utc::now()));
+                entry.last_error = None;
+                entry.failures = 0;
+                entry.next_attempt_at = None;
+                entry.identity = identity;
+            })
+        });
+        if let Err(e) = recorded {
+            warnings.push(format!("installed; recording the update failed: {e:#}"));
+        }
+    }
+    Ok(Outcome::Installed(Installed {
+        from: installed,
+        to: candidate,
+        previous_path,
+        warnings,
+    }))
+}
+
+/// `<path>.previous`.
+pub fn previous_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".previous");
+    PathBuf::from(name)
+}
+
+/// This attempt's temporary files, removed unless kept.
+struct Scratch(Vec<PathBuf>);
+
+impl Scratch {
+    fn add(&mut self, path: PathBuf) -> PathBuf {
+        self.0.push(path.clone());
+        path
+    }
+    fn keep(&mut self) {
+        self.0.clear();
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+/// Created exclusively with mode 0600 (never following an existing link),
+/// fsynced and closed, then made executable.
+fn write_staged(path: &Path, contents: &[u8]) -> io::Result<()> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(contents)?;
+    file.sync_all()?;
+    drop(file);
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+}
+
+/// A hard link to `path` at `backup`, or, where the filesystem refuses
+/// hard links, a copy into an exclusively created file.
+fn copy_or_link(path: &Path, backup: &Path) -> io::Result<()> {
+    if fs::hard_link(path, backup).is_ok() {
+        return Ok(());
+    }
+    let mut source = File::open(path)?;
+    let mut copy = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(backup)?;
+    io::copy(&mut source, &mut copy)?;
+    copy.sync_all()?;
+    fs::set_permissions(backup, fs::metadata(path)?.permissions())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
