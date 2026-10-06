@@ -3,6 +3,7 @@
 Date: 2026-10-06
 Status: Design approved in conversation; written spec awaiting review.
 Builds on: [guided setup](2026-10-05-guided-setup-design.md) (background service, `doctor`, heartbeats) and [releases](../../releases.md).
+Extended by: [tray app](2026-10-06-tray-design.md) (tray archive, exit code 4).
 
 ## Goal
 
@@ -100,6 +101,9 @@ Checks as above, then installs the latest release when it is newer
 | 2 | Invalid flags. |
 | 3 | Network or GitHub error, no matching asset, checksum mismatch, failed smoke test, unpacking error, or (without `--check`) the binary is not replaceable: the message names `install.reason` and its fix. |
 | 5 | Another update holds the lock (`another update is running`). |
+
+The [tray spec](2026-10-06-tray-design.md) adds exit code 4: the CLI part succeeded
+or was current, but updating `mailtriage-tray` failed.
 
 ## Installing a release
 
@@ -356,4 +360,5 @@ appends its arguments to a marker file.
 - Homebrew tap, nix packaging, other package managers.
 - Windows and Intel Mac builds.
 - Rollback or version-pinning commands; a prerelease channel.
-- Updating the tray application (the tray spec extends this updater).
+- Updating the tray application: the [tray spec](2026-10-06-tray-design.md) extends
+  this updater with the tray archive and exit code 4.
