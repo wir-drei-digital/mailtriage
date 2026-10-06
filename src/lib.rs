@@ -16,3 +16,4 @@ pub mod service;
 pub mod setup;
 pub mod store;
 pub mod system_service;
+pub mod update;
