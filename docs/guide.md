@@ -888,6 +888,8 @@ Before you use `live` on a real mailbox, the live provider check in the [filing 
 
 With `--json`, every result is one line of JSON on stdout, and so is every error: `{"schema_version":1,"error":{"code":N,"message":"..."}}`. Without `--json`, results are pretty-printed JSON and errors go to stderr as `mailtriage: MESSAGE`. Every result has a `schema_version`. Error messages omit message bodies and credentials.
 
+Some errors also carry a machine-readable `reason` in the error object, for scripts that react to a class of error rather than to its message: `config_changed` (`mailtriage.json` or the Himalaya configuration changed during the command), `config_busy` (another command is editing `mailtriage.json`), `account_busy` (another worker for the account is running) and `binding_conflict` (the account binding changed, see [Account binding](#account-binding)). An error without a reason has no `reason` key.
+
 | Code | Meaning |
 | --- | --- |
 | 0 | Success. A query exits 0 even if messages need attention, and `doctor` exits 0 even if `ready` is `false`. |

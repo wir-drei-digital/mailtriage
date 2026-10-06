@@ -5,7 +5,9 @@ use mailtriage::{
     engine::ConfigChanged,
     prompt::{self, Prompter},
     secrets::KeyStore,
-    service::{is_config_change, Backfill, ListOptions, RetryTarget, Service, ServiceError},
+    service::{
+        is_config_change, Backfill, ErrorKind, ListOptions, RetryTarget, Service, ServiceError,
+    },
     setup,
     system_service::{self, Context},
 };
@@ -414,18 +416,22 @@ fn parse_limit(value: &str) -> Result<usize, String> {
 struct CliError {
     code: i32,
     message: String,
+    /// The machine-readable `reason` of the JSON error object, if any.
+    reason: Option<&'static str>,
 }
 impl CliError {
     fn input(message: impl Into<String>) -> Self {
         Self {
             code: 2,
             message: message.into(),
+            reason: None,
         }
     }
     fn operational() -> Self {
         Self {
             code: 3,
             message: "Operation failed; check configuration and dependency availability".into(),
+            reason: None,
         }
     }
 }
@@ -435,12 +441,14 @@ fn service_error(error: anyhow::Error) -> CliError {
         return CliError {
             code: error.code,
             message: error.message.clone(),
+            reason: error.kind.reason(),
         };
     }
     if error.downcast_ref::<ConfigChanged>().is_some() {
         return CliError {
             code: 5,
             message: "mail engine configuration changed during operation".into(),
+            reason: ErrorKind::ConfigChanged.reason(),
         };
     }
     CliError::operational()
@@ -457,12 +465,18 @@ fn print_value(value: &Value, json_mode: bool) -> io::Result<()> {
     out.write_all(b"\n")
 }
 
+/// The JSON error object; `reason` appears only when the error has one.
+fn error_json(error: &CliError) -> Value {
+    let mut object = json!({"code":error.code,"message":error.message});
+    if let Some(reason) = error.reason {
+        object["reason"] = json!(reason);
+    }
+    json!({"schema_version":1,"error":object})
+}
+
 fn print_error(error: &CliError, json_mode: bool) {
     if json_mode {
-        let _ = print_value(
-            &json!({"schema_version":1,"error":{"code":error.code,"message":error.message}}),
-            true,
-        );
+        let _ = print_value(&error_json(error), true);
     } else {
         eprintln!("mailtriage: {}", error.message);
     }
@@ -833,7 +847,6 @@ fn watch_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mailtriage::service::ErrorKind;
     use std::cell::Cell;
 
     fn service_err(code: i32, kind: ErrorKind) -> anyhow::Error {
@@ -888,6 +901,9 @@ mod tests {
     #[test]
     fn watch_stops_on_other_errors() {
         for error in [
+            service_err(5, ErrorKind::BindingConflict),
+            service_err(5, ErrorKind::AccountBusy),
+            service_err(5, ErrorKind::ConfigBusy),
             service_err(5, ErrorKind::Other),
             service_err(2, ErrorKind::Other),
             anyhow::anyhow!("operational"),
@@ -911,5 +927,37 @@ mod tests {
     fn an_engine_configuration_change_is_a_conflict() {
         let e = service_error(mailtriage::engine::ConfigChanged.into());
         assert_eq!(e.code, 5);
+        assert_eq!(e.reason, Some("config_changed"));
+    }
+
+    #[test]
+    fn service_errors_carry_the_reason_of_their_kind() {
+        for (kind, reason) in [
+            (ErrorKind::Other, None),
+            (ErrorKind::ConfigChanged, Some("config_changed")),
+            (ErrorKind::ConfigBusy, Some("config_busy")),
+            (ErrorKind::AccountBusy, Some("account_busy")),
+            (ErrorKind::BindingConflict, Some("binding_conflict")),
+        ] {
+            let e = service_error(service_err(5, kind));
+            assert_eq!((e.code, e.message.as_str(), e.reason), (5, "m", reason));
+        }
+        assert_eq!(service_error(anyhow::anyhow!("x")).reason, None);
+        assert_eq!(CliError::input("x").reason, None);
+        assert_eq!(CliError::operational().reason, None);
+    }
+
+    /// The JSON error object names a `reason` only when the error has one.
+    #[test]
+    fn the_json_error_object_has_a_reason_only_when_set() {
+        let busy = service_error(service_err(5, ErrorKind::AccountBusy));
+        assert_eq!(
+            error_json(&busy),
+            json!({"schema_version":1,"error":{"code":5,"message":"m","reason":"account_busy"}})
+        );
+        assert_eq!(
+            error_json(&CliError::input("bad")),
+            json!({"schema_version":1,"error":{"code":2,"message":"bad"}})
+        );
     }
 }

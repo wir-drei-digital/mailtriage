@@ -36,6 +36,26 @@ pub enum ErrorKind {
     /// `mailtriage.json` or the mail engine's configuration (the Himalaya
     /// TOML) changed while the command ran; a rerun reads the current one.
     ConfigChanged,
+    /// Another command holds the configuration lock to edit `mailtriage.json`.
+    ConfigBusy,
+    /// Another worker for the account is running.
+    AccountBusy,
+    /// The account's stored binding no longer matches its configuration.
+    BindingConflict,
+}
+
+impl ErrorKind {
+    /// The stable, machine-readable `reason` the JSON error object carries;
+    /// `None` for an error without a kind.
+    pub fn reason(self) -> Option<&'static str> {
+        match self {
+            Self::Other => None,
+            Self::ConfigChanged => Some("config_changed"),
+            Self::ConfigBusy => Some("config_busy"),
+            Self::AccountBusy => Some("account_busy"),
+            Self::BindingConflict => Some("binding_conflict"),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -51,21 +71,20 @@ impl fmt::Display for ServiceError {
 }
 impl std::error::Error for ServiceError {}
 pub(crate) fn err(code: i32, message: impl Into<String>) -> anyhow::Error {
+    err_kind(code, ErrorKind::Other, message)
+}
+/// An error of `kind`, whose `reason` the JSON error object names.
+pub(crate) fn err_kind(code: i32, kind: ErrorKind, message: impl Into<String>) -> anyhow::Error {
     ServiceError {
         code,
         message: message.into(),
-        kind: ErrorKind::Other,
+        kind,
     }
     .into()
 }
 /// A configuration change while the command ran: a conflict (exit 5).
 fn config_err(message: impl Into<String>) -> anyhow::Error {
-    ServiceError {
-        code: 5,
-        message: message.into(),
-        kind: ErrorKind::ConfigChanged,
-    }
-    .into()
+    err_kind(5, ErrorKind::ConfigChanged, message)
 }
 
 /// The process exit code the CLI reports for `error`.
@@ -194,7 +213,7 @@ impl Service {
         let account = self.account(name)?;
         let generation = generation(&self.config, &account)?;
         let identity = binding_identity(&account, self.engine_override.as_deref())?;
-        self.store.ensure_account(name,&identity,&generation).map_err(|_|err(5,"account binding changed or state unavailable; verify config and use a new namespace for a different mailbox"))?;
+        self.store.ensure_account(name,&identity,&generation).map_err(|_|err_kind(5,ErrorKind::BindingConflict,"account binding changed or state unavailable; verify config and use a new namespace for a different mailbox"))?;
         let cutoff =
             Utc::now() - Duration::hours(self.config.policy.freshness_hours.min(87600) as i64);
         let mut expired = vec![];
@@ -228,8 +247,13 @@ impl Service {
                     .state_dir
                     .join(format!("worker-{}.lock", hash(name.as_bytes()))),
             )?;
-        f.try_lock_exclusive()
-            .map_err(|_| err(5, "an account worker is already running"))?;
+        f.try_lock_exclusive().map_err(|_| {
+            err_kind(
+                5,
+                ErrorKind::AccountBusy,
+                "an account worker is already running",
+            )
+        })?;
         Ok(f)
     }
     fn stored_identity(&self, name: &str) -> Result<String> {
@@ -1113,7 +1137,7 @@ impl Service {
             .write(true)
             .open(self.path.with_extension("lock"))?;
         FileExt::try_lock_shared(&config_lock)
-            .map_err(|_| err(5, "configuration is being edited"))?;
+            .map_err(|_| err_kind(5, ErrorKind::ConfigBusy, "configuration is being edited"))?;
         Ok(config_lock)
     }
     /// With filing on, a correction that sets or clears `category_id` is a
@@ -1468,7 +1492,7 @@ impl Service {
             .write(true)
             .open(self.path.with_extension("lock"))?;
         lock.try_lock_exclusive()
-            .map_err(|_| err(5, "configuration is being edited"))?;
+            .map_err(|_| err_kind(5, ErrorKind::ConfigBusy, "configuration is being edited"))?;
         Ok(lock)
     }
     /// With filing on, a category without `folder` keeps the folder its id
@@ -1985,5 +2009,40 @@ mod golden {
             super::generation(&cfg, &cfg.accounts["work"]).unwrap(),
             "6dfd7bf30e6bf1c0b27ee97af991ecf21dc5ac0400044c2f3adbda7f79d37514"
         );
+    }
+}
+
+#[cfg(test)]
+mod error_reasons {
+    use super::{config_err, err, err_kind, ErrorKind, ServiceError};
+
+    #[test]
+    fn each_kind_maps_to_its_stable_reason() {
+        assert_eq!(ErrorKind::Other.reason(), None);
+        assert_eq!(ErrorKind::ConfigChanged.reason(), Some("config_changed"));
+        assert_eq!(ErrorKind::ConfigBusy.reason(), Some("config_busy"));
+        assert_eq!(ErrorKind::AccountBusy.reason(), Some("account_busy"));
+        assert_eq!(
+            ErrorKind::BindingConflict.reason(),
+            Some("binding_conflict")
+        );
+    }
+
+    #[test]
+    fn errors_carry_their_code_kind_and_message() {
+        let e = err_kind(5, ErrorKind::AccountBusy, "busy");
+        let e = e.downcast_ref::<ServiceError>().unwrap();
+        assert_eq!(
+            (e.code, e.kind, e.message.as_str()),
+            (5, ErrorKind::AccountBusy, "busy")
+        );
+        let e = err(2, "plain");
+        assert_eq!(
+            e.downcast_ref::<ServiceError>().unwrap().kind,
+            ErrorKind::Other
+        );
+        let e = config_err("changed");
+        let e = e.downcast_ref::<ServiceError>().unwrap();
+        assert_eq!((e.code, e.kind), (5, ErrorKind::ConfigChanged));
     }
 }
