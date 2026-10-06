@@ -3,7 +3,7 @@
 //! script that does not run until `chmod +x`, and a failing `exec`.
 mod update_support;
 use std::{fs, os::unix::fs::PermissionsExt};
-use update_support::{fake_binary, replace_file, run, wait_exit, Sandbox, Server};
+use update_support::{fake_binary, replace_file, run, signal, wait_exit, Sandbox, Server};
 
 const RUNNING: &str = env!("CARGO_PKG_VERSION");
 
@@ -39,9 +39,29 @@ fn watch_restarts_onto_a_fresh_copy_and_keeps_its_pid() {
     assert_eq!(watch.seen.last().unwrap()["account"], "work");
     assert!(watch.child.try_wait().unwrap().is_none());
     assert_eq!(watch.events("restarting").len(), 1);
-    let (code, last) = watch.stop();
-    assert_eq!(code, Some(0));
+    assert!(watch.events("error").is_empty(), "{:#?}", watch.seen);
+    // SIGTERM stops it cleanly. Its summary counts only the passes since
+    // the restart: the new image started a fresh tally, where an `exec`
+    // that failed would have kept counting in the old one.
+    signal(&watch.child, "TERM");
+    watch.until("the stop summary", |seen| {
+        seen.last().is_some_and(|v| v.get("watch").is_some())
+    });
+    assert_eq!(wait_exit(&mut watch.child).code(), Some(0));
+    let last = watch.seen.last().unwrap().clone();
     assert_eq!(last["watch"]["stopped"], true);
+    assert_eq!(last["watch"]["account"], "work");
+    let restart = watch
+        .seen
+        .iter()
+        .position(|v| v["update"]["event"] == "restarting")
+        .unwrap();
+    let since = watch.seen[restart..]
+        .iter()
+        .filter(|v| v.get("discovered").is_some())
+        .count();
+    assert!(since >= 2);
+    assert_eq!(last["watch"]["passes"], since, "{:#?}", watch.seen);
     assert!(server.requests().is_empty());
 }
 
