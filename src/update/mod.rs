@@ -5,11 +5,13 @@
 pub mod archive;
 pub mod cache;
 pub mod check;
+pub mod command;
 pub mod github;
 pub mod install;
 pub mod platform;
 pub mod release;
 pub mod schedule;
+pub mod service_files;
 pub mod version;
 
 /// The repository releases come from.

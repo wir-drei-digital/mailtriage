@@ -10,6 +10,7 @@ use mailtriage::{
     },
     setup,
     system_service::{self, Context},
+    update,
 };
 use serde_json::{json, Value};
 use std::{
@@ -86,6 +87,15 @@ enum Command {
         #[command(subcommand)]
         command: ServiceCommand,
     },
+    /// Install the newest stable release from GitHub; needs no config.
+    Update(UpdateArg),
+}
+
+#[derive(Args)]
+struct UpdateArg {
+    /// Only report whether an update is available; install nothing.
+    #[arg(long)]
+    check: bool,
 }
 
 #[derive(Args)]
@@ -644,6 +654,9 @@ fn execute(cli: &Cli) -> Result<Value, CliError> {
             .map_err(service_error),
         Command::Filing { command } => filing(&cli.config_path()?, command),
         Command::Service { command } => service_command(&cli.config_path()?, command),
+        Command::Update(arg) => {
+            update::command::run(arg.check, &update::install::EnvHooks).map_err(service_error)
+        }
     }
 }
 

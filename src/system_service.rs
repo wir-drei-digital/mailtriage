@@ -92,16 +92,19 @@ impl Context {
     }
 
     pub fn unit_path(&self, account: &str) -> PathBuf {
+        let dir = unit_dir(self.manager, &self.home);
         match self.manager {
-            Manager::Launchd => self
-                .home
-                .join("Library/LaunchAgents")
-                .join(format!("{}.plist", label(account))),
-            Manager::Systemd => self
-                .home
-                .join(".config/systemd/user")
-                .join(unit_name(account)),
+            Manager::Launchd => dir.join(format!("{}.plist", label(account))),
+            Manager::Systemd => dir.join(unit_name(account)),
         }
+    }
+}
+
+/// The directory that holds `manager`'s per-user service files.
+pub fn unit_dir(manager: Manager, home: &Path) -> PathBuf {
+    match manager {
+        Manager::Launchd => home.join("Library/LaunchAgents"),
+        Manager::Systemd => home.join(".config/systemd/user"),
     }
 }
 
@@ -240,7 +243,7 @@ fn systemd_arg(arg: &str) -> String {
     }
 }
 
-fn is_marked(manager: Manager, text: &str) -> bool {
+pub(crate) fn is_marked(manager: Manager, text: &str) -> bool {
     match manager {
         Manager::Launchd => text.contains(PLIST_MARKER),
         Manager::Systemd => text.lines().next() == Some(UNIT_MARKER),

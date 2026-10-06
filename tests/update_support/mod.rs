@@ -300,3 +300,101 @@ pub fn replace_file(path: &Path, data: &[u8], mode: u32) {
     std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode)).unwrap();
     std::fs::rename(&tmp, path).unwrap();
 }
+
+use std::path::PathBuf;
+
+/// A private temporary directory with an `install/` directory (0755)
+/// holding a copy of the binary under test, and `home/` and `xdg/` for
+/// `HOME` and `XDG_CACHE_HOME`.
+pub struct Sandbox {
+    pub dir: tempfile::TempDir,
+    pub bin: PathBuf,
+    pub home: PathBuf,
+    pub xdg: PathBuf,
+}
+
+impl Sandbox {
+    pub fn new() -> Self {
+        Self::at("install")
+    }
+
+    /// The copy at `<tmp>/<relative>/mailtriage`.
+    pub fn at(relative: &str) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let install = root.join(relative);
+        std::fs::create_dir_all(&install).unwrap();
+        let mut walk = install.clone();
+        while walk != root {
+            std::fs::set_permissions(&walk, std::fs::Permissions::from_mode(0o755)).unwrap();
+            walk.pop();
+        }
+        let bin = install.join("mailtriage");
+        std::fs::copy(env!("CARGO_BIN_EXE_mailtriage"), &bin).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let home = root.join("home");
+        let xdg = root.join("xdg");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&xdg).unwrap();
+        Self {
+            dir,
+            bin,
+            home,
+            xdg,
+        }
+    }
+
+    pub fn root(&self) -> PathBuf {
+        std::fs::canonicalize(self.dir.path()).unwrap()
+    }
+
+    /// The copy run with this sandbox's HOME and XDG_CACHE_HOME, the
+    /// server as GitHub, and no inherited config or test hook. Neither
+    /// `update` nor the tests that use this run `launchctl` or `systemctl`.
+    pub fn command(&self, server: &Server) -> std::process::Command {
+        let mut command = std::process::Command::new(&self.bin);
+        command
+            .current_dir(self.root())
+            .env("HOME", &self.home)
+            .env("XDG_CACHE_HOME", &self.xdg)
+            .env("MAILTRIAGE_UPDATE_URL", &server.base)
+            .env("PATH", "/usr/bin:/bin")
+            .env_remove("MAILTRIAGE_CONFIG")
+            .env_remove("MAILTRIAGE_UPDATE_TEST_HOOK")
+            .env_remove("MAILTRIAGE_UPDATE_TEST_LOCK_WAIT_MS");
+        command
+    }
+
+    /// `update.json` in this sandbox's cache directory.
+    pub fn cache_file(&self) -> PathBuf {
+        cache_dir(&self.home, &self.xdg).join("update.json")
+    }
+
+    pub fn cache(&self) -> Value {
+        std::fs::read(self.cache_file())
+            .ok()
+            .and_then(|d| serde_json::from_slice(&d).ok())
+            .unwrap_or(Value::Null)
+    }
+}
+
+/// The cache directory mailtriage uses for these HOME and XDG_CACHE_HOME.
+pub fn cache_dir(home: &Path, xdg: &Path) -> PathBuf {
+    if cfg!(target_os = "macos") {
+        home.join("Library/Caches/mailtriage")
+    } else {
+        xdg.join("mailtriage")
+    }
+}
+
+/// Runs `command`; returns its exit code, its stdout as JSON (`Null` when
+/// it is not JSON) and its stderr.
+pub fn run(command: &mut std::process::Command) -> (Option<i32>, Value, String) {
+    let out = command.output().unwrap();
+    (
+        out.status.code(),
+        serde_json::from_slice(&out.stdout).unwrap_or(Value::Null),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}

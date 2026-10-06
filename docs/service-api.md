@@ -187,6 +187,19 @@ The CLI wraps each in `{"schema_version":1,"service":{...}}`.
   `manager:"none"`. Unknown account: exit 2. Unmarked file at the unit path:
   exit 5. A failed `launchctl`/`systemctl` call: exit 3.
 
+## `update`
+
+`update::command::run(check_only, &dyn Hooks) -> Result<Value>` is
+`mailtriage update [--check]`; it opens no config. Errors are `ServiceError`s:
+3 for network, release, archive, smoke-test and replaceability problems, 5
+when the installation lock stayed held for 60 s. The JSON results are in the
+[guide](guide.md#updates). The code is in `src/update/`: `github` (URL rules,
+release list, downloads), `release` (candidate, archive names,
+`SHA256SUMS`), `cache` (`update.json`), `schedule`, `check` (one refresh),
+`platform` (file identity, replaceability, `--version` probes), `archive`,
+`install` (the transaction under the installation lock), `service_files`
+(decoding service files) and `command`.
+
 ## Heartbeat (schema v5)
 
 Migration 5 adds `pass_heartbeats(account TEXT PRIMARY KEY, finished_at TEXT

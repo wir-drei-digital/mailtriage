@@ -10,6 +10,7 @@ This guide is the full reference: setup, configuration, the OpenRouter key, the 
 - [Configuration](#configuration)
 - [The OpenRouter key](#the-openrouter-key)
 - [Background service](#background-service)
+- [Updates](#updates)
 - [Daily use](#daily-use)
 - [Categories](#categories)
 - [Filing into folders](#filing-into-folders)
@@ -704,6 +705,112 @@ sudo systemctl enable --now mailtriage-work.service
 - `mailtriage service` does not manage this unit. `service status` reports it as not installed, but its `last_pass` still shows the latest pass.
 - The user named in `User=` needs write access to `state_dir` and to the directory that holds `mailtriage.json`. mailtriage creates `mailtriage.lock` there and rewrites the file for `filing enable`, `filing disable` and `categories apply`.
 - Supervisors start jobs with a short default `PATH` (launchd: `/usr/bin:/bin:/usr/sbin:/sbin`), which is why `engine.binary` should be an absolute path.
+
+## Updates
+
+mailtriage installs new releases of itself from [GitHub Releases](https://github.com/wir-drei-digital/mailtriage/releases). The background service installs a new stable release within about a day and switches to it between passes. `mailtriage update` installs one at once.
+
+### Modes
+
+`updates` in `mailtriage.json` decides what `watch` does:
+
+| Value | `watch` |
+| --- | --- |
+| `auto` (default) | Checks for a new release about once a day and installs it. |
+| `notify` | Checks about once a day and prints an `available` event; installs nothing. |
+| `off` | Makes no network call. |
+
+Set it with `mailtriage setup --update --updates notify`, or edit the file. The mode governs only `watch`: `mailtriage update` works in every mode and needs no config.
+
+### `mailtriage update`
+
+```sh
+mailtriage update --check --json   # report; changes nothing but the cache
+mailtriage update --json           # install the newest stable release
+```
+
+Both read the release list of `wir-drei-digital/mailtriage` from the GitHub API, every page, without a token. The candidate is the highest release whose tag is exactly `vX.Y.Z`: drafts, prereleases such as `v0.4.0-rc.1` and other tags are ignored, and GitHub's "Latest" flag is not used. Versions compare by SemVer, so `0.3.0-rc.1 < 0.3.0 < 0.3.1`. A release is installed only when it is newer than the installed binary. mailtriage never downgrades, and a release candidate you installed by hand stays until a higher stable release appears.
+
+`update` replaces the binary that runs it (its path with symlinks resolved). In order, it:
+
+1. reads the installed version with `<binary> --version` (when that fails, it compares with the version that is running), and stops with `action: current` when the release is not newer;
+2. checks that this binary may be replaced (see [Binaries mailtriage does not replace](#binaries-mailtriage-does-not-replace));
+3. takes the installation lock, `.mailtriage-update.lock` next to the binary, waiting up to 60 seconds for another update, and reads the installed version again under it: when another update installed the release meanwhile, it stops with `action: current`;
+4. downloads `mailtriage-vX.Y.Z-PLATFORM.tar.gz` and `SHA256SUMS` over HTTPS from `github.com` and GitHub's download hosts only, with at most 10 redirects and 200 MB; `PLATFORM` is `macos-arm64`, `linux-amd64` or `linux-arm64`;
+5. checks the archive's SHA-256 against its line in `SHA256SUMS`;
+6. unpacks the `mailtriage` executable next to the binary and runs `--version` on it, which must print the release's version. This catches a wrong architecture, a glibc older than the release needs, and macOS refusing to run the binary;
+7. checks that the installed binary did not change meanwhile, keeps it as `<binary>.previous`, and moves the new binary into place with a rename. Running processes keep the old file open, so nothing running is disturbed.
+
+When a step before the rename fails, the binary and `<binary>.previous` are unchanged and the temporary files are removed. After the rename the update counts as done; a later problem, such as keeping the backup or recording the update, is a warning. Releases are verified by HTTPS and `SHA256SUMS`, not by signatures. `update` starts and stops nothing: each running `watch` switches to the new binary by itself.
+
+`--check` reports:
+
+```json
+{"schema_version":1,"update":{"current":"0.2.0","installed":"0.2.0","latest":"0.3.0","available":true,"release_url":"https://github.com/wir-drei-digital/mailtriage/releases/tag/v0.3.0","published_at":"2026-11-02T09:00:00Z","checked_at":"2026-11-03T08:12:40Z","install":{"path":"/Users/alice/.local/bin/mailtriage","replaceable":true,"reason":null,"fix":null},"warnings":[]}}
+```
+
+| Field | Content |
+| --- | --- |
+| `current` | The version of the process that ran the command. |
+| `installed` | What the binary at `install.path` prints for `--version` now; `null` when it does not run. |
+| `latest` | The highest stable release, or `null` when there is none. |
+| `available` | `true` when `latest` is newer than `installed`. |
+| `release_url`, `published_at` | The release's GitHub page and publication time. |
+| `checked_at` | When this check ran. |
+| `install` | `path`: the binary `update` would replace. `replaceable`, `reason` and `fix`: see [Binaries mailtriage does not replace](#binaries-mailtriage-does-not-replace). |
+| `warnings` | Problems that did not stop the command, such as a cache that could not be written. |
+
+Without `--check`:
+
+```json
+{"schema_version":1,"update":{"action":"updated","from":"0.2.0","to":"0.3.0","path":"/Users/alice/.local/bin/mailtriage","previous_path":"/Users/alice/.local/bin/mailtriage.previous","warnings":[],"services":[{"account":"work","manager":"launchd","unit_path":"/Users/alice/Library/LaunchAgents/digital.wirdrei.mailtriage.work.plist","executable":"/Users/alice/.local/bin/mailtriage","same_binary":true}]}}
+```
+
+| Field | Content |
+| --- | --- |
+| `action` | `updated`, or `current` when the release is not newer. With `current`, `from` and `to` are both the installed version, and `previous_path` and `services` are absent. |
+| `from`, `to` | The installed version before and after. |
+| `path` | The binary that was replaced. |
+| `previous_path` | Where the previous binary is: `<binary>.previous`, or, with a warning, a `.mailtriage-update-*.prev` file next to it. |
+| `warnings` | Problems after the rename, for example `installed; recording the update failed: …`. The update still counts as done. |
+| `services` | Every service file mailtriage wrote in this user's LaunchAgents or systemd user directory: `account`, `manager`, `unit_path`, the `executable` it runs (`null` when the file cannot be decoded), and `same_binary`, true when that is the binary just replaced. Those services switch before their next pass; the others are left alone. `update` runs no `launchctl` or `systemctl` command. |
+
+| Code | Cause |
+| --- | --- |
+| 0 | Updated (also with `warnings`), already current, or `--check` done. |
+| 2 | Invalid flags. |
+| 3 | GitHub could not be reached or answered with an error, including its rate limit; there is no stable release; the release has no archive for this platform or no `SHA256SUMS` line for it; a checksum mismatch; a bad archive; the new binary did not run; the installed binary changed during the update; no cache directory can be found (see [Files](#files)); or, without `--check`, the binary may not be replaced: the message names the reason and its fix. |
+| 5 | Another update held the installation lock for 60 seconds (`another update is running`). |
+
+### Binaries mailtriage does not replace
+
+| `install.reason` | When | `install.fix` |
+| --- | --- | --- |
+| `unsupported_platform` | No release archive is built for this system: only macOS arm64 and Linux amd64 and arm64 with glibc have one. | Build from source, or set `updates` to `off`. |
+| `managed_by_homebrew` | The path has a `Cellar` directory followed by `mailtriage`. | `brew upgrade mailtriage` |
+| `managed_by_nix` | The path starts with `/nix/store/`. | Update it through nix. |
+| `unsafe_permissions` | The binary or its directory is not owned by you, or is writable by group or others. | Install mailtriage into a directory only you own and can write, such as `~/.local/bin`, or set `updates` to `notify`. |
+| `not_writable` | You cannot create files in the binary's directory. | Make the directory writable for you, or set `updates` to `notify`. |
+
+A binary installed with `sudo install … /usr/local/bin/mailtriage` belongs to root, so it is `unsafe_permissions`: mailtriage reports new releases for it but does not replace it. For automatic updates, install it as your own user and put `~/.local/bin` on your `PATH`:
+
+```sh
+install -d ~/.local/bin
+install -m 0755 mailtriage ~/.local/bin/mailtriage
+```
+
+Run `mailtriage service install` again after you move the binary.
+
+### Files
+
+| File | Purpose |
+| --- | --- |
+| `update.json` in `~/Library/Caches/mailtriage` (macOS), or in `$XDG_CACHE_HOME/mailtriage` when `XDG_CACHE_HOME` is an absolute path, else `~/.cache/mailtriage` (Linux) | The last release check and when the next one is due, each config's mode and the last `available` event, and each installed binary's version and last install error. `update.lock` beside it guards it. Deleting it is safe; it is rebuilt. |
+| `.mailtriage-update.lock` next to the binary | The installation lock. It is never deleted. |
+| `.mailtriage-update-*` next to the binary | Temporary files of an update; the next update removes leftovers. |
+| `<binary>.previous` | The binary before the last update. |
+
+Without the cache directory (no `HOME`, and on Linux no absolute `XDG_CACHE_HOME`), `update` exits 3 and `watch` skips its update work.
 
 ## Daily use
 
