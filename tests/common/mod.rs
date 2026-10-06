@@ -121,7 +121,8 @@ esac
 /// Fake `systemctl --user`, with its state in files next to the script:
 /// - `daemon-reload` records the `ExecStart=` of the unit file under
 ///   `$MT_FAKE_HOME` (default: `home` next to the script) in `exec_start`,
-///   with `%%` and `$$` undone, as the loaded definition;
+///   with `%%` undone, as the loaded definition: systemd resolves specifiers
+///   when it loads a unit, but keeps `$$` until it runs the command;
 /// - `enable [--now]`, `restart`, `disable [--now]` change `enabled` and
 ///   `active` (`start-fails` keeps a start from running);
 /// - `is-enabled` prints `enabled`/`disabled`, or the text of `is-enabled`;
@@ -140,7 +141,7 @@ case "$2" in
   daemon-reload)
     rm -f "$dir/exec_start" "$dir/needs-reload"
     for f in "$home"/.config/systemd/user/mailtriage-*.service; do
-      if [ -f "$f" ]; then sed -n 's/^ExecStart=//p' "$f" | sed 's/%%/%/g; s/\$\$/$/g' > "$dir/exec_start"; fi
+      if [ -f "$f" ]; then sed -n 's/^ExecStart=//p' "$f" | sed 's/%%/%/g' > "$dir/exec_start"; fi
     done ;;
   enable) touch "$dir/enabled"; if [ "$3" = "--now" ]; then start; fi ;;
   restart) start ;;

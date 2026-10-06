@@ -74,6 +74,43 @@ fn two_configs_that_share_an_account_name() {
     }
 }
 
+/// A config path with spaces, `&`, `%`, `$` and quotes names the same config
+/// in every source: the running process, the loaded definition and the file.
+#[test]
+fn a_config_path_with_special_characters_matches() {
+    for manager in [Manager::Launchd, Manager::Systemd] {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = context(manager, dir.path());
+        let odd = dir.path().join("a & b/50% $HOME \"x\"");
+        fs::create_dir_all(&odd).unwrap();
+        let config = config_file(&odd, "mailtriage.json");
+        let unit = unit_for(dir.path(), &config);
+        system_service::install(&ctx, &unit).unwrap();
+        let proc_root = proc_for(dir.path(), 4343, &unit);
+        let found = inspect(&ctx, &proc_root);
+        assert!(found.running, "{manager:?}");
+        assert_eq!(
+            found.service_config.as_deref(),
+            Some(config.as_path()),
+            "{manager:?}"
+        );
+        assert_eq!(found.file_config.as_deref(), Some(config.as_path()));
+        assert_eq!(
+            matches(&ctx, &proc_root, &config),
+            Some(true),
+            "{manager:?}"
+        );
+        if manager == Manager::Systemd {
+            // Loaded but not running: the config of the loaded `ExecStart`.
+            fs::remove_file(dir.path().join("active")).unwrap();
+            let found = inspect(&ctx, &proc_root);
+            assert!(!found.running);
+            assert_eq!(found.service_config.as_deref(), Some(config.as_path()));
+            assert_eq!(matches(&ctx, &proc_root, &config), Some(true));
+        }
+    }
+}
+
 /// An install for config B whose reload failed: the file names B, the
 /// loaded job still runs A.
 #[test]

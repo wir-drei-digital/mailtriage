@@ -150,11 +150,16 @@ pub fn launchctl_arguments(text: &str) -> Option<Vec<String>> {
 
 /// `argv[]` of `systemctl show -p ExecStart`. Only a command line shaped
 /// like the one `service install` writes counts, so a path that `show`
-/// printed without quotes cannot be mistaken for a shorter one.
+/// printed without quotes cannot be mistaken for a shorter one. systemd
+/// resolved `%%` when it loaded the unit but keeps `$$` until it runs the
+/// command, so `$$` is undone here and `%%` is not.
 pub fn exec_start_arguments(value: &str) -> Option<Vec<String>> {
     let rest = &value[value.find("argv[]=")? + "argv[]=".len()..];
     let end = rest.find(" ; ").unwrap_or(rest.len());
-    let args = split_words(&rest[..end])?;
+    let args: Vec<String> = split_words(&rest[..end])?
+        .into_iter()
+        .map(|w| w.replace("$$", "$"))
+        .collect();
     let shaped = args.len() == 11
         && args[1] == "watch"
         && args[2] == "--config"
@@ -522,6 +527,21 @@ mod tests {
         // Printed without quotes, the path splits: no match rather than a wrong one.
         let split = "{ path=/x ; argv[]=/x watch --config /a b.json --account w --interval-seconds 60 --limit 100 --json ; ignore_errors=no }";
         assert_eq!(exec_start_arguments(split), None);
+        // systemd resolves `%%` when it loads a unit but keeps `$$` until it
+        // runs the command, so the loaded argv still holds `$$`.
+        for (argv, config) in [
+            ("\"/a\\$\\$b.json\"", "/a$b.json"),
+            ("/50%%$$x.json", "/50%%$x.json"),
+        ] {
+            let value = format!("{{ path=/x ; argv[]=/x watch --config {argv} --account w --interval-seconds 60 --limit 100 --json ; ignore_errors=no }}");
+            assert_eq!(
+                watch_args(&exec_start_arguments(&value).unwrap())
+                    .unwrap()
+                    .config,
+                PathBuf::from(config),
+                "{argv}"
+            );
+        }
     }
 
     #[test]
