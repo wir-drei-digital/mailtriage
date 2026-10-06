@@ -1,7 +1,7 @@
 # Refiling filed mail after category changes
 
 Date: 2026-10-06
-Status: Design approved in conversation; written spec revised after Codex review round 1.
+Status: Design approved in conversation; written spec revised after Codex review rounds 1 and 2.
 Builds on: [IMAP category filing](2026-10-04-imap-category-filing-design.md) and [guided setup](2026-10-05-guided-setup-design.md).
 
 ## Goal
@@ -30,22 +30,33 @@ or its `folder` changed) stays there for good.
 ## Filed home
 
 A placement gains its **filed home**: the exact occurrence `(folder, epoch, uid)`
-that mailtriage's last applied move produced (the intent's `target`,
-`target_epoch` and `target_uid`).
+that a mailtriage move is proven to have produced.
 
-- It is set whenever a mailtriage move is applied, by the normal apply path and by
-  intent recovery.
-- It is cleared whenever the placement's home changes for any other reason: a
-  client move or copy, a rescan or survivor relocation, re-evaluation, a revert, or
-  a quarantine resolution.
-- Migration v6 fills it from the newest `applied` move intent of each message that
-  has a `target_uid`, and only when that occurrence equals the current home.
-  Other placements start without one.
+- **Proof.** A move grants a filed home only when the occurrence it is applied to
+  equals the destination the server reported in COPYUID for that dispatch, in the
+  same target epoch (UIDVALIDITY). The filed home is written in the same
+  transaction as the placement transition that applies the move.
+- **No proof, no filed home.** A move that recovery applies without such a COPYUID
+  match (no COPYUID, a different target occurrence found by fingerprint, or an
+  application after the target's epoch changed) still converges as today, but the
+  placement gets no filed home. Fingerprint identity proves which message it is,
+  not who put that occurrence there.
+- **Invalidation.** The filed home is cleared whenever the placement's home
+  changes for any other reason: a client move or copy, a rescan or survivor
+  relocation, re-evaluation, a revert, or a quarantine resolution. A UIDVALIDITY
+  change of the filed-home folder always clears it, and rediscovery of the same
+  message after the reset never restores it; a later proven move can grant a new
+  one. A rescan in the same epoch keeps it while that exact occurrence survives.
+- **Migration v6** fills it conservatively: from the newest applied move intent of
+  each message overall, only when that intent recorded a COPYUID `target_uid`, its
+  `(target, target_epoch, target_uid)` equals the placement's current home, and
+  the home folder is not `retired`. Everything else starts without one; moves
+  applied before v6 without COPYUID cannot be refiled.
 
 A message is refile-eligible only while its current home equals its filed home.
 This excludes mail the user moved by hand (including back into the folder it was
-already in), mail placed by rescans or arrivals without a mailtriage move, and
-quarantined or relocated occurrences.
+already in), mail placed by rescans or arrivals without a proven mailtriage move,
+and quarantined or relocated occurrences.
 
 ## Command
 
@@ -62,10 +73,13 @@ mailtriage filing refile --account NAME [--category ID] [--folder NAME] [--limit
     another category's folder) or `folder_retired` (its folder belongs to no
     category any more).
   - `total`: the number of candidates (never limited).
-  - `waiting`: messages that pass every rule except a current classification.
+  - `waiting`: messages that pass the placement rules (1–5) but whose
+    classification is not current yet. Their target, and whether they move at
+    all, is decided only once they are reclassified.
   - `skipped`: counts by reason: `not_filed_by_mailtriage`, `corrected`, `pinned`,
     `blocked`, `done`, `open_intent`, `explicit_target`, `multiple_copies`,
-    `incomplete_input`, `target_unusable`, `target_inbox_or_source`.
+    `incomplete_input`, `retired_frozen`, `target_unusable`,
+    `target_inbox_or_source`.
 - `--category ID`: only candidates whose new category is `ID`. `waiting` is still
   reported but never marked with `--category`: its new category is not known yet,
   so run the command again once those messages are reclassified.
@@ -83,6 +97,9 @@ mailtriage filing refile --account NAME [--category ID] [--folder NAME] [--limit
 
 A message is a candidate when all of these hold:
 
+Rules 1–5 are about the placement; rules 6–8 need a current classification and
+are checked only once it exists.
+
 1. Its current home equals its filed home (see above).
 2. Its home folder is a category folder or a retired folder, not a watched source
    folder, and its location is known, hydrated and unambiguous.
@@ -92,8 +109,9 @@ A message is a candidate when all of these hold:
 5. It has exactly one recorded occurrence.
 6. Its classification is current (the message's generation equals the account's,
    status `ready` or `uncertain`), gives a category, and is not based on
-   incomplete input. A message that fails only the "current" part is `waiting`;
-   one with incomplete input is skipped.
+   incomplete input. A message that passes rules 1–5 but has no current
+   classification is `waiting`; one whose current classification has incomplete
+   input is skipped.
 7. The folder of its effective category differs from its home folder and is
    usable: a category folder in state `ok`, not paused, missing or awaiting
    confirmation.
@@ -126,12 +144,15 @@ independently of move eligibility. In this order:
 
 1. An open refile intent: leave the mark; the intent is resolved first.
 2. A rescan of the home folder is in progress: leave the mark.
-3. Clear the mark (event `refile_cleared` with the reason) when: the message is
-   done; it was corrected or pinned; its home no longer equals its filed home
-   (moved, relocated, absent, or its folder gone); it has more than one recorded
-   occurrence; its effective category's folder is its home folder; that folder is
-   `INBOX` or a source folder; or its classification has incomplete input.
-4. Otherwise keep it.
+3. Clear the mark (event `refile_cleared` with the reason) for a reason that does
+   not depend on classification: the message is done; it was corrected or pinned;
+   its home no longer equals its filed home (moved, relocated, absent, epoch
+   reset, or its folder gone); or it has more than one recorded occurrence.
+4. Only when the classification is current, also clear it when: its effective
+   category's folder is its home folder; that folder is `INBOX` or a source
+   folder; or the classification has incomplete input. A stale classification
+   never clears a mark.
+5. Otherwise keep it.
 
 **2. Planning.** A new rule in the planner runs after the explicit-target rule and
 before the source-folder rule. A marked message whose candidate rules all hold
@@ -142,26 +163,30 @@ classification or a usable target waits.
 ### Intents
 
 A refile intent is checked again at claim time, and before every retry once
-recovery has established that no earlier dispatch applied. If the candidate rules
-no longer hold, the intent is abandoned (event `refile_cancelled`) and mark
-upkeep decides the mark on the next pass.
+recovery has established that no earlier dispatch applied. The check is the
+candidate rules with two differences: the intent itself does not count as an open
+intent, and both the validated source occurrence and the destination resolved
+from the current classification must equal the intent's journaled source and
+target. If any of that fails, the intent is closed as `superseded` (event
+`refile_cancelled` with the reason) and the next pass's planning may create a new
+one.
 
 When a refile move is applied and its `desired_rev` still matches, the mark is
 cleared, the same way `eligible_once` is consumed.
 
 ### Retired folders
 
-A retired folder that holds marked mail is watched again (the existing
-"referenced" rule gains refile marks), so its occurrences are current and a move
-can select it.
+The existing rule freezes a retired folder's occurrences once nothing references
+it. This feature adds one reference: **a retired folder stays watched while it
+holds a placement whose filed home is in it.** Such a folder therefore never
+freezes while it holds refile-eligible mail, so its occurrences stay current,
+done inference works on it as on any watched folder, and a refile move can select
+it.
 
-When a retired folder becomes watched again after its occurrences were frozen, its
-first pass only reconciles it: no refile move starts from it in that pass. A
-marked message whose home occurrence has disappeared gets its mark cleared
-(`home_vanished`), and **done inference does not apply to it**. It becomes absent
-like any absent message and is relocated by the normal arrival handling if it
-reappears; a message the user moved elsewhere while the folder was frozen is never
-inferred done because of the refile.
+A retired folder whose occurrences are already frozen is never watched again by
+this feature: migration v6 grants no filed home in retired folders, and a frozen
+folder cannot gain one. Mail in such a folder is not refiled (preview reason
+`retired_frozen`).
 
 ### Limits, flags and safety
 
@@ -217,12 +242,17 @@ inferred done because of the refile.
   against `desired_target` and the source-folder rule; `consumes_refile` on the
   action; incomplete input never moves.
 - **Mark upkeep tests:** each clear reason in the stated order; an open intent and
-  a running rescan keep the mark; absent then done clears it.
+  a running rescan keep the mark; absent then done clears it; a stale
+  classification pointing at the home folder keeps the mark across several
+  reclassification passes, and the current one decides.
 - **Store:** migration v6 from v5 (filed home filled only where the newest applied
   move's target equals the current home) and from an empty database; the
   newer-schema guard at 6; marks consumed by an applied move with a matching
-  `desired_rev` and left when it does not match; filed home set by apply and by
-  recovery, cleared by every other relocation.
+  `desired_rev` and left when it does not match; filed home granted only with a
+  matching COPYUID in the same epoch (not by recovery without one, not after a
+  target epoch change), cleared by every other relocation and by a UIDVALIDITY
+  change, kept by a same-epoch rescan; migration skips retired folders and
+  incomplete tuples.
 - **Service tests with the fake engine:**
   - a category change: preview lists the message, `--apply` marks it, a pass
     moves it, the mark is cleared, the log shows the refile reason;
@@ -233,17 +263,20 @@ inferred done because of the refile.
   - copies in two category folders, and a copy already in the target: skipped
     (`multiple_copies`), no MOVE;
   - a folder re-point: the old folder is retired, its mail moves to the new
-    folder, the retired folder stays watched until the marks are gone;
-  - a retired folder re-activated after freezing: first pass reconciles only; a
-    message the client moved elsewhere meanwhile (including into a folder whose
-    epoch reset) is not inferred done and is not refiled;
-  - done set between planning and claim, and a category change after a failed
-    dispatch: the intent is abandoned, not retried;
+    folder, the retired folder stays watched while it holds filed-home mail and
+    freezes afterwards;
+  - a retired folder frozen before v6: its mail is reported `retired_frozen`
+    and never refiled; the folder is not watched again;
+  - done set between planning and claim, a category change from B to C after a
+    failed dispatch to B, and a source occurrence that changed: the intent is
+    superseded, not retried, and a new intent targets C;
+  - a move applied by recovery without COPYUID: no filed home, not a candidate;
   - an outstanding explicit target whose category was removed: skipped
     (`explicit_target`);
   - `--category` with waiting messages: not marked; `--folder` with waiting
-    messages: marked, moved after reclassification, and those classified into the
-    folder's own category are cleared without a move;
+    messages: marked (including those whose old category was removed), moved
+    after reclassification, and those classified into the folder's own category
+    are cleared without a move;
   - correction, pin and done mail skipped; a paused target keeps the mark; an
     `INBOX` target is skipped;
   - more candidates than `--limit`: complete `total`, `--apply` marks all;
