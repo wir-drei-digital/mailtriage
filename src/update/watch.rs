@@ -118,8 +118,14 @@ impl WatchUpdates {
         if schedule::due(cache.read().next_check_at.as_deref(), Utc::now()) {
             let refreshed = Net::new(self.endpoint.clone())
                 .and_then(|net| check::refresh(&net, &cache, Reservation::Required));
-            if let Err(e) = refreshed {
-                self.report(e.to_string());
+            match refreshed {
+                // A result that could not be recorded: a cache problem.
+                Ok(checked) => {
+                    for warning in checked.warnings {
+                        self.report(warning);
+                    }
+                }
+                Err(e) => self.report(e.to_string()),
             }
         }
         let file = cache.read();
@@ -154,7 +160,11 @@ impl WatchUpdates {
             );
             return fresh && attempt_due && self.install(&cache, path, &release);
         }
-        self.notify(&cache, &key, mode, &release, path.as_deref().zip(blocker));
+        // Only `auto` says why it does not install; `notify` never would.
+        let not_replaceable = path
+            .as_deref()
+            .zip(blocker.filter(|_| mode == UpdateMode::Auto));
+        self.notify(&cache, &key, mode, &release, not_replaceable);
         false
     }
 
@@ -264,7 +274,8 @@ impl WatchUpdates {
     }
 
     /// The `available` event, once per release and config: not again when
-    /// the cache or this process already has it as notified.
+    /// the cache or this process already has it as notified. With
+    /// `not_replaceable` (`auto` only) it adds `install`.
     fn notify(
         &mut self,
         cache: &Cache,

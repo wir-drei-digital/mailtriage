@@ -24,7 +24,9 @@ pub struct Checked {
     /// The highest stable release, `None` when there is none.
     pub release: Option<CachedRelease>,
     pub checked_at: String,
-    /// Cache writes that failed (`BestEffort` only).
+    /// Cache writes that failed, each starting with `cannot write the
+    /// update cache`: the reservation (`BestEffort` only) and the record of
+    /// the result (either mode).
     pub warnings: Vec<String>,
 }
 
@@ -58,7 +60,9 @@ pub fn refresh(net: &Net, cache: &Cache, reservation: Reservation) -> Result<Che
                 c.last_check_error = None;
             });
             if let Err(e) = recorded {
-                warnings.push(format!("recording the check failed: {e:#}"));
+                warnings.push(format!(
+                    "cannot write the update cache: {e:#}; the check's result was not recorded"
+                ));
             }
             Ok(Checked {
                 release,

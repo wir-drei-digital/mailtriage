@@ -106,6 +106,18 @@ fn auto_reports_a_binary_it_may_not_replace() {
 }
 
 #[test]
+fn notify_reports_a_binary_it_may_not_replace_without_an_install_block() {
+    let sandbox = Sandbox::at("opt/homebrew/Cellar/mailtriage/0.1.0/bin");
+    let server = Server::start();
+    server.publish("9.9.9", &release_archive(b"unused"));
+    let config = sandbox.config("cfg", "notify");
+    let mut watch = sandbox.watch(&server, &config);
+    let available = watch.event("available");
+    assert_eq!(available["update"].get("install"), None, "{available}");
+    watch.stop();
+}
+
+#[test]
 fn a_failed_check_is_not_retried_after_a_restart() {
     let sandbox = Sandbox::new();
     let server = Server::start();
@@ -295,4 +307,40 @@ fn a_cache_that_can_be_read_but_not_written_is_reported_once() {
     assert_eq!(server.count(LIST), 1);
     assert_eq!(server.count("/download"), 0);
     assert_eq!(fs::read(&sandbox.bin).unwrap(), original());
+}
+
+#[test]
+fn a_check_whose_result_cannot_be_recorded_is_reported_once() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let sandbox = Sandbox::new();
+    // Permissions do not bind root.
+    if fs::metadata(&sandbox.home).unwrap().uid() == 0 {
+        return;
+    }
+    let server = Server::start();
+    server.publish("9.9.9", &release_archive(b"unused"));
+    let cache_dir = sandbox.cache_file().parent().unwrap().to_path_buf();
+    let _writable = Writable(cache_dir.clone());
+    // The reservation is written before the request; during the request
+    // the cache turns read-only, so the result cannot be recorded.
+    server.on_request(LIST, move || {
+        let _ = fs::set_permissions(&cache_dir, fs::Permissions::from_mode(0o500));
+    });
+    let config = sandbox.config("cfg", "notify");
+    let mut watch = sandbox.watch(&server, &config);
+    watch.wait_passes(3);
+    let errors = watch.events("error");
+    let available = watch.events("available");
+    let (code, _) = watch.stop();
+    assert_eq!(code, Some(0));
+    assert_eq!(errors.len(), 1, "{errors:#?}");
+    let message = errors[0]["update"]["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("cannot write the update cache: ")
+            && message.ends_with("; the check's result was not recorded"),
+        "{message}"
+    );
+    assert!(available.is_empty(), "{available:#?}");
+    // The reservation holds the next request off.
+    assert_eq!(server.count(LIST), 1);
 }
