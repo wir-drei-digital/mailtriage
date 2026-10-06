@@ -1,7 +1,7 @@
 # Automatic updates
 
 Date: 2026-10-06
-Status: Design approved in conversation; written spec revised after Codex review round 1.
+Status: Design approved in conversation; written spec revised after three Codex review rounds.
 Builds on: [guided setup](2026-10-05-guided-setup-design.md) (background service, `doctor`, heartbeats), [refiling](2026-10-06-filing-refile-design.md) (schema v6) and [releases](../../releases.md).
 Extended by: [tray app](2026-10-06-tray-design.md) (tray archive, exit code 4).
 Implementation order: after refile; this spec's migration (v7) needs refile's v6.
@@ -308,7 +308,10 @@ At start, before anything else, `watch` records:
   replaced. On macOS, it is the installation path's metadata at start; because the
   file could have been replaced between launch and that moment, `watch` also runs
   `<path> --version` once at start, and when it prints a version other than the
-  running one, the restart rule fires before the first pass.
+  running one, the restart rule fires before the first pass. **Accepted limit:** on
+  macOS a rebuild with the same version that replaces the file in the instant
+  between launch and this check is not noticed; the next replacement or restart
+  picks it up. Releases always carry a new version, so updates are not affected.
 - On Linux, when the installation path's identity already differs from the image
   identity at start, the file was replaced while the process started. The restart
   rule fires before the first pass.

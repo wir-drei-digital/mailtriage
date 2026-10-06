@@ -1,7 +1,7 @@
 # Tray app
 
 Date: 2026-10-06
-Status: Design approved in conversation; written spec revised after Codex review round 1.
+Status: Design approved in conversation; written spec revised after three Codex review rounds.
 Builds on: [guided setup](2026-10-05-guided-setup-design.md) (background service),
 [refiling](2026-10-06-filing-refile-design.md) and [automatic updates](2026-10-06-auto-update-design.md).
 Implementation order: refile, automatic updates, then this.
@@ -128,6 +128,7 @@ reasons:
 | `binding_conflict` | 5 | The account is bound to another mailbox. |
 | `account_busy` | 5 | Another process holds the account's worker lock (`an account worker is already running`). |
 | `service_config_unknown` | 5 | The config of the loaded service cannot be established (see below). |
+| `service_busy` | 5 | Another service command for the same account held the service lock for 30 s. |
 | `service_config_mismatch` | 5 | The service runs another config (see below). |
 
 ### `service`
@@ -137,17 +138,24 @@ reasons:
   object per account, sorted by account name. With `--account`, the output adds the
   same top-level `config` and is otherwise unchanged apart from the new fields.
 - **New fields** in each service object:
-  - **`service_config`**: the `--config` of the job the manager has loaded:
-    launchd from the `arguments` block of `launchctl print gui/<uid>/<label>`,
-    systemd from the `argv[]` of `systemctl --user show -p ExecStart <unit>`. When
-    the job is not loaded, it comes from the unit file instead (with the same
-    decoding the update spec uses for the executable). `null` when not installed or
-    when it cannot be decoded.
+  - **`service_config`**: the `--config` the service actually runs with.
+    - launchd: from the `arguments` block of `launchctl print gui/<uid>/<label>`.
+      launchd only changes a job's arguments by unloading it, which ends its process,
+      so the loaded arguments are the running ones.
+    - systemd, running: from the live process, `/proc/<MainPID>/cmdline`, with
+      `MainPID` from `systemctl --user show -p MainPID`. The PID's start time
+      (`/proc/<pid>/stat`) is read before and after the command line and must be
+      unchanged. The loaded `ExecStart` (`systemctl --user show -p ExecStart`) is
+      compared too; a reload can change it while the old process keeps running.
+    - systemd, not running: from the loaded `ExecStart`.
+    - Not loaded: from the unit file (with the same decoding the update spec uses
+      for the executable).
+    - `null` when not installed, or when any of these cannot be read or decoded.
   - **`file_config`**: the `--config` decoded from the unit file; on systemd also
     `needs_daemon_reload` (`NeedDaemonReload`).
-  - **`config_matches`**: `true` when `service_config` and, for a loaded job,
-    `file_config` both name the resolved config (canonical paths), and systemd does
-    not need a daemon reload. `false` when either names another config. `null` when
+  - **`config_matches`**: `true` when `service_config`, the loaded `ExecStart` on
+    systemd, and `file_config` all name the resolved config (canonical paths), and
+    systemd does not need a daemon reload. `false` when either names another config. `null` when
     either cannot be established. `true` when not installed.
   - **`enabled`** (`true`, `false` or `null` when unknown) and **`enablement`** (the
     raw state):
@@ -192,6 +200,13 @@ reasons:
   meaning: it rewrites the unit for the resolved config.
 - **`service install`** runs `launchctl enable` before `bootstrap`, so it works after
   a `stop`. (systemd's `enable` already covers this.)
+- **One service command at a time.** `install`, `uninstall`, `start` and `stop`
+  hold an exclusive lock on `service-<label>.lock` from reading the config through
+  the end of their manager calls. The lock lives in a directory derived only from
+  `HOME` (`~/Library/Caches/mailtriage` on macOS, `~/.cache/mailtriage` on Linux,
+  ignoring `XDG_CACHE_HOME`), so commands for the same account from different
+  configs or environments serialize. A command waits up to 30 s for it, then exits 5
+  with reason `service_busy`.
 - Exit codes as for `install`: 2 for unknown accounts and unsupported platforms,
   3 when `launchctl` or `systemctl` fails, 5 as above.
 
@@ -390,9 +405,11 @@ then shows the failure.
 ### Flow
 
 1. **Load.** `categories export` fills the window and records `digest`. The account
-   list and each account's `filing_mode` come from `service status --json`. Each load
-   carries a load number; the answer of an older load (an account switch or reload
-   that was superseded) is ignored, so it can never replace newer edits.
+   list and each account's `filing_mode` come from `service status --json`. While any
+   load runs (opening, Reload, an account switch, the reload after a save), the form
+   is read-only and shows "Loading…", so no edit can be made that a load would
+   replace. Each load carries a load number; the answer of a superseded load is
+   ignored.
 2. **Edit.** Every change increases the draft's revision.
    - **Check.** 500 ms after the last change, the draft is written as
      `{"categories":[…]}` to `draft-<revision>.json`, created exclusively in a
@@ -572,8 +589,10 @@ resolved paths.
     failure is an `error` event; the CLI's restart rule still applies.
 - **Restarting.** The tray process applies the update spec's restart rule to its own
   executable, with the same installation-path and image-identity handling. When its
-  file is replaced and `--version` runs, it re-executes itself with its arguments. An
-  open categories window keeps running.
+  file is replaced and `--version` runs, it re-executes itself with the arguments
+  `--config <canonical config> --mailtriage <canonical CLI>` it resolved at start, not
+  its original arguments, so a restart can never pick up a different default config
+  or CLI. An open categories window keeps running.
 - **CI.**
   - Linux jobs install the GTK, AppIndicator and `xdo` development packages.
   - Formatting, clippy and tests run with `--workspace`.
@@ -613,8 +632,9 @@ No test runs the real `launchctl`, `systemctl` or keychain, or writes into the r
   differs; local time and date formatting; the version-mismatch line.
 - **Window state:**
   - revisions, and out-of-order and other-account check answers ignored;
-  - superseded loads ignored; switching accounts or reloading with unsaved edits
-    asks first;
+  - superseded loads ignored; the form read-only during every load, including the
+    reload after a save; switching accounts or reloading with unsaved edits asks
+    first;
   - suggested IDs from names with accents, spaces and symbols;
   - exactly one default category;
   - folder serialization with filing on and off;
@@ -656,6 +676,11 @@ labels:
   - `service_config` and `config_matches` with two configs that share an account
     name; a unit file rewritten for config B while the loaded job still runs config
     A (an install whose reload failed): `config_matches` false, `stop` exits 5;
+    on systemd, a reload that succeeded while the process still runs config A (fake
+    `/proc` command line): `config_matches` false; a PID whose start time changes
+    while reading: `null`;
+  - two service commands for the same account at once: the second waits; past
+    30 s it exits 5 with `service_busy`;
     a print/show query that fails: `null`, and `start`/`stop` exit 5 with
     `service_config_unknown`;
   - `enabled` and `enablement` for each launchd and systemd state, and for a failed
@@ -703,6 +728,8 @@ fake `launchctl`:
   status; window PIDs survive a self-restart through `MAILTRIAGE_TRAY_WINDOWS`.
 - A config given as a symlink is canonicalized once; retargeting the symlink
   afterwards does not change the commands' `--config`.
+- A self-restart re-executes with the resolved `--config` and `--mailtriage`, even
+  when a `mailtriage.json` has appeared in the working directory since.
 
 **Updates,** with the update spec's fake release server:
 
