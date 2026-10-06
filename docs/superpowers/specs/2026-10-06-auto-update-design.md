@@ -44,6 +44,13 @@ A new top-level key in `mailtriage.json`:
   `setup`, `filing enable`/`disable`, `categories apply`). Older binaries accept only
   1 and 2, so they refuse such a config instead of rewriting it without `updates`,
   which would silently turn `off` back into `auto`.
+- Updater-capable `setup` saves under the config lock and refuses with exit 5
+  (reason `config_changed`) when the file changed since setup read it, as the other
+  config writers already do.
+- **Accepted risk:** an older binary that read the config before it became schema 3
+  (for example an old `setup` waiting at a prompt) and saves afterwards can still
+  drop `updates`. Old code cannot be changed; the window exists only while old and
+  new binaries run side by side during the bootstrap.
 - `setup` takes `--updates auto|notify|off`, with no prompt; the default is `auto`.
   Every setup path that edits an existing config (`--update`, adding an account,
   interactive or not) keeps the existing value unless `--updates` is given. Setup's
@@ -69,9 +76,12 @@ the installed version. A running `0.4.0-rc.1` therefore never installs stable
 **Selecting the candidate.**
 `GET https://api.github.com/repos/wir-drei-digital/mailtriage/releases?per_page=30`
 with `User-Agent: mailtriage/<running>`, `Accept: application/vnd.github+json` and
-`X-GitHub-Api-Version: 2022-11-28`. Drafts, prereleases and tags that are not exactly
-`vX.Y.Z` (decimal, no leading zeros) are ignored; the highest remaining version is the
-candidate. With none, the check reports `latest: null`.
+`X-GitHub-Api-Version: 2022-11-28`, following the `Link: rel="next"` header through
+every page. Each page URL passes the same URL rules as downloads (step 5); more than
+20 pages, or any page that fails, makes the whole check fail rather than choose from a
+partial list. Drafts, prereleases and tags that are not exactly `vX.Y.Z` (decimal, no
+leading zeros) are ignored; the highest remaining version is the candidate. With
+none, the check reports `latest: null`.
 
 ## `mailtriage update`
 
@@ -221,14 +231,18 @@ it.
    1. **Revalidate.** The installation path still has the identity from step 4 and
       the staged file the one from step 7. Otherwise abort with
       `the installed binary changed during the update; try again`.
-   2. **Backup.** Hard-link the installation path to
-      `.mailtriage-update-<random>.prev`, then rename that over `<path>.previous`. The
-      old `.previous` survives until this rename. When the filesystem refuses hard
-      links, copy into an exclusively created file, fsync it and rename it.
+   2. **Backup copy.** Hard-link the installation path to
+      `.mailtriage-update-<random>.prev` (when the filesystem refuses hard links,
+      copy into that exclusively created file and fsync it). `.previous` is not
+      touched yet.
    3. **Commit point.** Rename the staged file over the installation path.
-   4. fsync the directory.
+   4. **Publish the backup.** Rename `.mailtriage-update-<random>.prev` over
+      `<path>.previous`.
+   5. fsync the directory.
    - Any failure before the commit point leaves the installation path and
      `.previous` untouched and removes this attempt's temporary files.
+   - A failure in step 4 is a warning; the backup copy stays under its temporary
+     name until the next update's cleanup.
    - From the commit point on, the update counts as installed. Later failures (the
      directory fsync, the cache write) become `warnings`. The swap is never
      reversed: another watcher may already run the new binary.
@@ -255,7 +269,7 @@ rename) under the cache lock:
 ```json
 {"schema_version":1,
  "release":{"version":"0.3.0","release_url":"…","published_at":"…",
-            "archive":{"name":"mailtriage-v0.3.0-macos-arm64.tar.gz","url":"…","size":4812345},
+            "archives":{"mailtriage":{"name":"mailtriage-v0.3.0-macos-arm64.tar.gz","url":"…","size":4812345}},
             "sums":{"name":"SHA256SUMS","url":"…","size":512}},
  "checked_at":"…","next_check_at":"…","check_failures":0,"last_check_error":null,
  "configs":{"/Users/alice/.config/mailtriage/mailtriage.json":{"mode":"auto","notified_version":null}},
@@ -263,6 +277,11 @@ rename) under the cache lock:
 ```
 
 - `release` is `null` when the last successful check found no stable release.
+- `release.archives` maps each component to its asset for this platform
+  (`{name, url, size}`, or `null` when the release lacks it). This spec defines the
+  `mailtriage` component; the tray spec adds `mailtriage-tray`. Installing from the
+  cache selects the component's entry before step 4; a `null` entry fails that
+  component with `release vX.Y.Z has no PLATFORM archive`.
 - `configs` is keyed by canonical config path, and `installs` by canonical
   installation path. A process only uses its own entries.
 - Errors are `null` or `{"at":"…","message":"…"}`.
@@ -286,7 +305,10 @@ At start, before anything else, `watch` records:
   one `update` error event says so.
 - **image identity:** the identity of the file this process runs. On Linux, that is
   the metadata of `/proc/self/exe`, which follows the loaded file even after it was
-  replaced. On macOS, it is the installation path's metadata at start.
+  replaced. On macOS, it is the installation path's metadata at start; because the
+  file could have been replaced between launch and that moment, `watch` also runs
+  `<path> --version` once at start, and when it prints a version other than the
+  running one, the restart rule fires before the first pass.
 - On Linux, when the installation path's identity already differs from the image
   identity at start, the file was replaced while the process started. The restart
   rule fires before the first pass.
@@ -358,9 +380,13 @@ back an `auto` watcher.
   `<path> --version` only when the file's identity changed since the last reading,
   otherwise the cached `installs` version is used. When the cached release is newer,
   `watch` installs it with steps 2 to 10, using the cached asset URLs.
+- **Reservation.** Before downloading, write `installs[path].next_attempt_at =
+  now + 1 h`; when the cache cannot be written, do not install. A watcher killed
+  during a download therefore does not start another one right after its restart.
 - **Failure.** Record `installs[path].last_error` and increase `failures`;
   `next_attempt_at` backs off from 1 h, doubling, up to 24 h.
-- **Success.** The restart rule re-executes `watch` before its pass.
+- **Success.** Clear `next_attempt_at`, `failures` and `last_error`. The restart
+  rule re-executes `watch` before its pass.
 - **Not replaceable.** Behave like `notify`; the event adds `install.reason` and
   `install.fix`.
 - **`notify`, or `auto` when not replaceable.** When the cached release is newer than
@@ -528,7 +554,9 @@ into a temporary directory and run from there.
 - Version precedence: `0.10.0 > 0.9.9`, `0.3.0-rc.1 < 0.3.0`, and a running
   `0.4.0-rc.1` never installs `0.3.0`. Equal and older versions are never installed.
 - Tag selection: `v1.2.3-rc.1`, `1.2.3`, `v1.2`, `v01.2.3`, drafts and prereleases are
-  ignored, and the highest stable release wins even when it is not first in the list.
+  ignored, and the highest stable release wins even when it is not first in the list
+  or sits on page 2 behind 30 release candidates; a failing second page fails the
+  check.
 - Asset names for each supported target; unsupported targets.
 - `SHA256SUMS`: a matching line, a missing line, a duplicate line, uppercase hex, a
   malformed line.
@@ -550,7 +578,8 @@ into a temporary directory and run from there.
 - Service file decoding round-trips paths with spaces, `%`, `$`, quotes, backslashes,
   `&` and `<`.
 - Config: schema 3 written with `updates`; schemas 1 and 2 read as `auto`; every
-  setup path keeps an existing `off`.
+  setup path keeps an existing `off`; setup refuses to save over a config changed
+  since it read it (exit 5).
 
 **Fake release server.** A loopback HTTP server inside the test serves the release
 list, `SHA256SUMS` and the archive.
@@ -579,8 +608,9 @@ list, `SHA256SUMS` and the archive.
 - **Revalidation.** The test replaces the installation path between download and
   commit (through a test hook): exit 3, and the test's file stays.
 - **Fault injection** before and after each step of the commit:
-  - before the commit point: the installation path and the old `.previous` are
-    untouched;
+  - before the commit point, including a failing commit rename: the installation
+    path and the old `.previous` are untouched;
+  - a failing backup publish after the commit: a warning, the new binary in place;
   - after it: the new binary is in place, the warning is reported, and nothing is
     reversed.
 - **Redirects.** A redirect to a host outside the allowlist fails.
@@ -608,7 +638,8 @@ list, `SHA256SUMS` and the archive.
   - `off`: the server sees zero requests.
 - **Scheduling across restarts.** A failing check followed by restarting `watch` makes
   no request until `next_check_at`, including when the test kills `watch` right after
-  the request. A notify watcher's refresh does not hold back an auto watcher's
+  the request. Killing `watch` during an archive download: the restarted `watch`
+  does not download again before `next_attempt_at`. A notify watcher's refresh does not hold back an auto watcher's
   install.
 - **Unreadable config.** It uses only that config's stored mode; with none, no
   request.
@@ -629,5 +660,7 @@ list, `SHA256SUMS` and the archive.
 - Homebrew tap, nix packaging, other package managers.
 - Windows and Intel Mac builds.
 - Rollback or version-pinning commands; a prerelease channel.
-- A recovery mechanism independent of the installed binary.
+- A recovery mechanism independent of the installed binary. **Accepted risk:** a
+  release that prints its version but fails before `watch` reaches its update step
+  cannot repair itself; the manual forward recovery above covers it.
 - Releases whose migrations break running processes of the previous release.

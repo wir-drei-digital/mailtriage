@@ -62,10 +62,12 @@ directory or environment of a later start.
 - **CLI:** `--mailtriage PATH` when given, else a `mailtriage` file next to the
   tray's own canonical executable path, else the first `mailtriage` on `PATH`. The
   result is canonicalized.
-- **Config:** `--config PATH` when given, made absolute against the working
-  directory. Otherwise the `config` field of the first `service status --json`
-  result, which reports the absolute config path the CLI resolved. From then on the
-  tray passes `--config <absolute path>` to every command.
+- **Config:** `--config PATH` when given, else the `config` field of the first
+  `service status --json` result (the config path the CLI resolved). Either way the
+  tray canonicalizes it once (`fs::canonicalize`, resolving symlinks) and from then
+  on passes `--config <canonical path>` to every command. A symlink that is later
+  pointed elsewhere therefore never redirects a running tray or window; following
+  it needs a restart.
 - The tray passes both `--mailtriage` and `--config` to every window it starts. The
   login item records both ([Start at login](#start-at-login)).
 
@@ -124,6 +126,8 @@ reasons:
 | `config_busy` | 5 | Another command holds the config lock. |
 | `config_changed` | 5 | `mailtriage.json` changed while the command ran (the existing unchanged-file guard). |
 | `binding_conflict` | 5 | The account is bound to another mailbox. |
+| `account_busy` | 5 | Another process holds the account's worker lock (`an account worker is already running`). |
+| `service_config_unknown` | 5 | The config of the loaded service cannot be established (see below). |
 | `service_config_mismatch` | 5 | The service runs another config (see below). |
 
 ### `service`
@@ -133,11 +137,18 @@ reasons:
   object per account, sorted by account name. With `--account`, the output adds the
   same top-level `config` and is otherwise unchanged apart from the new fields.
 - **New fields** in each service object:
-  - **`service_config`**: the absolute `--config` path decoded from the unit file
-    (with the same decoding the update spec uses for the executable), or `null` when
-    not installed or undecodable.
-  - **`config_matches`**: whether `service_config` names the same file as the
-    resolved config (canonical paths). It is `true` when not installed.
+  - **`service_config`**: the `--config` of the job the manager has loaded:
+    launchd from the `arguments` block of `launchctl print gui/<uid>/<label>`,
+    systemd from the `argv[]` of `systemctl --user show -p ExecStart <unit>`. When
+    the job is not loaded, it comes from the unit file instead (with the same
+    decoding the update spec uses for the executable). `null` when not installed or
+    when it cannot be decoded.
+  - **`file_config`**: the `--config` decoded from the unit file; on systemd also
+    `needs_daemon_reload` (`NeedDaemonReload`).
+  - **`config_matches`**: `true` when `service_config` and, for a loaded job,
+    `file_config` both name the resolved config (canonical paths), and systemd does
+    not need a daemon reload. `false` when either names another config. `null` when
+    either cannot be established. `true` when not installed.
   - **`enabled`** (`true`, `false` or `null` when unknown) and **`enablement`** (the
     raw state):
     - launchd: `launchctl print-disabled gui/<uid>` lists the label as `=> disabled`
@@ -162,7 +173,8 @@ reasons:
 - **`service start --account A`:**
   - launchd:
     - not loaded: `launchctl enable`, then `bootstrap`;
-    - loaded and running: `already_running`;
+    - loaded and running: `launchctl enable` (repairing a disabled label), then
+      `already_running`;
     - loaded but not running: `launchctl enable`, then
       `launchctl kickstart gui/<uid>/<label>`.
   - systemd: `systemctl --user enable --now <unit>`.
@@ -173,8 +185,10 @@ reasons:
   - Not installed: exit 2,
     `service for account A is not installed; run mailtriage service install --account A`.
 - **Binding to a config.** `start` and `stop` exit 5 with reason
-  `service_config_mismatch` when `config_matches` is false:
-  `service for account A runs config X; pass --config X`. `install` keeps its current
+  `service_config_mismatch` when `config_matches` is false
+  (`service for account A runs config X; pass --config X`), and with reason
+  `service_config_unknown` when it is `null`. They never act on a job whose config
+  they cannot establish. `install` keeps its current
   meaning: it rewrites the unit for the resolved config.
 - **`service install`** runs `launchctl enable` before `bootstrap`, so it works after
   a `stop`. (systemd's `enable` already covers this.)
@@ -219,6 +233,17 @@ reasons:
   - `reclassifies` is true exactly when `apply` would advance `taxonomy_revision`.
   - Without `--account`, `changes` and `digest` are absent.
 
+### Heartbeat reason
+
+Health must tell a configuration change that `watch` survives from a binding
+conflict that ends it; both exit 5. Each heartbeat therefore records the error's
+`reason`: a new nullable column `pass_heartbeats.reason` (schema **v8**, after the
+update spec's v7, additive as its migration rule requires), set on error heartbeats
+and `null` otherwise. `service status` reports it as `last_pass.reason`. The errors
+that `watch` treats as configuration changes carry `config_changed`; the worker lock
+carries `account_busy`; the binding error carries `binding_conflict`. This migration
+lands only after refile's v6 and the update spec's v7.
+
 ## Tray menu and health
 
 ### Health per account
@@ -230,20 +255,26 @@ The first matching row wins:
 | `unavailable` | `manager: "none"` | "No background service on this system" |
 | `not_installed` | No unit file. | "Not installed" |
 | `other_config` | `config_matches` is false. | "Runs another config" (with the path) |
-| `stopped` | `enabled` is false. | "Stopped" |
-| `unknown` | `enabled` is null and the job is not running. | "Status unknown" (with the error) |
+| `other_config_unknown` | `config_matches` is null. | "Status unknown" (with the reason) |
+| `stopped` | Not running and `enabled` is false. | "Stopped" |
+| `unknown` | Not running and `enabled` is null. | "Status unknown" (with the error) |
 | `restarting` | Not running, and the tray has seen it not running for less than 2 min. | "Restarting…" |
-| `error` | Not running for 2 min or more, or the last pass exited 2 or 3. | "Problem since HH:MM" |
-| `warning` | The last pass was partial (exit 4) or hit a configuration change (exit 5); or it finished more than 3 × `interval_seconds` + 30 min ago; or there is no pass yet although the tray has seen this PID for longer than that. | "Some mail skipped", "Configuration changed", "No check since HH:MM", "No check yet" |
+| `error` | Not running for 2 min or more; or the last pass exited 2 or 3, or 5 with any `last_pass.reason` other than those below. | "Problem since HH:MM" |
+| `warning` | The last pass was partial (exit 4), or exited 5 with `last_pass.reason` `config_changed` or `account_busy`; or it finished more than 3 × `interval_seconds` + 30 min ago; or there is no pass yet although the tray has seen this PID for longer than that. | "Some mail skipped", "Configuration changed", "Another mailtriage was busy", "No check since HH:MM", "No check yet" |
 | `starting` | Running and no pass yet. | "Starting…" |
 | `ok` | Running, and the last pass was clean and recent. | "Running · checked HH:MM" |
+
+Running and stopped come from the runtime state, never from `enabled`. A job that
+runs while `enabled` is false gets its state from the rows above and the extra menu
+line "Disabled: won't start again after logout", and keeps "Stop service".
 
 The tray keeps per-account observations in memory: when it first saw the job not
 running, and when it first saw the current PID. A tray restart resets them.
 
 The icon shows the worst state across accounts: `error` and `unknown`, then
 `warning`, then `ok`, `starting` and `restarting`. It shows "off" when every account is
-`stopped`, `not_installed`, `other_config` or `unavailable`.
+`stopped`, `not_installed`, `other_config` or `unavailable`; `other_config_unknown`
+counts as `unknown`.
 
 Icons are embedded PNGs. On macOS they are template images (monochrome, following
 the menu bar's light or dark look), so states differ by shape: plain for ok, a `!`
@@ -274,7 +305,8 @@ Quit
   - "Stop service" for `ok`, `starting`, `restarting`, `warning`, `error`;
   - "Start service" for `stopped`;
   - "Install service" for `not_installed`;
-  - nothing for `other_config`, `unknown` and `unavailable`.
+  - nothing for `other_config`, `other_config_unknown`, `unknown` and
+    `unavailable`.
 - `error` adds "Open error log" (the `.err` file) on launchd.
 - Times are local `HH:MM`, with the date when not today.
 - The summary line reads "All accounts running", "daniel needs attention",
@@ -310,9 +342,12 @@ then shows the failure.
     short notice.
   - The running window keeps its selected account.
   - The lock belongs to the window process, so it survives a tray restart.
-- **Children.** The tray does not wait on the windows it starts. On every refresh it
-  reaps exited children with `waitpid(-1, WNOHANG)`, which also covers windows started
-  before a self-restart.
+- **Children.** The tray does not block on the windows it starts. On every refresh
+  it calls `waitpid(pid, WNOHANG)` for each window PID it started, never
+  `waitpid(-1, …)`, which could take the exit status of a command a worker is
+  waiting for. Before a self-restart it passes the PIDs of windows still running to
+  its new image in `MAILTRIAGE_TRAY_WINDOWS` (comma-separated); the new image keeps
+  reaping exactly those.
 
 ## Categories window
 
@@ -321,7 +356,8 @@ then shows the failure.
 
 ### Layout
 
-- **Header:** the account selector and "Reload".
+- **Header:** the account selector and "Reload". Switching accounts or reloading
+  with unsaved edits asks first: "Discard changes to <account>?" (Discard / Cancel).
 - **Left:** the categories, each showing its name and mail folder; the default
   category is marked. "Add" below the list.
 - **Right:** the selected category:
@@ -354,7 +390,9 @@ then shows the failure.
 ### Flow
 
 1. **Load.** `categories export` fills the window and records `digest`. The account
-   list and each account's `filing_mode` come from `service status --json`.
+   list and each account's `filing_mode` come from `service status --json`. Each load
+   carries a load number; the answer of an older load (an account switch or reload
+   that was superseded) is ignored, so it can never replace newer edits.
 2. **Edit.** Every change increases the draft's revision.
    - **Check.** 500 ms after the last change, the draft is written as
      `{"categories":[…]}` to `draft-<revision>.json`, created exclusively in a
@@ -406,9 +444,11 @@ supplies the server folder names.
     they are sorted again."
   - "Move" runs `filing refile --account A --folder <native> --apply`, which also
     marks the waiting messages.
-- **Mail in the wrong folder.** The remaining candidates:
-  - "8 messages are in a folder that no longer matches their category."
-  - "Move 8 messages" runs `filing refile --account A --apply`.
+- **All eligible mail.** One account-wide action, because `filing refile --apply`
+  without `--folder` marks every candidate, including those in retired folders:
+  - "38 messages are in a folder that no longer matches their category (30 of them
+    in folders no longer used)."
+  - "Move all 38" runs `filing refile --account A --apply`.
   - With `waiting` outside retired folders: "W messages are still being sorted
     again; some may need moving afterwards. Open this panel again later."
 - **Not moved.** The `skipped` counts in words (for example "corrected by you: 3"),
@@ -512,6 +552,11 @@ resolved paths.
      - The smoke test expects `mailtriage-tray X.Y.Z`.
      - The backup is `mailtriage-tray.previous`.
      - Its own commit point is the rename of the tray file.
+  The cached release information holds the tray archive too: the update spec's
+  `release.archives` map gains `mailtriage-tray` (`{name, url, size}` for this
+  platform, or `null` when the release has none). A tray retry in `watch` uses only
+  this cache. A release without a tray archive gives the tray
+  `{"action":"failed","error":"release vX.Y.Z has no tray archive for PLATFORM"}`.
   3. **Report** `tray: {"action":"updated"|"current"|"skipped"|"failed","from","to","error"}`
      in `update`'s result, and `tray: {"path","installed","available"}` in
      `update --check` and in `service status`'s `update` block. Without a tray file,
@@ -554,10 +599,13 @@ No test runs the real `launchctl`, `systemctl` or keychain, or writes into the r
 **`model` unit tests**
 
 - **Health,** from `service status` fixtures:
-  - every row of the precedence table, including `stopped` with an old error, and
-    `unavailable` versus `not_installed`;
+  - every row of the precedence table, including `stopped` with an old error,
+    `unavailable` versus `not_installed`, and `config_matches: null`;
+  - a running job with `enabled: false` (runtime state wins, extra line, Stop
+    offered);
+  - exit 5 with `config_changed` and `account_busy` as warnings, with
+    `binding_conflict` as an error;
   - `restarting` turning into `error` after 2 min;
-  - exit 5 as `warning`;
   - staleness exactly at and past the limit;
   - no pass yet, short and long after the PID appeared;
   - the worst state across accounts, and "off".
@@ -565,6 +613,8 @@ No test runs the real `launchctl`, `systemctl` or keychain, or writes into the r
   differs; local time and date formatting; the version-mismatch line.
 - **Window state:**
   - revisions, and out-of-order and other-account check answers ignored;
+  - superseded loads ignored; switching accounts or reloading with unsaved edits
+    asks first;
   - suggested IDs from names with accents, spaces and symbols;
   - exactly one default category;
   - folder serialization with filing on and off;
@@ -604,11 +654,15 @@ labels:
   - without `--account`: every account, sorted, with the top-level `config` and the
     new fields;
   - `service_config` and `config_matches` with two configs that share an account
-    name;
+    name; a unit file rewritten for config B while the loaded job still runs config
+    A (an install whose reload failed): `config_matches` false, `stop` exits 5;
+    a print/show query that fails: `null`, and `start`/`stop` exit 5 with
+    `service_config_unknown`;
   - `enabled` and `enablement` for each launchd and systemd state, and for a failed
     query.
 - **`service start` and `stop`** with the existing fake `launchctl`/`systemctl`:
-  - call sequences for unloaded, loaded-running and loaded-idle jobs;
+  - call sequences for unloaded, loaded-running (with `enable`) and loaded-idle
+    jobs;
   - start that does not reach running (exit 3);
   - `already_*` results;
   - start when not installed (exit 2);
@@ -624,6 +678,9 @@ labels:
 - **Error reasons:** `config_busy` (lock held by the test), `config_changed`
   (file rewritten during the command, through a test hook) and `binding_conflict`
   are each reported with their `reason`.
+- **Heartbeat reason:** migration 7 → 8 and a database at 9 refused; error
+  heartbeats carry `config_changed`, `account_busy` and `binding_conflict`;
+  `last_pass.reason` in `service status`.
 - **`changes`:** each kind; a rename with filing on keeps the folder; `reclassifies`
   matches whether `apply` advances `taxonomy_revision`.
 
@@ -642,7 +699,10 @@ fake `launchctl`:
 - A second tray exits 0.
 - A second window for the same config exits 0, while one for another config opens.
 - The window's lock survives a tray restart.
-- Exited children are reaped.
+- Only tracked window PIDs are reaped; a concurrent CLI command keeps its exit
+  status; window PIDs survive a self-restart through `MAILTRIAGE_TRAY_WINDOWS`.
+- A config given as a symlink is canonicalized once; retargeting the symlink
+  afterwards does not change the commands' `--config`.
 
 **Updates,** with the update spec's fake release server:
 
@@ -651,7 +711,9 @@ fake `launchctl`:
 - a bad tray checksum gives exit 4 with the CLI updated, and the tray keeps its old
   file;
 - a later `watch` pass, after the CLI re-executed onto the current release, installs
-  the still-older tray once its backoff has passed;
+  the still-older tray once its backoff has passed, using only the persisted cache
+  (the fake server serves no release list then);
+- a release without a tray archive fails the tray part only;
 - the cache holds separate `installs` entries for the CLI and the tray after
   CLI-only success, full success, tray failure and skip.
 
