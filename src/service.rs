@@ -44,6 +44,12 @@ pub enum ErrorKind {
     BindingConflict,
     /// `categories apply --expect-digest` found other categories.
     CategoriesChanged,
+    /// The account's service runs another config.
+    ServiceConfigMismatch,
+    /// The config of the account's service cannot be established.
+    ServiceConfigUnknown,
+    /// Another service command for the account held the service lock.
+    ServiceBusy,
 }
 
 impl ErrorKind {
@@ -57,6 +63,9 @@ impl ErrorKind {
             Self::AccountBusy => Some("account_busy"),
             Self::BindingConflict => Some("binding_conflict"),
             Self::CategoriesChanged => Some("categories_changed"),
+            Self::ServiceConfigMismatch => Some("service_config_mismatch"),
+            Self::ServiceConfigUnknown => Some("service_config_unknown"),
+            Self::ServiceBusy => Some("service_busy"),
         }
     }
 }
@@ -2053,6 +2062,15 @@ mod error_reasons {
             ErrorKind::CategoriesChanged.reason(),
             Some("categories_changed")
         );
+        assert_eq!(
+            ErrorKind::ServiceConfigMismatch.reason(),
+            Some("service_config_mismatch")
+        );
+        assert_eq!(
+            ErrorKind::ServiceConfigUnknown.reason(),
+            Some("service_config_unknown")
+        );
+        assert_eq!(ErrorKind::ServiceBusy.reason(), Some("service_busy"));
     }
 
     /// A mailbox identity that changed mid-operation is a binding conflict.

@@ -324,6 +324,10 @@ enum ServiceCommand {
     /// Whether each account's service is installed and running, which
     /// config it runs, and the last sync pass.
     Status(StatusArg),
+    /// Start the account's installed service; it starts again at login.
+    Start(AccountArg),
+    /// Stop the account's service; it stays stopped across logins and reboots.
+    Stop(AccountArg),
 }
 
 #[derive(Args)]
@@ -729,8 +733,11 @@ fn service_command(path: &Path, command: &ServiceCommand) -> Result<Value, CliEr
             })
             .map_err(service_error);
     }
+    let proc_root = Path::new(service_control::PROC_ROOT);
+    let wait = service_control::SERVICE_LOCK_WAIT;
     let result = match command {
         ServiceCommand::Install(arg) => Context::detect().and_then(|ctx| {
+            let _lock = service_control::lock(&ctx, &arg.account, wait)?;
             let service = Service::open(path)?;
             system_service::install_account(
                 &service,
@@ -745,8 +752,28 @@ fn service_command(path: &Path, command: &ServiceCommand) -> Result<Value, CliEr
             if !config::valid_account_name(&arg.account) {
                 return Err(CliError::input("account name cannot name a service"));
             }
-            Context::detect().and_then(|ctx| system_service::uninstall(&ctx, &arg.account))
+            Context::detect().and_then(|ctx| {
+                let _lock = service_control::lock(&ctx, &arg.account, wait)?;
+                system_service::uninstall(&ctx, &arg.account)
+            })
         }
+        ServiceCommand::Start(arg) => Context::detect().and_then(|ctx| {
+            let _lock = service_control::lock(&ctx, &arg.account, wait)?;
+            let service = Service::open(path)?;
+            service_control::start(
+                &ctx,
+                &service,
+                path,
+                &arg.account,
+                proc_root,
+                service_control::START_WAIT,
+            )
+        }),
+        ServiceCommand::Stop(arg) => Context::detect().and_then(|ctx| {
+            let _lock = service_control::lock(&ctx, &arg.account, wait)?;
+            let service = Service::open(path)?;
+            service_control::stop(&ctx, &service, path, &arg.account, proc_root)
+        }),
         ServiceCommand::Status(_) => unreachable!("handled above"),
     };
     result

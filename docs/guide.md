@@ -652,6 +652,24 @@ Each command prints `{"schema_version":1,"service":{...}}`.
 
 `uninstall` reports `action` (`uninstalled`, or `not_installed` when no file was there), `manager`, `account` and `unit_path`.
 
+```sh
+mailtriage service stop --account work --json
+mailtriage service start --account work --json
+```
+
+`start` starts the installed service, which then also starts at login again. launchd: `launchctl enable gui/<uid>/<label>`, then `launchctl bootstrap gui/<uid> <plist>` when the job is not loaded, or `launchctl kickstart gui/<uid>/<label>` when it is loaded but idle. systemd: `systemctl --user enable --now <unit>`. It then checks for up to 5 s that the job runs (`launchctl print` shows a PID; `systemctl --user is-active` prints `active`), else it exits 3 with `service did not start; see LOG`. LOG is `<config dir>/logs/<account>.err` on macOS and `journalctl --user -u mailtriage-<account>.service` on Linux. `start` reports `action` (`started`, or `already_running` when the job was running), `manager`, `account` and `unit_path`. A service that is not installed exits 2 with `service for account A is not installed; run mailtriage service install --account A`.
+
+`stop` stops the service and keeps it stopped across logins and reboots; the service file stays. launchd: `launchctl bootout gui/<uid>/<label>`, waiting until launchd drops the job as `install` does, then `launchctl disable gui/<uid>/<label>`. systemd: `systemctl --user disable --now <unit>`; a unit that is also enabled globally or masked is outside this guarantee, and `status` shows it in `enablement`. `stop` reports `action` (`stopped` when launchd had the job loaded or systemd had it running, else `already_stopped`), `manager`, `account` and `unit_path`. A service that is not installed exits 2 with the same message as for `start`.
+
+`start` and `stop` act only on a service that runs the config they read, and call no manager command otherwise:
+
+- When the service runs another config (`config_matches: false`), they exit 5 with reason `service_config_mismatch`: `service for account A runs config X; pass --config X`, the second X shell-quoted. Pass that `--config` to act on that service.
+- When its config cannot be told (`config_matches: null`, for example when `launchctl` or `systemctl` fails or systemd needs a daemon reload), they exit 5 with reason `service_config_unknown`: `cannot tell which config the service for account A runs; try again, or reinstall it with mailtriage service install --account A`.
+
+`install` keeps its meaning: it rewrites the service for the config it read. On macOS it now runs `launchctl enable` before `bootstrap`, so it works after a `stop`; systemd's `enable` already covers this. Like `install`, `start` and `stop` exit 2 for an unknown account or an unsupported platform, and 3 when `launchctl` or `systemctl` fails.
+
+`install`, `uninstall`, `start` and `stop` hold a lock per account while they read the config and call the manager: `service-<label>.lock` in `~/Library/Caches/mailtriage` on macOS and `~/.cache/mailtriage` on Linux. The directory comes from `HOME` only, never from `XDG_CACHE_HOME`, so commands for one account from different configs or environments wait for each other. A second command waits up to 30 s, then exits 5 with reason `service_busy`: `another service command for account A is running; try again`. Step 10 of `mailtriage setup` takes the same lock around its install.
+
 `status` reports:
 
 ```json
@@ -936,7 +954,7 @@ Before you use `live` on a real mailbox, the live provider check in the [filing 
 
 With `--json`, every result is one line of JSON on stdout, and so is every error: `{"schema_version":1,"error":{"code":N,"message":"..."}}`. Without `--json`, results are pretty-printed JSON and errors go to stderr as `mailtriage: MESSAGE`. Every result has a `schema_version`. Error messages omit message bodies and credentials.
 
-Some errors also carry a machine-readable `reason` in the error object, for scripts that react to a class of error rather than to its message: `config_changed` (`mailtriage.json` or the Himalaya configuration changed during the command), `config_busy` (another command is editing `mailtriage.json`), `account_busy` (another worker for the account is running), `binding_conflict` (the account binding changed, see [Account binding](#account-binding)) and `categories_changed` (`categories apply --expect-digest` found other categories). An error without a reason has no `reason` key.
+Some errors also carry a machine-readable `reason` in the error object, for scripts that react to a class of error rather than to its message: `config_changed` (`mailtriage.json` or the Himalaya configuration changed during the command), `config_busy` (another command is editing `mailtriage.json`), `account_busy` (another worker for the account is running), `binding_conflict` (the account binding changed, see [Account binding](#account-binding)), `categories_changed` (`categories apply --expect-digest` found other categories), `service_config_mismatch` (the account's service runs another config, see [Service commands](#service-commands)), `service_config_unknown` (the config of the account's service cannot be told) and `service_busy` (another service command for the account held the service lock for 30 s). An error without a reason has no `reason` key.
 
 | Code | Meaning |
 | --- | --- |

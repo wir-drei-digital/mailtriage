@@ -2,19 +2,22 @@
 //! config a service runs with, whether its manager starts it again, and the
 //! fields the tray reads. Nothing here writes a service file.
 use crate::{
-    filing,
+    config, filing,
     process::{self, Ending},
-    service::Service,
+    service::{err, err_kind, ErrorKind, Service},
+    setup::shell_line,
     system_service::{
-        self, label, parse_launchctl_print, parse_systemctl_show, unit_name, Context, Manager,
+        self, label, parse_launchctl_print, parse_systemctl_show, tool, unit_name, Context, Manager,
     },
 };
 use anyhow::Result;
+use fs2::FileExt;
 use serde_json::{json, Value};
 use std::{
-    fs,
+    fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
-    time::Duration,
+    thread,
+    time::{Duration, Instant},
 };
 
 /// Where the running processes' command lines are read on Linux.
@@ -437,6 +440,245 @@ pub fn status(
             json!({"schema_version":1,"config":config,"services":services})
         }
     })
+}
+
+/// How long a service command waits for another one on the same account.
+pub const SERVICE_LOCK_WAIT: Duration = Duration::from_secs(30);
+/// How long `service start` waits for the job to run.
+pub const START_WAIT: Duration = Duration::from_secs(5);
+
+/// Where the service locks live: derived from `HOME` alone (never
+/// `XDG_CACHE_HOME`), so commands for one account from different configs or
+/// environments serialize.
+pub fn lock_dir(ctx: &Context) -> PathBuf {
+    match ctx.manager {
+        Manager::Launchd => ctx.home.join("Library/Caches/mailtriage"),
+        Manager::Systemd => ctx.home.join(".cache/mailtriage"),
+    }
+}
+
+/// The exclusive lock on `service-<label>.lock`, held from reading the
+/// config through the last manager call of `install`, `uninstall`, `start`
+/// or `stop`.
+pub struct ServiceLock {
+    _file: File,
+}
+
+/// Takes the account's service lock, waiting up to `wait` for another
+/// service command (exit 5, `service_busy`). The name is checked first: it
+/// becomes part of a file name.
+pub fn lock(ctx: &Context, account: &str, wait: Duration) -> Result<ServiceLock> {
+    if !config::valid_account_name(account) {
+        return Err(err(
+            2,
+            format!(
+                "account name {account:?} cannot name a service; use 1 to 64 letters, digits, - or _"
+            ),
+        ));
+    }
+    let dir = lock_dir(ctx);
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(&dir)?;
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(dir.join(format!("service-{}.lock", label(account))))?;
+    let deadline = Instant::now() + wait;
+    loop {
+        if file.try_lock_exclusive().is_ok() {
+            return Ok(ServiceLock { _file: file });
+        }
+        if Instant::now() >= deadline {
+            return Err(err_kind(
+                5,
+                ErrorKind::ServiceBusy,
+                format!("another service command for account {account} is running; try again"),
+            ));
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// The installed service of `account`, refused unless every config it names
+/// is the resolved one: `start` and `stop` never act on a job whose config
+/// they cannot establish.
+fn checked(
+    ctx: &Context,
+    service: &Service,
+    config_path: &Path,
+    account: &str,
+    proc_root: &Path,
+) -> Result<Inspection> {
+    if !service.config.accounts.contains_key(account) {
+        return Err(err(2, "unknown account"));
+    }
+    let found = inspect(ctx, account, proc_root);
+    if !found.installed {
+        return Err(err(
+            2,
+            format!(
+                "service for account {account} is not installed; run mailtriage service install --account {account}"
+            ),
+        ));
+    }
+    let resolved = fs::canonicalize(config_path)?;
+    match config_matches(&found, ctx.manager, &resolved) {
+        Some(true) => Ok(found),
+        Some(false) => {
+            let other = other_config(&found, &resolved).unwrap_or_default();
+            Err(err_kind(
+                5,
+                ErrorKind::ServiceConfigMismatch,
+                format!(
+                    "service for account {account} runs config {}; pass {}",
+                    other.display(),
+                    shell_line(&[Path::new("--config"), &other])
+                ),
+            ))
+        }
+        None => Err(err_kind(
+            5,
+            ErrorKind::ServiceConfigUnknown,
+            format!(
+                "cannot tell which config the service for account {account} runs; try again, or reinstall it with mailtriage service install --account {account}"
+            ),
+        )),
+    }
+}
+
+fn target(ctx: &Context, account: &str) -> String {
+    format!("gui/{}/{}", ctx.uid, label(account))
+}
+
+/// Polls until the job runs: `launchctl print` shows a PID, or
+/// `systemctl --user is-active` prints `active`.
+fn wait_running(ctx: &Context, account: &str, wait: Duration) -> bool {
+    let deadline = Instant::now() + wait;
+    loop {
+        let running = match ctx.manager {
+            Manager::Launchd => query(ctx, &["print", &target(ctx, account)])
+                .is_some_and(|(code, out)| code == 0 && parse_launchctl_print(&out).pid.is_some()),
+            Manager::Systemd => query(ctx, &["--user", "is-active", &unit_name(account)])
+                .is_some_and(|(_, out)| out.trim() == "active"),
+        };
+        if running {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Where a service that did not start explains why.
+fn log_hint(ctx: &Context, config_path: &Path, account: &str) -> String {
+    match ctx.manager {
+        Manager::Launchd => fs::canonicalize(config_path)
+            .ok()
+            .and_then(|c| {
+                c.parent()
+                    .map(|d| d.join("logs").join(format!("{account}.err")))
+            })
+            .map_or_else(|| format!("{account}.err"), |p| p.display().to_string()),
+        Manager::Systemd => format!("journalctl --user -u {}", unit_name(account)),
+    }
+}
+
+fn action(ctx: &Context, account: &str, action: &str) -> Value {
+    json!({
+        "action": action,
+        "manager": ctx.manager.name(),
+        "account": account,
+        "unit_path": ctx.unit_path(account),
+    })
+}
+
+/// `service start`: enables and starts the installed service, then checks
+/// for up to `wait` that it runs (exit 3 `service did not start; see LOG`).
+pub fn start(
+    ctx: &Context,
+    service: &Service,
+    config_path: &Path,
+    account: &str,
+    proc_root: &Path,
+    wait: Duration,
+) -> Result<Value> {
+    let found = checked(ctx, service, config_path, account, proc_root)?;
+    let target = target(ctx, account);
+    let result = match ctx.manager {
+        Manager::Launchd => {
+            tool(ctx, &["enable", &target])?;
+            match (found.loaded, found.running) {
+                (Some(true), true) => "already_running",
+                (Some(true), false) => {
+                    tool(ctx, &["kickstart", &target])?;
+                    "started"
+                }
+                _ => {
+                    let plist = ctx.unit_path(account).display().to_string();
+                    tool(ctx, &["bootstrap", &format!("gui/{}", ctx.uid), &plist])?;
+                    "started"
+                }
+            }
+        }
+        Manager::Systemd => {
+            tool(ctx, &["--user", "enable", "--now", &unit_name(account)])?;
+            if found.running {
+                "already_running"
+            } else {
+                "started"
+            }
+        }
+    };
+    if result == "started" && !wait_running(ctx, account, wait) {
+        return Err(err(
+            3,
+            format!(
+                "service did not start; see {}",
+                log_hint(ctx, config_path, account)
+            ),
+        ));
+    }
+    Ok(action(ctx, account, result))
+}
+
+/// `service stop`: stops the service and keeps it stopped across logins and
+/// reboots; the unit file stays. `stopped` when launchd had the job loaded
+/// or systemd had it running, else `already_stopped`.
+pub fn stop(
+    ctx: &Context,
+    service: &Service,
+    config_path: &Path,
+    account: &str,
+    proc_root: &Path,
+) -> Result<Value> {
+    let found = checked(ctx, service, config_path, account, proc_root)?;
+    let result = match ctx.manager {
+        Manager::Launchd => {
+            let target = target(ctx, account);
+            system_service::bootout(ctx, &target)?;
+            tool(ctx, &["disable", &target])?;
+            found.loaded == Some(true)
+        }
+        Manager::Systemd => {
+            tool(ctx, &["--user", "disable", "--now", &unit_name(account)])?;
+            found.running
+        }
+    };
+    Ok(action(
+        ctx,
+        account,
+        if result { "stopped" } else { "already_stopped" },
+    ))
 }
 
 #[cfg(test)]

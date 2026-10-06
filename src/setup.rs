@@ -14,6 +14,7 @@ use crate::{
     provider,
     secrets::{self, KeyStore},
     service::{self, err, err_kind, ErrorKind, Service, ServiceError},
+    service_control,
     system_service::{self, Context, Manager},
 };
 use anyhow::{anyhow, Result};
@@ -1368,6 +1369,7 @@ fn service_step(
         return Ok(Value::Null);
     }
     let installed = Context::detect().and_then(|ctx| {
+        let _lock = service_control::lock(&ctx, name, service_control::SERVICE_LOCK_WAIT)?;
         let service = Service::open(path)?;
         let out = system_service::install_account(
             &service,

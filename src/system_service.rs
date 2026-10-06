@@ -263,7 +263,7 @@ fn refuse_unmarked(ctx: &Context, path: &Path) -> Result<()> {
 }
 
 /// Runs the manager tool; anything but exit 0 is exit 3.
-fn tool(ctx: &Context, args: &[&str]) -> Result<()> {
+pub(crate) fn tool(ctx: &Context, args: &[&str]) -> Result<()> {
     tool_output(ctx, args).map(|_| ()).ok_or_else(|| {
         err(
             3,
@@ -290,7 +290,7 @@ fn target(ctx: &Context, account: &str) -> String {
 /// Unloads a loaded launchd job and waits until launchd reports it gone:
 /// `bootout` returns before the job is fully removed, and a `bootstrap`
 /// right after it fails ("Bootstrap failed: 5").
-fn bootout(ctx: &Context, target: &str) -> Result<()> {
+pub(crate) fn bootout(ctx: &Context, target: &str) -> Result<()> {
     if tool_output(ctx, &["print", target]).is_none() {
         return Ok(());
     }
@@ -325,8 +325,11 @@ pub fn install(ctx: &Context, unit: &Unit) -> Result<Value> {
                 use std::os::unix::fs::PermissionsExt;
                 fs::set_permissions(&unit.log_dir, fs::Permissions::from_mode(0o700))?;
             }
-            bootout(ctx, &target(ctx, &unit.account))?;
+            let target = target(ctx, &unit.account);
+            bootout(ctx, &target)?;
             fs::write(&path, plist(unit))?;
+            // Clears a `service stop`, which disables the label.
+            tool(ctx, &["enable", &target])?;
             let domain = format!("gui/{}", ctx.uid);
             tool(ctx, &["bootstrap", &domain, &path.display().to_string()])?;
         }

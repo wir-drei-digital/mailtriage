@@ -160,6 +160,7 @@ fn launchd_install_reload_status_and_uninstall() {
         calls(dir.path(), "launchctl"),
         vec![
             format!("print {target}"),
+            format!("enable {target}"),
             format!("bootstrap gui/501 {}", path.display())
         ]
     );
@@ -178,15 +179,16 @@ fn launchd_install_reload_status_and_uninstall() {
         ])
     );
     // Installing again reloads: bootout, wait until launchd no longer lists
-    // the job, then bootstrap, same file.
+    // the job, enable the label, then bootstrap, same file.
     system_service::install(&ctx, &unit).unwrap();
     let log = calls(dir.path(), "launchctl");
     assert_eq!(
-        log[log.len() - 4..],
+        log[log.len() - 5..],
         [
             format!("print {target}"),
             format!("bootout {target}"),
             format!("print {target}"),
+            format!("enable {target}"),
             format!("bootstrap gui/501 {}", path.display())
         ]
     );
@@ -414,7 +416,7 @@ fn service_commands_through_the_cli() {
 
 /// Fake `launchctl` that, like the real one, still lists a job briefly after
 /// `bootout` returns (two more `print` calls) and refuses `bootstrap` while it does.
-const SLOW_LAUNCHCTL: &str = "#!/bin/sh\ndir=\"$(dirname \"$0\")\"\necho \"$*\" >> \"$dir/launchctl.log\"\ncase \"$1\" in\n  bootstrap) [ -f \"$dir/loaded\" ] && exit 5; touch \"$dir/loaded\" ;;\n  bootout) [ -f \"$dir/loaded\" ] || exit 3; echo 2 > \"$dir/lingering\" ;;\n  print)\n    if [ -f \"$dir/lingering\" ]; then n=$(cat \"$dir/lingering\"); if [ \"$n\" -le 0 ]; then rm -f \"$dir/lingering\" \"$dir/loaded\"; exit 113; fi; echo $((n-1)) > \"$dir/lingering\"; fi\n    [ -f \"$dir/loaded\" ] || exit 113\n    printf '%s = {\\n\\tstate = running\\n}\\n' \"$2\" ;;\n  *) exit 64 ;;\nesac\n";
+const SLOW_LAUNCHCTL: &str = "#!/bin/sh\ndir=\"$(dirname \"$0\")\"\necho \"$*\" >> \"$dir/launchctl.log\"\ncase \"$1\" in\n  bootstrap) [ -f \"$dir/loaded\" ] && exit 5; touch \"$dir/loaded\" ;;\n  enable) ;;\n  bootout) [ -f \"$dir/loaded\" ] || exit 3; echo 2 > \"$dir/lingering\" ;;\n  print)\n    if [ -f \"$dir/lingering\" ]; then n=$(cat \"$dir/lingering\"); if [ \"$n\" -le 0 ]; then rm -f \"$dir/lingering\" \"$dir/loaded\"; exit 113; fi; echo $((n-1)) > \"$dir/lingering\"; fi\n    [ -f \"$dir/loaded\" ] || exit 113\n    printf '%s = {\\n\\tstate = running\\n}\\n' \"$2\" ;;\n  *) exit 64 ;;\nesac\n";
 
 #[test]
 fn reinstall_waits_until_launchd_drops_the_old_job() {

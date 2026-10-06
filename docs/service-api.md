@@ -345,3 +345,64 @@ with `account`. `config` is the canonical config path. Each object is
 `needs_daemon_reload` on systemd only. Without a `Context` (no supported
 manager) every account reads as not installed. An unknown account exits 2. The
 CLI prints the value as it is, with `PROC_ROOT`.
+
+### `service start`, `stop` and the service lock
+
+```rust
+pub const SERVICE_LOCK_WAIT: Duration; // 30 s
+pub const START_WAIT: Duration;        // 5 s
+pub fn lock_dir(ctx: &Context) -> PathBuf;
+pub struct ServiceLock { /* the locked file */ }
+pub fn lock(ctx: &Context, account: &str, wait: Duration) -> Result<ServiceLock>;
+pub fn start(ctx: &Context, service: &Service, config_path: &Path, account: &str,
+  proc_root: &Path, wait: Duration) -> Result<Value>;
+pub fn stop(ctx: &Context, service: &Service, config_path: &Path, account: &str,
+  proc_root: &Path) -> Result<Value>;
+```
+
+- `lock` checks the account name first (exit 2, `account name "…" cannot name
+  a service; use 1 to 64 letters, digits, - or _`), because it becomes part of
+  a file name. It then creates `lock_dir` (mode 0700) and takes an exclusive
+  lock on `service-<label>.lock` there, retrying every 100 ms for up to `wait`;
+  after that it fails with exit 5, `ErrorKind::ServiceBusy` (`service_busy`):
+  `another service command for account A is running; try again`. The lock is
+  held until the `ServiceLock` is dropped. `lock_dir` is
+  `$HOME/Library/Caches/mailtriage` for launchd and `$HOME/.cache/mailtriage`
+  for systemd, from `Context::home` only (never `XDG_CACHE_HOME`).
+- The CLI holds the lock with `SERVICE_LOCK_WAIT` around `service install`,
+  `uninstall`, `start` and `stop`, from opening the config through the last
+  manager call; `setup` holds it around step 10's install. `service status`
+  takes no lock.
+- `start` and `stop` first refuse what they must not act on, with no manager
+  call beyond `inspect`'s queries:
+  - an account that is not in the config: exit 2, `unknown account`;
+  - a service that is not installed: exit 2, `service for account A is not
+    installed; run mailtriage service install --account A`;
+  - `config_matches` `Some(false)`: exit 5, `ErrorKind::ServiceConfigMismatch`
+    (`service_config_mismatch`), `service for account A runs config X; pass
+    --config X`, where X is `other_config` and the second X is shell-quoted;
+  - `config_matches` `None`: exit 5, `ErrorKind::ServiceConfigUnknown`
+    (`service_config_unknown`), `cannot tell which config the service for
+    account A runs; try again, or reinstall it with mailtriage service install
+    --account A`.
+- `start`, launchd: `launchctl enable gui/<uid>/<label>`, then nothing more
+  when the job was loaded and running (`already_running`), `kickstart
+  gui/<uid>/<label>` when it was loaded but not running, else `bootstrap
+  gui/<uid> <plist>` (`started`). systemd: `systemctl --user enable --now
+  <unit>`; `already_running` when the unit was running, else `started`. After
+  `started` it polls every 200 ms for up to `wait` (the CLI passes
+  `START_WAIT`) until `launchctl print` shows a PID or `systemctl --user
+  is-active` prints `active`; otherwise exit 3, `service did not start; see
+  LOG`, where LOG is `<canonical config dir>/logs/<account>.err` on launchd and
+  `journalctl --user -u mailtriage-<account>.service` on systemd.
+- `stop`, launchd: `system_service::bootout` (bootout and wait until launchd
+  drops the job, as `install` does), then `launchctl disable
+  gui/<uid>/<label>`; `stopped` when the job was loaded, else
+  `already_stopped`. systemd: `systemctl --user disable --now <unit>`;
+  `stopped` when it was running, else `already_stopped`. The unit file stays.
+- A failed `launchctl` or `systemctl` call is exit 3, as in `install`.
+- Both return `{action:"started"|"already_running"|"stopped"|"already_stopped",
+  manager:"launchd"|"systemd", account, unit_path}`; the CLI wraps it in
+  `{"schema_version":1,"service":{...}}`.
+- `system_service::install` now runs `launchctl enable gui/<uid>/<label>`
+  between the bootout and the `bootstrap`, so a reinstall clears a `stop`.
