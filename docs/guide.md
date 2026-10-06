@@ -45,7 +45,7 @@ You need:
 - an OpenRouter API key,
 - for the background service: launchd (macOS) or systemd (Linux).
 
-From a GitHub release: each release carries `mailtriage-vVERSION-linux-amd64.tar.gz`, `-linux-arm64.tar.gz` and `-macos-arm64.tar.gz`, a `.sha256` file per archive and a combined `SHA256SUMS`. Each archive holds the `mailtriage` executable, the README and the license. While the repository is private, download with authenticated access, for example with the GitHub CLI:
+From a GitHub release: each release carries `mailtriage-vVERSION-linux-amd64.tar.gz`, `-linux-arm64.tar.gz` and `-macos-arm64.tar.gz`, a `.sha256` file per archive and a combined `SHA256SUMS`. Each archive holds the `mailtriage` executable, the README and the license. For example, with the GitHub CLI:
 
 ```sh
 VERSION=0.1.0
@@ -55,7 +55,7 @@ tar -xzf "mailtriage-v$VERSION-macos-arm64.tar.gz"
 sudo install -m 0755 mailtriage /usr/local/bin/mailtriage
 ```
 
-The macOS executable is unsigned and not notarized. See the [release guide](releases.md) for how releases are made.
+The macOS executable is unsigned and not notarized. See the [release guide](releases.md) for how releases are made. For automatic updates, install the binary into a directory you own instead of with `sudo`, for example `install -m 0755 mailtriage ~/.local/bin/mailtriage`; see [Updates](#updates).
 
 From source, with a stable Rust toolchain:
 
@@ -846,6 +846,46 @@ Run `mailtriage service install` again after you move the binary.
 | `<binary>.previous` | The binary before the last update. |
 
 Without the cache directory (no `HOME`, and on Linux no absolute `XDG_CACHE_HOME`), `update` exits 3 and `watch` skips its update work.
+
+### The first release with automatic updates
+
+Copies older than the release that brought automatic updates cannot update themselves. Once:
+
+1. Install the first release with automatic updates by hand, from its archive or with `cargo install`.
+2. Run `mailtriage service install --account NAME` once for every account, so each service runs the new binary. The old processes have no restart rule and would keep running the old code.
+3. After the next pass, check that `mailtriage service status --account NAME --json` shows the new version in `last_pass.version`.
+
+From then on, mailtriage updates itself.
+
+### When a release breaks `watch`
+
+A release that fails before `watch` reaches its update step cannot repair itself. Install a newer release by hand:
+
+1. Run `mailtriage update`. It needs no config, so it may work when `watch` does not.
+2. If it does not run either, download and check the archive yourself, then move the binary into place:
+
+   ```sh
+   VERSION=0.3.1 PLATFORM=macos-arm64   # or linux-amd64, linux-arm64
+   base="https://github.com/wir-drei-digital/mailtriage/releases/download/v$VERSION"
+   curl -fLO "$base/mailtriage-v$VERSION-$PLATFORM.tar.gz"
+   curl -fLO "$base/SHA256SUMS"
+   shasum -a 256 --check --ignore-missing SHA256SUMS   # Linux: sha256sum --check --ignore-missing SHA256SUMS
+   tar -xzf "mailtriage-v$VERSION-$PLATFORM.tar.gz" mailtriage
+   mv mailtriage ~/.local/bin/mailtriage   # the path of your installed binary
+   ```
+
+   Running services switch to it before their next pass.
+
+### Rolling back by hand
+
+There is no rollback command; a bad release is normally fixed by a newer one. To go back to the binary before the last update:
+
+1. Set `updates` to `off` in every config (`mailtriage setup --update --updates off`, or edit the file), so the services do not install the newer release again.
+2. Stop the services: `mailtriage service uninstall --account NAME` for each account.
+3. `mv <binary>.previous <binary>`
+4. Start them again: `mailtriage service install --account NAME`.
+
+This works only when the newer release did not migrate the state database. An older binary refuses a newer database (`database schema is newer than this binary`); then roll forward to a fixed release instead.
 
 ## Daily use
 

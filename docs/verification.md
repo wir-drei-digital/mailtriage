@@ -232,3 +232,24 @@ message content.
 | `pass` store: `pass insert mailtriage/openrouter` prompts; under the user unit `pass show` reaches the GPG agent (test message classified) | | | |
 | `service install --account work` a second time restarts the unit with the same file | | | |
 | `service uninstall`: the unit file is gone, `systemctl --user status mailtriage-work.service` reports it not found, `service status` shows `installed`, `loaded` and `running` false | | | |
+
+## Automatic updates on a real machine (human check)
+
+The automated tests use a loopback server instead of GitHub and a script instead of a release binary. Check once on macOS arm64 and once on Linux with two consecutive published releases, the older one installed:
+
+1. Install the older release into `~/.local/bin` from its archive, run `mailtriage service install --account work`, and wait for one pass.
+2. Run `mailtriage update --check --json`.
+3. Run `mailtriage update --json`.
+4. Wait one interval, read the service log, and run `mailtriage service status --account work --json`.
+5. Run `mailtriage update --json` again.
+6. Copy the older release to `/usr/local/bin/mailtriage` with `sudo install -m 0755` and run `/usr/local/bin/mailtriage update --check --json` and `/usr/local/bin/mailtriage update --json`.
+
+| Check | Result | Evidence | Date |
+| --- | --- | --- | --- |
+| `--check` reports the newer release as `latest`, `available: true` and `install.replaceable: true` | | | |
+| `update` reports `action: updated` and lists the service with `same_binary: true`; `~/.local/bin/mailtriage.previous` is the older binary | | | |
+| The download followed GitHub's real redirect to its asset host | | | |
+| macOS: the new binary runs (no Gatekeeper dialog, not killed); `xattr ~/.local/bin/mailtriage` shows no `com.apple.quarantine` | | | |
+| The log shows `{"schema_version":1,"update":{"event":"restarting",…}}` with the service's PID, then passes; `service status` shows the same `pid` and the new version in `last_pass.version` | | | |
+| The second `update` reports `action: current` | | | |
+| The root-owned copy: `--check` reports `unsafe_permissions` with its fix; `update` exits 3 and leaves the file unchanged | | | |

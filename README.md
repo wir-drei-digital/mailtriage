@@ -37,6 +37,8 @@ cargo build --release --locked
 sudo install -m 0755 target/release/mailtriage /usr/local/bin/mailtriage
 ```
 
+mailtriage keeps itself up to date: the background service installs new releases by itself, and `mailtriage update` installs one now. That needs a binary you own, such as `install -m 0755 mailtriage ~/.local/bin/mailtriage` instead of `sudo install` ([Updates](docs/guide.md#updates)).
+
 ## Get started
 
 ```sh
