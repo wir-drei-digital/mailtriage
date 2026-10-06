@@ -130,7 +130,11 @@ pub fn resolve_folders(
         })
         .collect();
     let referenced = referenced_folders(store, ctx.account)?;
-    let refs = RetiredRefs::load(store, ctx)?;
+    let refs = if retiring.is_empty() {
+        RetiredRefs::default()
+    } else {
+        RetiredRefs::load(store, ctx)?
+    };
     let mut scope: BTreeSet<String> = map.sources.iter().chain(&natives).cloned().collect();
     scope.extend(
         retiring

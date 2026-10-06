@@ -894,7 +894,7 @@ With filing on, `categories apply` returns a `hint` naming the command. The prev
 | `candidates` | Messages that would move, by folder and UID, at most `--limit` (1 to 500, default 50): `id`, `folder` and `target` (server folder names), `category` (the new category) and `reason` (`category_changed`, or `folder_retired` when no category uses the folder any more). |
 | `total` | All candidates, without the limit. |
 | `folders` | One entry per folder holding candidates or waiting mail: `folder` (the configured name, `null` when unknown), `native` (the server name; pass it to `--folder`), `retired`, `candidates`, `waiting`. |
-| `waiting` | Messages still to be classified again; whether they move is decided then. |
+| `waiting` | Messages still to be classified again; whether they move is decided then. Mail whose classification failed also counts, and a mark on it stays pending, until it is classified again (`reclassify` queues it again). |
 | `skipped` | What stays, counted by reason (below). |
 
 `--folder NAME` takes a folder's server name or its configured name; a configured name two folders share exits 2 and lists their server names. `--category ID` limits the candidates to one new category; waiting mail is reported but not marked, so run the command again once it is classified. With `--folder` and no `--category`, `--apply` also marks the waiting mail, which then moves once classified. `--apply` needs `live`, marks the whole matching set whatever `--limit` says, and is safe to repeat: `marked` and `waiting_marked` count only new marks. The moves happen over the following passes, at most `filing.max_actions_per_pass` per pass, with every safeguard of other moves; a refile adds no flag.
@@ -904,14 +904,14 @@ With filing on, `categories apply` returns a `hint` naming the command. The prev
 | `not_filed_by_mailtriage` | The message is not where a mailtriage move put it: you moved it, a rescan or recovery placed it, or it was filed without COPYUID. |
 | `corrected`, `pinned`, `done` | Your correction, pin or Done wins. |
 | `blocked`, `open_intent` | A block or an unfinished move; see `filing status`. |
-| `explicit_target` | A request to move it into a category that no longer exists is pending; `correct --account NAME --id ID --category NEW` replaces it. |
+| `explicit_target` | An explicit move request is pending; if its category was removed, `correct --account NAME --id ID --category NEW` replaces it. |
 | `multiple_copies` | It is in more than one folder. |
 | `incomplete_input` | It was classified from incomplete content. |
 | `retired_frozen` | It is in a retired folder mailtriage no longer watches. |
 | `target_unusable` | Its new folder is paused, missing or awaiting `filing adopt`. A marked message waits for it. |
 | `target_inbox_or_source` | Its new category keeps mail in `INBOX` or a source folder. |
 
-A retired folder stays watched while it holds mail that can still be refiled and, after that mail has moved, until mailtriage has scanned everything moved into it before then. After that it is no longer watched and the mail in it is not refiled. mailtriage never renames or deletes it; delete the emptied folder in your mail client when you like.
+A retired folder stays watched while it holds mail that mailtriage filed there and you have not moved, corrected, pinned or marked done, including mail you never refiled and mail that would not move; refile its mail to let it stop being watched. When none is left, it stays watched until mailtriage has scanned everything moved into it before then. After that it is no longer watched and the mail in it is not refiled. mailtriage never renames or deletes it; delete the emptied folder in your mail client when you like.
 
 A mark is dropped, with a `refile_cleared` event naming the reason, when the message is corrected, pinned, marked done, moved, copied, or classified into its own folder, into `INBOX` or a source folder, or from incomplete content. `filing status` reports `refile_marked` and `refile_candidates`. `filing log` shows `refile_marked`, `refile_cleared`, `refile_cancelled` and `moved` events with `"reason": "refile"`.
 

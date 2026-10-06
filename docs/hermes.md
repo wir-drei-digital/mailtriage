@@ -176,8 +176,8 @@ After the user adds, removes or re-points categories, mail that mailtriage alrea
 ```
 
 - `categories apply` returns a `hint`; run the preview once the next passes have classified open mail again.
-- Report `total`, the `folders` entries (`retired: true`: no category uses the folder any more) and `waiting` (mail still being classified again) to the user.
+- Report `total`, the `folders` entries (`retired: true`: no category uses the folder any more) and `waiting` (mail still being classified again; it also counts mail whose classification failed, which `reclassify` queues again) to the user.
 - Run `--apply` only when the user asked to move the mail. It needs filing `live` (exit 2 otherwise) and marks the whole matching set; the following passes move it. Repeating it is harmless: `marked` and `waiting_marked` count only new marks.
 - Pass a folder's `native` name to `--folder`. A configured name that two folders share exits 2 and lists their native names.
-- `skipped` explains what stays. Mail the user corrected, pinned, marked done or moved (`not_filed_by_mailtriage`) is never refiled; do not try to move it. `explicit_target`: a request for a removed category is pending; `correct --category NEW` replaces it. `retired_frozen`: the mail sits in a retired folder mailtriage no longer watches.
+- `skipped` explains what stays. Mail the user corrected, pinned, marked done or moved (`not_filed_by_mailtriage`) is never refiled; do not try to move it. `explicit_target`: an explicit move request is pending; if its category was removed, `correct --category NEW` replaces it. `target_unusable`: the new category's folder is not usable yet; it may not exist yet (a live pass creates it, so in `dry_run` such mail always shows here), or it is paused or awaiting `filing adopt`; a marked message waits for it. `retired_frozen`: the mail sits in a retired folder mailtriage no longer watches.
 - `filing status` reports `refile_marked` and `refile_candidates`; `filing log` shows `refile_marked`, `refile_cleared` and `refile_cancelled` events, and `moved` events with `"reason": "refile"`.

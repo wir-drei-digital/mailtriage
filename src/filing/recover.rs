@@ -883,7 +883,7 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_revision_keeps_the_mark_but_not_the_proof() {
+    fn a_stale_revision_keeps_the_mark_and_still_grants_the_proof() {
         let mut p = placement();
         apply_move(&mut p, &intent(Some(21), 2), &at(7, 21), "t1");
         assert!(p.refile_once);

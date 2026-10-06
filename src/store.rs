@@ -91,11 +91,13 @@ ALTER TABLE placements ADD COLUMN filed_home_epoch INTEGER;
 ALTER TABLE placements ADD COLUMN filed_home_uid INTEGER;
 ALTER TABLE filing_intents ADD COLUMN consumes_refile INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE folders ADD COLUMN drain_until_uid INTEGER;
+WITH newest(account,mid,id) AS (SELECT account,message_id,MAX(id) FROM filing_intents
+  WHERE kind='move' AND state='applied' GROUP BY account,message_id)
 UPDATE placements SET filed_home_folder=home_folder,filed_home_epoch=home_epoch,filed_home_uid=home_uid
  WHERE location_state='known' AND home_folder IS NOT NULL AND home_epoch IS NOT NULL AND home_uid IS NOT NULL
  AND NOT EXISTS(SELECT 1 FROM folders f WHERE f.account=placements.account AND f.native=placements.home_folder AND f.state='retired')
- AND EXISTS(SELECT 1 FROM filing_intents i WHERE i.id=(SELECT MAX(n.id) FROM filing_intents n
-   WHERE n.account=placements.account AND n.message_id=placements.message_id AND n.kind='move' AND n.state='applied')
+ AND EXISTS(SELECT 1 FROM newest w JOIN filing_intents i ON i.id=w.id
+  WHERE w.account=placements.account AND w.mid=placements.message_id
   AND i.target_uid IS NOT NULL AND i.target=placements.home_folder AND i.target_epoch=placements.home_epoch AND i.target_uid=placements.home_uid);",
     ),
 ];
