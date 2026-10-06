@@ -97,11 +97,15 @@ pub fn plist_arguments(text: &str) -> Option<Vec<String>> {
     }
 }
 
-/// Undoes `system_service`'s `xml`: decodes everything it writes (`&amp;`,
-/// `&lt;`, `&gt;`). It also accepts `&quot;` and `&apos;`, which that
-/// writer never produces; an unknown or unterminated entity, or a raw `<`,
-/// gives `None`.
+/// Undoes `system_service`'s `xml`, which escapes `&`, `<` and `>`: decodes
+/// `&amp;`, `&lt;` and `&gt;`, so everything it writes round-trips. A raw
+/// `<` anywhere in `text`, an unknown entity or an unterminated one gives
+/// `None`. Input `xml` never writes is otherwise accepted: a raw `>`, and
+/// `&quot;` and `&apos;`, decode too.
 fn xml_decode(text: &str) -> Option<String> {
+    if text.contains('<') {
+        return None;
+    }
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(at) = rest.find('&') {
@@ -116,9 +120,6 @@ fn xml_decode(text: &str) -> Option<String> {
             _ => return None,
         });
         rest = after;
-    }
-    if rest.contains('<') {
-        return None;
     }
     out.push_str(rest);
     Some(out)
@@ -236,6 +237,13 @@ mod tests {
             ),
             None
         );
+        // A raw `<` anywhere in a value, before or after an entity: `xml`
+        // never writes one.
+        for value in ["/a<b", "/a<b&amp;c", "/a&amp;b<c"] {
+            let text =
+                format!("<key>ProgramArguments</key><array><string>{value}</string></array>");
+            assert_eq!(plist_arguments(&text), None, "{value}");
+        }
         assert_eq!(executable(Manager::Systemd, "[Service]\n"), None);
         assert_eq!(
             executable(Manager::Systemd, "ExecStart=\"/unterminated\n"),
