@@ -1,7 +1,7 @@
 # Refiling filed mail after category changes
 
 Date: 2026-10-06
-Status: Design approved in conversation; written spec revised after Codex review rounds 1 and 2.
+Status: Design approved in conversation; written spec revised after three Codex review rounds.
 Builds on: [IMAP category filing](2026-10-04-imap-category-filing-design.md) and [guided setup](2026-10-05-guided-setup-design.md).
 
 ## Goal
@@ -130,6 +130,7 @@ Schema migration v6:
 - `placements`: `refile_once INTEGER NOT NULL DEFAULT 0`, `filed_home_folder TEXT`,
   `filed_home_epoch INTEGER`, `filed_home_uid INTEGER`;
 - `filing_intents.consumes_refile INTEGER NOT NULL DEFAULT 0`;
+- `folders.drain_until_uid INTEGER` (the draining snapshot, see Retired folders);
 - the filed-home backfill described above.
 
 The newer-schema guard moves from 5 to 6.
@@ -177,11 +178,25 @@ cleared, the same way `eligible_once` is consumed.
 ### Retired folders
 
 The existing rule freezes a retired folder's occurrences once nothing references
-it. This feature adds one reference: **a retired folder stays watched while it
-holds a placement whose filed home is in it.** Such a folder therefore never
-freezes while it holds refile-eligible mail, so its occurrences stay current,
-done inference works on it as on any watched folder, and a refile move can select
-it.
+it. This feature adds two references:
+
+- **Retention:** a retired folder stays watched while it holds a placement that
+  passes candidate rules 1–5 (filed home intact, not pinned, blocked, done,
+  corrected, in an open intent or with an outstanding explicit target, a single
+  occurrence). Done, corrected and pinned mail do not keep a folder watched, so
+  the extra scan work is limited to folders that still hold refile-eligible mail.
+- **Draining:** when the last retention reference disappears, the folder does not
+  freeze at once. mailtriage records the folder's snapshot (current epoch and
+  `UIDNEXT`) at that moment in a new `folders.drain_until_uid` column, and keeps
+  watching the folder until discovery has completed through that UID in the same
+  epoch and the arrivals and reconciliation it found are resolved. Until then the
+  folder counts as watched with an incomplete checkpoint, so done inference treats
+  it like any watched folder that is still being scanned. An epoch change during
+  draining records a new snapshot. Only then does the existing freeze rule apply.
+
+So a retired folder never freezes while it holds refile-eligible mail or while
+mail moved into it may still be undiscovered; its occurrences stay current, done
+inference works on it as on any watched folder, and a refile move can select it.
 
 A retired folder whose occurrences are already frozen is never watched again by
 this feature: migration v6 grants no filed home in retired folders, and a frozen
@@ -267,6 +282,11 @@ folder cannot gain one. Mail in such a folder is not refiled (preview reason
     freezes afterwards;
   - a retired folder frozen before v6: its mail is reported `retired_frozen`
     and never refiled; the folder is not watched again;
+  - draining: a retired folder R kept watched by message A; the user moves
+    message B into R beyond the discovery window; A's refile completes. R keeps
+    being watched until discovery passes the snapshot, B is found in R, is not
+    inferred done, and only then R freezes; a done or corrected message alone
+    does not keep R watched;
   - done set between planning and claim, a category change from B to C after a
     failed dispatch to B, and a source occurrence that changed: the intent is
     superseded, not retried, and a new intent targets C;
