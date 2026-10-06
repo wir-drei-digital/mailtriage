@@ -2,7 +2,10 @@
 //! `mailtriage`. Controls are found by their accessible labels.
 mod support;
 use eframe::egui::{self, Key, Modifiers};
-use egui_kittest::{kittest::Queryable, Harness};
+use egui_kittest::{
+    kittest::{NodeT, Queryable},
+    Harness,
+};
 use mailtriage_tray::{
     cli::Cli,
     editor::{self, Editor, Setup},
@@ -292,6 +295,133 @@ fn a_window_without_mailtriage_explains_and_exits_3() {
         });
     assert!(h.query_by_label_contains("mailtriage not found").is_some());
     assert_eq!(exit.load(std::sync::atomic::Ordering::SeqCst), 3);
+}
+
+/// The window after a rename, with the refile panel open: every kind of
+/// control is enabled and shown.
+fn everything_shown(fake: &FakeCli, drafts: &std::path::Path) -> Harness<'static, Editor> {
+    fake.respond_fixture("filing-refile", "refile-preview.json");
+    let mut h = open(fake, drafts);
+    rename_news(&mut h);
+    click(&mut h, "Move filed mail…");
+    settle(&mut h, |h| shows(h, "Move all 38"));
+    h
+}
+
+/// The controls in the order the window shows them: header, list, form,
+/// refile panel, then the footer from left to right, ending with Apply.
+const VISUAL_ORDER: [&str; 19] = [
+    "Account",
+    "Reload",
+    "Work\nWork",
+    "Newsletters\nNews",
+    "Promotions\nPromotions",
+    "Other\nOther · default",
+    "Add",
+    "Name",
+    "What belongs here",
+    "Use for mail that fits nowhere else",
+    "Mail folder",
+    "Advanced",
+    "Remove category",
+    "Move mail from Promotions",
+    "Move all 38",
+    "Not moved",
+    "Move filed mail…",
+    "Revert",
+    "Apply",
+];
+
+/// The label of the control with the keyboard focus.
+fn focused(h: &Harness<Editor>) -> String {
+    h.query_by(|n| n.is_focused())
+        .and_then(|n| n.accesskit_node().label())
+        .unwrap_or_default()
+}
+
+/// Tab moves through the window in the order it shows its controls, and
+/// Shift+Tab goes back.
+#[test]
+fn tab_follows_the_visual_order() {
+    let fake = fake();
+    let drafts = tempfile::tempdir().unwrap();
+    let mut h = everything_shown(&fake, drafts.path());
+    h.get_by_label("Account").focus();
+    h.step();
+    let mut seen = vec![focused(&h)];
+    while seen.len() < VISUAL_ORDER.len() {
+        h.key_press(Key::Tab);
+        h.step();
+        seen.push(focused(&h));
+    }
+    assert_eq!(seen, VISUAL_ORDER);
+    h.key_press_modifiers(Modifiers::SHIFT, Key::Tab);
+    h.step();
+    h.step();
+    assert_eq!(focused(&h), "Revert");
+    h.key_press_modifiers(Modifiers::SHIFT, Key::Tab);
+    h.step();
+    h.step();
+    assert_eq!(focused(&h), "Move filed mail…");
+}
+
+/// Screen readers walk the AccessKit tree in document order, which must
+/// be the visual order too.
+#[test]
+fn screen_readers_meet_the_controls_in_the_visual_order() {
+    let fake = fake();
+    let drafts = tempfile::tempdir().unwrap();
+    let h = everything_shown(&fake, drafts.path());
+    // Every labelled node in tree order (a field's label comes right
+    // before the field, so either one stands for it).
+    let labels: Vec<String> = h
+        .query_all_by(|n| n.label().is_some())
+        .filter_map(|n| n.accesskit_node().label())
+        .collect();
+    let at = |label: &str| {
+        labels
+            .iter()
+            .position(|l| l == label)
+            .unwrap_or_else(|| panic!("{label:?} not in {labels:#?}"))
+    };
+    for pair in VISUAL_ORDER.windows(2) {
+        assert!(
+            at(pair[0]) < at(pair[1]),
+            "{:?} comes before {:?} in {labels:#?}",
+            pair[0],
+            pair[1]
+        );
+    }
+}
+
+/// The footer is laid out from the last pass's measurements: with a long
+/// error that wraps, it settles at once (one pass per frame) and the whole
+/// message stays inside the window, left of the buttons.
+#[test]
+fn a_long_message_wraps_in_a_footer_that_settles() {
+    let fake = fake();
+    let drafts = tempfile::tempdir().unwrap();
+    let mut h = open(&fake, drafts.path());
+    fake.fail(
+        "categories-validate",
+        2,
+        "invalid categories; require unique IDs, descriptions and exactly one catch-all",
+        None,
+    );
+    click(&mut h, "News\nNews");
+    type_into(&mut h, "What belongs here", "");
+    settle(&mut h, |h| shows(h, "Every category needs a name"));
+    for _ in 0..4 {
+        h.step();
+        assert_eq!(h.output().platform_output.num_completed_passes, 1);
+    }
+    let message = h
+        .get_by_label_contains("Every category needs a name")
+        .rect();
+    let window = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(720.0, 520.0));
+    assert!(window.contains_rect(message), "{message:?}");
+    assert!(message.height() > 24.0, "it wraps: {message:?}");
+    assert!(message.max.x < h.get_by_label("Move filed mail…").rect().min.x);
 }
 
 /// Hovers the control labelled `label` until its tooltip shows `why`. The

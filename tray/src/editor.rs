@@ -14,9 +14,9 @@ use crate::{
 };
 use chrono::Utc;
 use eframe::egui::{
-    self, text::LayoutJob, Align, Button, CollapsingHeader, Color32, ComboBox, FontId, Frame, Id,
-    Key, KeyboardShortcut, Layout, Margin, Modal, Modifiers, RichText, ScrollArea, Spinner,
-    TextEdit, TextFormat, TextStyle, ViewportCommand, WidgetInfo, WidgetType,
+    self, pos2, text::LayoutJob, Align, Button, CollapsingHeader, Color32, ComboBox, FontId, Frame,
+    Id, Key, KeyboardShortcut, Layout, Margin, Modal, Modifiers, Rect, RichText, ScrollArea,
+    Spinner, TextEdit, TextFormat, TextStyle, UiBuilder, ViewportCommand, WidgetInfo, WidgetType,
 };
 use std::{
     fs::{self, File, OpenOptions},
@@ -35,6 +35,8 @@ use std::{
 pub const FIELD_WIDTH: f32 = 400.0;
 const LIST_WIDTH: f32 = 220.0;
 const REFILE_HEIGHT: f32 = 232.0;
+/// The margins of the header, the footer and the refile panel.
+const BAR_MARGIN: Margin = Margin::symmetric(16, 8);
 /// Why a control is off while a load runs.
 const WAIT_LOADING: &str = "Wait until loading finishes";
 /// Why a control is off while a command that writes runs.
@@ -67,6 +69,10 @@ pub struct Editor {
     exit: Arc<AtomicI32>,
     allow_close: bool,
     closed: bool,
+    /// The footer's height and the width of its buttons, as measured in
+    /// the last pass (the footer is laid out before it is drawn).
+    footer_height: f32,
+    actions_width: f32,
 }
 
 /// Text 14 pt, headings 18 pt, margins and gaps on an 8 px grid.
@@ -121,6 +127,8 @@ impl Editor {
                 exit,
                 allow_close: false,
                 closed: false,
+                footer_height: 24.0,
+                actions_width: 0.0,
             },
             Err(message) => Self {
                 model: Window::failed(message),
@@ -134,6 +142,8 @@ impl Editor {
                 exit,
                 allow_close: false,
                 closed: false,
+                footer_height: 24.0,
+                actions_width: 0.0,
             },
         };
         if editor.cli.is_some() {
@@ -386,6 +396,27 @@ fn panel_frame(ui: &egui::Ui, margin: Margin) -> Frame {
     Frame::side_top_panel(ui.style()).inner_margin(margin)
 }
 
+/// Reserves a bottom panel with room for `inner_height` inside
+/// `BAR_MARGIN` and returns that room. Its contents are drawn later, after
+/// the form, so that Tab and screen readers meet them in the visual order
+/// (egui follows the order in which controls are created).
+fn reserve_bottom(ui: &mut egui::Ui, id: &'static str, inner_height: f32) -> Rect {
+    egui::Panel::bottom(id)
+        .frame(panel_frame(ui, BAR_MARGIN))
+        .resizable(false)
+        .exact_size(inner_height + BAR_MARGIN.sum().y)
+        .show(ui, |ui| ui.max_rect())
+        .inner
+}
+
+/// A child of `ui` that draws into `rect`, part of a reserved panel's room,
+/// clipped to that panel.
+fn reserved_ui(ui: &mut egui::Ui, salt: &str, rect: Rect, layout: Layout) -> egui::Ui {
+    let mut child = ui.new_child(UiBuilder::new().id_salt(salt).max_rect(rect).layout(layout));
+    child.set_clip_rect(ui.clip_rect().intersect(rect + BAR_MARGIN));
+    child
+}
+
 impl Editor {
     fn header(&mut self, ui: &mut egui::Ui, msgs: &mut Vec<Msg>) {
         ui.horizontal(|ui| {
@@ -619,42 +650,69 @@ impl Editor {
         }
     }
 
-    fn footer(&mut self, ui: &mut egui::Ui, msgs: &mut Vec<Msg>) {
-        ui.horizontal(|ui| {
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let blocked = self.model.apply_blocked();
-                let apply = primary(ui, "Apply", blocked.is_none())
-                    .on_disabled_hover_text(blocked.unwrap_or_default());
-                if apply.clicked() {
-                    msgs.push(Msg::RequestApply);
-                }
-                let revert = ui
-                    .add_enabled(
-                        self.model.dirty() && !self.model.read_only(),
-                        Button::new("Revert"),
-                    )
-                    .on_disabled_hover_text(if self.model.dirty() {
-                        self.read_only_reason()
-                    } else {
-                        "No changes to revert"
-                    });
-                if revert.clicked() {
-                    msgs.push(Msg::Revert);
-                }
-                if self.model.filing_on() {
-                    let blocked = self.refile_blocked();
-                    let open = ui
-                        .add_enabled(blocked.is_none(), Button::new("Move filed mail…"))
-                        .on_disabled_hover_text(blocked.unwrap_or_default());
-                    if open.clicked() {
-                        msgs.push(Msg::MoveFiledMail);
-                    }
-                }
-                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    self.status_line(ui, msgs);
-                });
+    /// The footer, drawn into its reserved `rect` after the rest of the
+    /// window: the check result or notice on the left, then "Move filed
+    /// mail…", Revert and Apply on the right, created in that reading order
+    /// so Tab and screen readers end with Apply. The buttons' width and the
+    /// footer's height come from the last pass; when either changes, egui
+    /// draws the frame again at once.
+    fn footer(&mut self, ui: &mut egui::Ui, rect: Rect, msgs: &mut Vec<Msg>) {
+        let gap = ui.spacing().item_spacing.x;
+        let row = ui.spacing().interact_size.y;
+        let split = (rect.max.x - self.actions_width - gap).max(rect.min.x);
+        // The status at its natural height: a long message wraps.
+        let mut status = reserved_ui(
+            ui,
+            "footer-status",
+            Rect::from_min_max(rect.min, pos2(split, rect.max.y)),
+            Layout::top_down(Align::Min),
+        );
+        status.horizontal_wrapped(|ui| self.status_line(ui, msgs));
+        // One row of buttons, centred on the footer's height.
+        let mut actions = reserved_ui(
+            ui,
+            "footer-actions",
+            Rect::from_min_size(
+                pos2(rect.max.x - self.actions_width, rect.center().y - row / 2.0),
+                egui::vec2(self.actions_width, row),
+            ),
+            Layout::left_to_right(Align::Center),
+        );
+        if self.model.filing_on() {
+            let blocked = self.refile_blocked();
+            let open = actions
+                .add_enabled(blocked.is_none(), Button::new("Move filed mail…"))
+                .on_disabled_hover_text(blocked.unwrap_or_default());
+            if open.clicked() {
+                msgs.push(Msg::MoveFiledMail);
+            }
+        }
+        let revert = actions
+            .add_enabled(
+                self.model.dirty() && !self.model.read_only(),
+                Button::new("Revert"),
+            )
+            .on_disabled_hover_text(if self.model.dirty() {
+                self.read_only_reason()
+            } else {
+                "No changes to revert"
             });
-        });
+        if revert.clicked() {
+            msgs.push(Msg::Revert);
+        }
+        let blocked = self.model.apply_blocked();
+        let apply = primary(&mut actions, "Apply", blocked.is_none())
+            .on_disabled_hover_text(blocked.unwrap_or_default());
+        if apply.clicked() {
+            msgs.push(Msg::RequestApply);
+        }
+        let width = actions.min_rect().width();
+        let height = status.min_rect().height().max(row);
+        if (width - self.actions_width).abs() > 0.5 || (height - self.footer_height).abs() > 0.5 {
+            self.actions_width = width;
+            self.footer_height = height;
+            ui.ctx().request_discard("the footer changed size");
+        }
     }
 
     fn status_line(&self, ui: &mut egui::Ui, msgs: &mut Vec<Msg>) {
@@ -854,32 +912,34 @@ impl eframe::App for Editor {
             msgs.push(Msg::CloseRequested);
         }
         let mut controls = vec![];
+        // Controls are created in the visual order, which is the order Tab
+        // and screen readers follow: header, list, form, refile panel, then
+        // the footer from left to right. The footer and the refile panel
+        // reserve their room first and are drawn after the form.
         egui::Panel::top("header")
-            .frame(panel_frame(ui, Margin::symmetric(16, 8)))
+            .frame(panel_frame(ui, BAR_MARGIN))
             .show(ui, |ui| self.header(ui, &mut controls));
-        egui::Panel::bottom("footer")
-            .frame(panel_frame(ui, Margin::symmetric(16, 8)))
-            .show(ui, |ui| self.footer(ui, &mut controls));
+        let footer = reserve_bottom(ui, "footer", self.footer_height);
         egui::Panel::left("list")
             .frame(panel_frame(ui, Margin::same(16)))
             .exact_size(LIST_WIDTH)
             .resizable(false)
             .show(ui, |ui| self.list(ui, &mut controls));
         // The refile panel sits below the form, above the footer.
-        if let Some(refile) = self.model.refile.clone() {
-            egui::Panel::bottom("refile")
-                .frame(panel_frame(ui, Margin::symmetric(16, 8)))
-                .resizable(false)
-                .exact_size(REFILE_HEIGHT)
-                .show(ui, |ui| {
-                    ScrollArea::vertical().show(ui, |ui| self.refile(ui, &refile, &mut controls));
-                });
-        }
+        let refile = self.model.refile.clone().map(|refile| {
+            let room = REFILE_HEIGHT - BAR_MARGIN.sum().y;
+            (refile, reserve_bottom(ui, "refile", room))
+        });
         egui::CentralPanel::default()
             .frame(Frame::central_panel(ui.style()).inner_margin(16))
             .show(ui, |ui| {
                 ScrollArea::vertical().show(ui, |ui| self.form(ui, &mut controls));
             });
+        if let Some((refile, rect)) = refile {
+            let mut panel = reserved_ui(ui, "refile-contents", rect, Layout::top_down(Align::Min));
+            ScrollArea::vertical().show(&mut panel, |ui| self.refile(ui, &refile, &mut controls));
+        }
+        self.footer(ui, footer, &mut controls);
         if !dialog_open {
             msgs.append(&mut controls);
         }
