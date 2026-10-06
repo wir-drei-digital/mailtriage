@@ -6,6 +6,7 @@ use crate::{
         self, arrivals, inputs,
         observe::{self, FolderMap, OfflineEngine, WatchRole, WatchSpec},
         planner::{self, Plan},
+        refile,
         transitions::{self, Transition},
         FilingSummary, FilingWrite, FolderRecord, Intent, LocationState, PassContext, Placement,
         StageOptions,
@@ -677,8 +678,7 @@ impl Service {
         let store = &mut self.store;
         let result = (|| {
             let preview = ctx.mode == FilingMode::DryRun;
-            let plan =
-                filing::planner::plan(&filing::inputs::plan_input(store, ctx, map, preview)?);
+            let plan = filing::refile::plan_pass(store, ctx, map, preview)?;
             summary.planned = plan.actions.len();
             filing::apply::apply(store, ctx, map, &plan, summary)
         })();
@@ -1396,9 +1396,15 @@ impl Service {
                 max_attempts: self.config.policy.max_attempts,
                 verify_binding: &no_binding_check,
             };
-            planner::plan(&inputs::plan_input(&self.store, &ctx, &map, true)?)
+            let input = inputs::plan_input(&self.store, &ctx, &map, true)?;
+            let gone = refile::rules::gone(&self.store, name, &map.listed)?;
+            let facts = refile::rules::input(&self.store, name, &account, &gone)?;
+            planner::plan_with_refile(&input, &facts)
         };
-        let shown = &plan.actions[..plan.actions.len().min(limit)];
+        let shown: Vec<Value> = plan.actions[..plan.actions.len().min(limit)]
+            .iter()
+            .map(|a| plan_action(&plan, a))
+            .collect();
         Ok(
             json!({"schema_version":1,"account":name,"mode":filing::mode_str(mode),"folders_to_create":plan.folders_to_create,"actions":shown,"total":plan.actions.len()}),
         )
@@ -1807,6 +1813,17 @@ const LISTED: usize = 50;
 /// The first `LISTED` entries.
 fn listed<T>(all: &[T]) -> &[T] {
     &all[..all.len().min(LISTED)]
+}
+
+/// A `filing plan` action; a refile move carries `"reason": "refile"`.
+fn plan_action(plan: &Plan, action: &planner::Action) -> Value {
+    let mut value = json!(action);
+    if matches!(action, planner::Action::Move { .. })
+        && plan.refile_moves.contains(action.message_id())
+    {
+        value["reason"] = json!("refile");
+    }
+    value
 }
 
 /// Messages with an open move intent: moved or being moved, but not yet

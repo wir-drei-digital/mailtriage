@@ -13,6 +13,7 @@ use crate::engine::WriteOutcome;
 use crate::store::{now, Store};
 use anyhow::{bail, Result};
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 use uuid::Uuid;
 
 /// UIDs per write call (spec "Himalaya command mapping").
@@ -62,6 +63,7 @@ pub fn apply(
                 ctx,
                 (folder, *epoch, to),
                 chunk,
+                &plan.refile_moves,
                 &mut dropped,
                 summary,
             );
@@ -431,12 +433,14 @@ pub(crate) fn race_problem(folder: &str, summary: &mut FilingSummary) {
     }
 }
 
-/// One move batch: verify, snapshot the target, claim, dispatch.
+/// One move batch: verify, snapshot the target, claim (a refile move as
+/// one), dispatch.
 fn move_batch(
     store: &mut Store,
     ctx: &PassContext,
     (folder, epoch, to): (&str, u64, &str),
     actions: &[&Action],
+    refile: &BTreeSet<String>,
     dropped: &mut Vec<String>,
     summary: &mut FilingSummary,
 ) -> Result<()> {
@@ -456,15 +460,17 @@ fn move_batch(
     let (batch, at) = (new_batch(), now());
     let mut claimed = Vec::new();
     for action in verified.kept {
-        let id = store.claim_move(
+        let consumes_refile = refile.contains(action.message_id());
+        let target_snapshot = (target.uid_validity, target.uid_next);
+        let claim = store.claim_move_with(
             ctx.account,
             action,
-            target.uid_validity,
-            target.uid_next,
+            target_snapshot,
             &batch,
             &at,
+            consumes_refile,
         )?;
-        if let Some(id) = id {
+        if let Some(id) = claim {
             claimed.push((id, locator(action).uid));
         }
     }

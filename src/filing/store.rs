@@ -9,7 +9,7 @@ use crate::store::{bump, envelope_of, merge_envelope, now, row_record, Record, S
 use anyhow::{bail, Result};
 use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 const PLACEMENT_COLUMNS: &str = "account,message_id,source_folder,home_folder,home_epoch,home_uid,location_state,absent_since,desired_target,pinned,eligible_once,desired_rev,filed_at,filed_by,flag_attempted_at,flagged_at,done_inferred,blocked_reason,refile_once,filed_home_folder,filed_home_epoch,filed_home_uid";
@@ -1284,6 +1284,29 @@ impl Store {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Recorded occurrences per message.
+    pub fn occurrence_counts(&self, account: &str) -> Result<BTreeMap<String, usize>> {
+        let mut st = self.db.prepare(
+            "SELECT message_id, COUNT(*) FROM occurrences WHERE account=? GROUP BY message_id",
+        )?;
+        let rows = st
+            .query_map([account], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? as usize)))?
+            .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
+        Ok(rows)
+    }
+
+    /// Refile spec "Retired folders": retired folders neither retained nor
+    /// draining (`drain_until_uid` NULL).
+    pub fn frozen_folders(&self, account: &str) -> Result<BTreeSet<String>> {
+        let mut st = self.db.prepare(
+            "SELECT native FROM folders WHERE account=? AND state='retired' AND drain_until_uid IS NULL",
+        )?;
+        let rows = st
+            .query_map([account], |r| r.get(0))?
+            .collect::<rusqlite::Result<BTreeSet<_>>>()?;
         Ok(rows)
     }
 
