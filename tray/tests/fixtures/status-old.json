@@ -1,0 +1,4 @@
+{"schema_version":1,"config":"@CONFIG@","services":[
+ {"account":"daniel","manager":"launchd","installed":true,"loaded":true,"running":true,"pid":4242,"last_exit_status":0,
+  "unit_path":"/x.plist","log_paths":[],"last_pass":null}
+]}

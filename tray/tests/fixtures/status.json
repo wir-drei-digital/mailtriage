@@ -1,0 +1,13 @@
+{"schema_version":1,"config":"@CONFIG@","services":[
+ {"account":"daniel","manager":"launchd","installed":true,"loaded":true,"running":true,"pid":4242,"last_exit_status":0,
+  "unit_path":"/Users/daniel/Library/LaunchAgents/digital.wirdrei.mailtriage.daniel.plist",
+  "log_paths":["/Users/daniel/.config/mailtriage/logs/daniel.log","/Users/daniel/.config/mailtriage/logs/daniel.err"],
+  "last_pass":{"finished_at":"2026-10-06T10:03:00+00:00","partial":true,"exit_code":4,"mode":"live","reason":null,"version":"0.3.0"},
+  "service_config":"@CONFIG@","file_config":"@CONFIG@","config_matches":true,"enabled":true,"enablement":"enabled",
+  "interval_seconds":60,"filing_mode":"live","identity":"daniel@example.com",
+  "update":{"mode":"auto","executable":"/usr/local/bin/mailtriage","installed":"0.3.0","latest":"0.3.0","available":false,"checked_at":null,"last_error":null,"replaceable":true,"reason":null}},
+ {"account":"info","manager":"launchd","installed":false,"loaded":false,"running":false,"pid":null,"last_exit_status":null,
+  "unit_path":"/Users/daniel/Library/LaunchAgents/digital.wirdrei.mailtriage.info.plist","log_paths":[],"last_pass":null,
+  "service_config":null,"file_config":null,"config_matches":true,"enabled":false,"enablement":"not_installed",
+  "interval_seconds":null,"filing_mode":"off","identity":"info"}
+]}

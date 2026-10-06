@@ -27,3 +27,6 @@ tempfile = "3"
 [[bin]]
 name = "mailtriage"
 path = "src/main.rs"
+
+[workspace]
+members = ["tray"]

@@ -1,0 +1,6 @@
+{"schema_version":1,"account":"daniel","candidates":[],"total":38,
+ "folders":[
+  {"folder":"News","native":"INBOX.News","retired":false,"candidates":8,"waiting":0},
+  {"folder":"Promotions","native":"INBOX.Promotions","retired":true,"candidates":30,"waiting":12}
+ ],
+ "waiting":15,"skipped":{"corrected":3,"pinned":1}}

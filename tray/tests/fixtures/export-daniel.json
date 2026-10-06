@@ -1,0 +1,6 @@
+{"schema_version":1,"account":"daniel","taxonomy_revision":3,"digest":"v1:aaaa","categories":[
+ {"id":"work","name":"Work","description":"Mail from colleagues and clients","examples":["Weekly report"],"catch_all":false,"folder":"Work"},
+ {"id":"news","name":"News","description":"Newsletters and digests","examples":[],"catch_all":false,"folder":"News"},
+ {"id":"promo","name":"Promotions","description":"Offers and marketing","examples":[],"catch_all":false,"folder":"Promotions"},
+ {"id":"other","name":"Other","description":"Everything else","examples":[],"catch_all":true,"folder":"Other"}
+]}
