@@ -762,6 +762,26 @@ A category file holds a JSON array of categories or an object with a `categories
 
 `reclassify` queues the matching stored messages for classification and processes up to `--limit` of them (1 to 500, default 100); later passes process the rest. `--since YYYY-MM-DD` selects messages first observed on or after that local date. `--dry-run` reports `matched` and `will_process` and changes nothing.
 
+### Checking a change before you apply it
+
+```sh
+mailtriage categories export --account work --json > categories.json
+# edit categories.json
+mailtriage categories validate --file categories.json --account work --json
+mailtriage categories apply --account work --file categories.json --expect-digest "$(jq -r .digest categories.json)" --json
+```
+
+- `categories export` and `categories validate --account` report `digest`: `v1:` and a SHA-256 of the account's categories and whether its filing is on. It changes whenever something changes how `apply` would write the categories. The key order of a file and `"folder": null` versus no `folder` do not change it; the category order does.
+- `categories apply --expect-digest DIGEST` writes nothing and exits 5 with `categories changed since export; export again` (reason `categories_changed`) when the account's categories changed since the export (another window or agent applied a change), or filing was turned on or off. Export again and redo the edit.
+- `categories validate --file FILE --account NAME` also reports `changes`, computed after the same folder rules `apply` uses:
+  - `added` lists category IDs;
+  - `removed` lists `{"id","folder"}`;
+  - `renamed` and `folders_changed` list `{"id","from","to"}`;
+  - `edited` lists categories whose description, examples or default flag changed;
+  - `reclassifies` is `true` exactly when `apply` would sort all open mail again (it advances `taxonomy_revision`, which uses your OpenRouter key).
+
+  Folder names in `changes` are for display.
+
 ## Filing into folders
 
 Filing makes the classification visible in every mail client. With filing on, each classified message in a source folder (the engine's `mailboxes`, usually `INBOX`) is moved into a top-level folder for its category, and mail that needs action or has `high` urgency gets `\Flagged`. Filing is off by default and is enabled per account; `mailtriage setup` turns on `dry_run` for a new account unless you pass `--filing off`. Filing needs an `engine`; `filing enable` refuses an account without one.
@@ -888,7 +908,7 @@ Before you use `live` on a real mailbox, the live provider check in the [filing 
 
 With `--json`, every result is one line of JSON on stdout, and so is every error: `{"schema_version":1,"error":{"code":N,"message":"..."}}`. Without `--json`, results are pretty-printed JSON and errors go to stderr as `mailtriage: MESSAGE`. Every result has a `schema_version`. Error messages omit message bodies and credentials.
 
-Some errors also carry a machine-readable `reason` in the error object, for scripts that react to a class of error rather than to its message: `config_changed` (`mailtriage.json` or the Himalaya configuration changed during the command), `config_busy` (another command is editing `mailtriage.json`), `account_busy` (another worker for the account is running) and `binding_conflict` (the account binding changed, see [Account binding](#account-binding)). An error without a reason has no `reason` key.
+Some errors also carry a machine-readable `reason` in the error object, for scripts that react to a class of error rather than to its message: `config_changed` (`mailtriage.json` or the Himalaya configuration changed during the command), `config_busy` (another command is editing `mailtriage.json`), `account_busy` (another worker for the account is running), `binding_conflict` (the account binding changed, see [Account binding](#account-binding)) and `categories_changed` (`categories apply --expect-digest` found other categories). An error without a reason has no `reason` key.
 
 | Code | Meaning |
 | --- | --- |

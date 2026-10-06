@@ -270,6 +270,10 @@ enum CategoriesCommand {
         account: String,
         #[arg(long)]
         file: PathBuf,
+        /// Refuse (exit 5) unless the account's categories still have this
+        /// digest, from `categories export`.
+        #[arg(long)]
+        expect_digest: Option<String>,
     },
 }
 
@@ -625,10 +629,14 @@ fn execute(cli: &Cli) -> Result<Value, CliError> {
                 validate_categories(&categories)?;
                 Ok(json!({"schema_version":1,"valid":true,"categories":categories.len()}))
             }
-            CategoriesCommand::Apply { account, file } => {
+            CategoriesCommand::Apply {
+                account,
+                file,
+                expect_digest,
+            } => {
                 let categories = read_categories(file)?;
                 open(&cli.config_path()?)?
-                    .apply_categories(account, categories)
+                    .apply_categories_expecting(account, categories, expect_digest.as_deref())
                     .map_err(service_error)
             }
         },

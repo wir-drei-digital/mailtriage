@@ -42,6 +42,8 @@ pub enum ErrorKind {
     AccountBusy,
     /// The account's stored binding no longer matches its configuration.
     BindingConflict,
+    /// `categories apply --expect-digest` found other categories.
+    CategoriesChanged,
 }
 
 impl ErrorKind {
@@ -54,6 +56,7 @@ impl ErrorKind {
             Self::ConfigBusy => Some("config_busy"),
             Self::AccountBusy => Some("account_busy"),
             Self::BindingConflict => Some("binding_conflict"),
+            Self::CategoriesChanged => Some("categories_changed"),
         }
     }
 }
@@ -1480,7 +1483,7 @@ impl Service {
     pub fn categories(&mut self, name: &str) -> Result<Value> {
         let account = self.account(name)?;
         Ok(
-            json!({"schema_version":1,"account":name,"taxonomy_revision":account.taxonomy_revision,"categories":account.categories}),
+            json!({"schema_version":1,"account":name,"taxonomy_revision":account.taxonomy_revision,"categories":account.categories,"digest":crate::categories::account_digest(&account)}),
         )
     }
     /// The exclusive configuration lock of a command that edits the file.
@@ -1498,8 +1501,28 @@ impl Service {
     /// With filing on, a category without `folder` keeps the folder its id
     /// had before (a rename does not move its folder); a new one uses its name.
     pub fn apply_categories(&mut self, name: &str, categories: Vec<Category>) -> Result<Value> {
+        self.apply_categories_expecting(name, categories, None)
+    }
+    /// `apply_categories`; with `expected`, the account's digest must still
+    /// equal it under the configuration lock, before any other change, else
+    /// nothing is written (exit 5, `categories_changed`).
+    pub fn apply_categories_expecting(
+        &mut self,
+        name: &str,
+        categories: Vec<Category>,
+        expected: Option<&str>,
+    ) -> Result<Value> {
         let _lock = self.exclusive_config_lock()?;
         self.require_unchanged()?;
+        if let Some(expected) = expected {
+            if crate::categories::account_digest(&self.account(name)?) != expected {
+                return Err(err_kind(
+                    5,
+                    ErrorKind::CategoriesChanged,
+                    "categories changed since export; export again",
+                ));
+            }
+        }
         self.ensure(name)?;
         let ids: BTreeSet<_> = categories.iter().map(|c| c.id.as_str()).collect();
         for row in self.store.metadata_records(name)? {
@@ -1524,24 +1547,20 @@ impl Service {
     /// inheritance included. Writes nothing.
     pub fn validate_categories(&self, name: &str, categories: Vec<Category>) -> Result<Value> {
         let count = categories.len();
-        self.categories_candidate(name, categories)?;
-        Ok(json!({"schema_version":1,"account":name,"valid":true,"categories":count}))
+        let previous = self.account(name)?;
+        let updated = self.categories_candidate(name, categories)?;
+        let changes =
+            crate::categories::changes(&previous.categories, &updated.accounts[name].categories);
+        Ok(
+            json!({"schema_version":1,"account":name,"valid":true,"categories":count,"digest":crate::categories::account_digest(&previous),"changes":changes}),
+        )
     }
     /// The validated configuration with `categories` applied to account
     /// `name`: folders inherited with filing on, and the taxonomy revision
     /// advanced when the category semantics change.
     fn categories_candidate(&self, name: &str, categories: Vec<Category>) -> Result<AppConfig> {
         let previous = self.account(name)?;
-        let mut categories = categories;
-        if previous.filing.mode != FilingMode::Off {
-            for c in categories.iter_mut().filter(|c| c.folder.is_none()) {
-                let folder = match previous.categories.iter().find(|p| p.id == c.id) {
-                    Some(before) => before.effective_folder().to_string(),
-                    None => c.name.clone(),
-                };
-                c.folder = Some(folder);
-            }
-        }
+        let categories = crate::categories::normalized(&previous, categories);
         let semantic_changed =
             category_semantics(&previous.categories) != category_semantics(&categories);
         let mut updated = self.config.clone();
@@ -1673,7 +1692,7 @@ fn resolve_paths(cfg: &mut AppConfig, path: &Path) {
         }
     }
 }
-fn category_semantics(categories: &[Category]) -> Value {
+pub(crate) fn category_semantics(categories: &[Category]) -> Value {
     let mut cats:Vec<_>=categories.iter().map(|c|json!({"id":c.id,"description":c.description,"examples":c.examples,"catch_all":c.catch_all})).collect();
     cats.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
     json!(cats)
@@ -2029,6 +2048,10 @@ mod error_reasons {
         assert_eq!(
             ErrorKind::BindingConflict.reason(),
             Some("binding_conflict")
+        );
+        assert_eq!(
+            ErrorKind::CategoriesChanged.reason(),
+            Some("categories_changed")
         );
     }
 

@@ -129,6 +129,14 @@ Exit code 5 messages:
 | `placement changed concurrently; retry`, `message corrections changed concurrently; retry` | Re-read the item with `read`, then decide again. |
 | `account binding changed or state unavailable; ...`, `Himalaya mailbox identity changed during operation` | Stop and report to the user. The account's mailbox identity changed; this needs a human. |
 
+## Editing categories
+
+Change categories only when the user asks. Export, edit, check, then apply with the digest from the export:
+
+1. `categories export --account work --json`; keep `digest`.
+2. `categories validate --file FILE --account work --json`. Exit 2 means the file breaks a rule; the message names it. Read `changes`, and tell the user before applying when `changes.reclassifies` is `true`: all open mail is classified again, which uses their OpenRouter key.
+3. `categories apply --account work --file FILE --expect-digest DIGEST --json`. Exit 5 with reason `categories_changed` means someone else changed the categories since your export: export again and redo the edit; do not loop.
+
 ## What is safe to repeat
 
 | Commands | Repeating them |

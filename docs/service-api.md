@@ -192,3 +192,62 @@ names a configured account: `exit_code` 0, 4 for partial, else the error's code
 `partial` is false for a failed pass; `mode` is the pass's filing mode (`off`
 without an engine). A failed heartbeat write never changes the pass result.
 `Store::heartbeat(account)` returns the row as `last_pass`.
+
+## Categories digest and changes
+
+`src/categories.rs` (`mailtriage::categories`) holds what `categories apply`
+would write for an account:
+
+```rust
+pub fn filing_on(account: &AccountConfig) -> bool; // filing.mode != off
+pub fn digest(filing_on: bool, categories: &[Category]) -> String;
+pub fn account_digest(account: &AccountConfig) -> String;
+pub fn normalized(previous: &AccountConfig, categories: Vec<Category>) -> Vec<Category>;
+pub fn changes(previous: &[Category], next: &[Category]) -> Changes;
+
+#[derive(Serialize)] pub struct Changes {
+  pub added: Vec<String>, pub removed: Vec<Removed>, pub renamed: Vec<Change>,
+  pub folders_changed: Vec<Change>, pub edited: Vec<String>, pub reclassifies: bool,
+}
+#[derive(Serialize)] pub struct Removed { pub id: String, pub folder: String }
+#[derive(Serialize)] pub struct Change { pub id: String, pub from: String, pub to: String }
+
+impl Service {
+  pub fn apply_categories_expecting(&mut self, account:&str, categories:Vec<Category>,
+    expected:Option<&str>) -> Result<Value>;
+}
+```
+
+- `filing_on` is the configured filing mode, not the effective one of an
+  account without an engine; it is the rule `normalized` uses.
+- `digest` is `v1:` plus the lowercase hex SHA-256 of
+  `serde_json::to_vec(&DigestInput { filing_on, categories })`: an object with
+  `filing_on` first, then `categories`, each `Category` with its fields in
+  declaration order (`id`, `name`, `description`, `examples`, `catch_all`,
+  `folder`) and `folder` omitted when unset. Key order and `"folder": null`
+  versus no `folder` in a file therefore do not change it; category order does.
+  `account_digest` is `digest(filing_on(account), &account.categories)`.
+- `normalized` is apply's folder normalization: with filing on, a category
+  without `folder` keeps its ID's previous effective folder, and a new one uses
+  its name.
+- `changes` compares `previous` with an already normalized `next`. `added`,
+  `renamed`, `folders_changed` and `edited` follow `next`'s order, `removed`
+  `previous`'s. `folders_changed` and `removed[].folder` hold effective folder
+  names in every filing mode, for display. `edited` lists categories whose
+  `description`, `examples` or `catch_all` changed. `reclassifies` is
+  `category_semantics(previous) != category_semantics(next)`, exactly apply's
+  rule for advancing `taxonomy_revision`.
+- `apply_categories(account, categories)` is
+  `apply_categories_expecting(account, categories, None)`. The order is: the
+  exclusive config lock, the unchanged-file guard (`config_changed`), then,
+  with `expected`, `account_digest` must equal it, else exit 5
+  `categories changed since export; export again` with `ErrorKind::CategoriesChanged`
+  (reason `categories_changed`) and nothing written; then everything else.
+
+JSON additions:
+
+- `categories export` gains `digest`, the account's current digest.
+- `categories validate --account` gains `digest` (the account's current one,
+  which `--expect-digest` compares, not one of the file) and `changes`.
+- `categories apply` returns export's shape, so it gains `digest` too.
+- `categories apply --expect-digest D` passes `Some(D)`.
