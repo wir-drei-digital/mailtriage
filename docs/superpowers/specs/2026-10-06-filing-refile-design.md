@@ -73,6 +73,12 @@ mailtriage filing refile --account NAME [--category ID] [--folder NAME] [--limit
     another category's folder) or `folder_retired` (its folder belongs to no
     category any more).
   - `total`: the number of candidates (never limited).
+  - `folders`: one entry per home folder that holds candidates or waiting
+    messages, ordered by native name:
+    `{"folder":"Promotions","native":"INBOX.Promotions","retired":true,"candidates":30,"waiting":12}`.
+    `folder` is the configured name (`null` when unknown) and `retired` tells
+    whether the folder belongs to no category any more. Tools pass `native` to
+    `--folder`.
   - `waiting`: messages that pass the placement rules (1–5) but whose
     classification is not current yet. Their target, and whether they move at
     all, is decided only once they are reclassified.
@@ -84,7 +90,10 @@ mailtriage filing refile --account NAME [--category ID] [--folder NAME] [--limit
   reported but never marked with `--category`: its new category is not known yet,
   so run the command again once those messages are reclassified.
 - `--folder NAME`: only messages whose current home is in folder `NAME` (a
-  category folder or a retired folder). With `--folder` (and no `--category`),
+  category folder or a retired folder). `NAME` matches a known folder's configured
+  name (a category's `folder`, as it was when the folder was in use) or its native
+  server name (with the personal namespace prefix, as `filing status` shows it). A
+  name matching two different folders exits 2 and asks for the native name. With `--folder` (and no `--category`),
   `--apply` also marks `waiting` messages, which then move once reclassified.
 - `--limit` affects only the listed candidates. `--apply` always marks the whole
   matching set.
@@ -269,6 +278,10 @@ folder cannot gain one. Mail in such a folder is not refiled (preview reason
   change, kept by a same-epoch rescan; migration skips retired folders and
   incomplete tuples.
 - **Service tests with the fake engine:**
+  - `--folder` matching: by configured name, by native name with a personal
+    prefix (`INBOX.Promotions`), a retired folder after its category was removed,
+    and a name matching two folders (exit 2); the preview's `folders` entries carry
+    `native`, `retired` and the counts;
   - a category change: preview lists the message, `--apply` marks it, a pass
     moves it, the mark is cleared, the log shows the refile reason;
   - a client move back into the same category folder, then a category change: not
