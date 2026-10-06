@@ -47,6 +47,7 @@ fn mt_status(e: &Env, args: &[&str]) -> (Option<i32>, Value) {
     let out = Command::new(env!("CARGO_BIN_EXE_mailtriage"))
         .current_dir(e.dir.path())
         .args(&full)
+        .env("XDG_CACHE_HOME", e.dir.path())
         .output()
         .unwrap();
     eprintln!(

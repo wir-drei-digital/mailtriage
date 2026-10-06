@@ -586,6 +586,8 @@ pub fn status_account(
     let mut out = status(ctx, account, &log_dir);
     out["account"] = json!(account);
     out["last_pass"] = service.store.heartbeat(account)?.unwrap_or(Value::Null);
+    let unit = ctx.map(|c| (c.manager, c.unit_path(account)));
+    out["update"] = crate::update::report::update_block(service.config.updates, unit);
     Ok(out)
 }
 

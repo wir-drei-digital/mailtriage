@@ -180,8 +180,13 @@ The CLI wraps each in `{"schema_version":1,"service":{...}}`.
   "not_installed", manager, account, unit_path}`.
 - `system_service::status_account(&Service, config, account,
   Option<&Context>)`: `{manager:"launchd"|"systemd"|"none", account, installed,
-  loaded, running, pid, last_exit_status, unit_path, log_paths, last_pass}`.
-  `last_pass` is `{finished_at, partial, exit_code, mode}` or `null`.
+  loaded, running, pid, last_exit_status, unit_path, log_paths, last_pass,
+  update}`. `last_pass` is `{finished_at, partial, exit_code, mode}` or `null`.
+  `update` is `update::report::update_block(mode, Option<(Manager, unit
+  path)>)`: `{mode, executable, installed, latest, available, checked_at,
+  last_error, replaceable, reason}`. `doctor` adds `update::report::doctor_block`
+  (the same plus `ready`, and `fix` when not ready), and setup step 9 adds an
+  `update` item when that block is not ready.
 - `Context::detect()` fails with exit 2 on platforms other than macOS and
   Linux and exit 3 on Linux without `systemctl`; `status` then reports
   `manager:"none"`. Unknown account: exit 2. Unmarked file at the unit path:

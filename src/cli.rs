@@ -563,9 +563,13 @@ fn execute(cli: &Cli) -> Result<Value, CliError> {
             )
         }
         Command::Setup(arg) => setup(cli, arg),
-        Command::Doctor(arg) => open(&cli.config_path()?)?
-            .doctor(&arg.account)
-            .map_err(service_error),
+        Command::Doctor(arg) => {
+            let mut service = open(&cli.config_path()?)?;
+            let mut report = service.doctor(&arg.account).map_err(service_error)?;
+            let unit = update::report::unit_of(&arg.account);
+            report["update"] = update::report::doctor_block(service.config.updates, unit);
+            Ok(report)
+        }
         Command::Classify(arg) => {
             let data = read_input(&arg.input, 16 * 1024 * 1024)?;
             open(&cli.config_path()?)?

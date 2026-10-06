@@ -258,7 +258,7 @@ pub fn run(args: &SetupArgs, path: &Path, p: &mut Prompter) -> Result<Value> {
         ));
     }
     // 9. Check.
-    let doctor = doctor_step(p, &path, shown, &name, &cfg.provider, &engine);
+    let doctor = doctor_step(p, &path, shown, &name, &cfg, &engine);
     // 10. Service, only when the state check passed: otherwise every pass
     // of the service would fail.
     let state_ok = doctor["items"]
@@ -1228,9 +1228,10 @@ fn doctor_step(
     path: &Path,
     shown: Option<&Path>,
     name: &str,
-    provider: &ProviderConfig,
+    cfg: &AppConfig,
     engine: &HimalayaConfig,
 ) -> Value {
+    let provider = &cfg.provider;
     let mut items = Vec::new();
     match Service::open(path).and_then(|mut service| service.doctor(name)) {
         Err(e) => items.push(check_item(
@@ -1308,6 +1309,18 @@ fn doctor_step(
             }
         }
     }
+    // Like doctor's top-level `ready`, setup's ignores the update item.
+    let ready = items.iter().all(|i| i["ready"] == true);
+    let unit = crate::update::report::unit_of(name);
+    let update = crate::update::report::doctor_block(cfg.updates, unit);
+    if update["ready"] == false {
+        items.push(check_item(
+            "update",
+            false,
+            update["reason"].as_str().map(str::to_owned),
+            update["fix"].as_str().unwrap_or_default().to_owned(),
+        ));
+    }
     p.say("Checks:");
     for item in &items {
         let check = item["check"].as_str().unwrap_or_default();
@@ -1316,7 +1329,7 @@ fn doctor_step(
             Some(fix) => p.say(&format!("  not ready  {check}: {fix}")),
         }
     }
-    json!({"ready": items.iter().all(|i| i["ready"] == true), "items": items})
+    json!({"ready": ready, "items": items})
 }
 
 /// One doctor item; `error` and `fix` only when it is not ready.

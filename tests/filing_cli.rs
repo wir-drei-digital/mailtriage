@@ -11,6 +11,8 @@ fn run(cwd: &Path, args: &[&str]) -> (i32, Value) {
     let out = Command::new(env!("CARGO_BIN_EXE_mailtriage"))
         .current_dir(cwd)
         .args(args)
+        .env("HOME", cwd)
+        .env("XDG_CACHE_HOME", cwd)
         .env_remove("MAILTRIAGE_CONFIG")
         .output()
         .unwrap();

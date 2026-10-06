@@ -76,6 +76,14 @@ The result is `{"schema_version":1,"service":{...}}` (fields in [Service command
   - `exit_code`: 0 is a complete pass; 4 is partial (some folders or messages failed, and `list --view all` shows each message's `error`; or the key was unavailable, which `doctor` shows); any other code is the error's exit code from the table below.
   - `mode`: the filing mode of that pass (`off`, `dry_run` or `live`).
 
+### Updates
+
+`setup` writes `updates: auto`, so the background service installs every stable release within about a day and switches to it between passes (see [Updates](guide.md#updates)). On a host where provisioning owns the binary, pass `--updates off` (no network calls) or `--updates notify` (report only) to `setup`.
+
+- `mailtriage update --check --json` asks GitHub now and reports `available` and whether the binary may be replaced (`install.replaceable`, `install.reason`, `install.fix`). It exits 0 either way, and 3 when GitHub cannot be reached.
+- `service status --json` carries `service.update`: `installed` for the binary the service runs, `latest`, `available`, `last_error` and `replaceable`. It reads the cache and makes no network call.
+- `mailtriage update --json` installs the newest release. Exit 5 means another update is running: try again later. Exit 3 names the cause; report it to the user. Do not restart the service afterwards; it switches by itself.
+
 ## Reading mail
 
 Use `list` to decide what to inspect, then `read` only the messages you need:

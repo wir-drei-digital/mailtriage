@@ -1758,3 +1758,67 @@ fn setup_takes_the_config_lock_next_to_the_file_a_symlink_names() {
     assert_eq!(f.config(), before);
     assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
 }
+
+#[test]
+fn setup_names_the_update_fix_when_auto_cannot_replace_the_service_binary() {
+    let f = Fixture::new();
+    write_tool(&f.bin, "launchctl", LAUNCHCTL);
+    write_tool(&f.bin, "systemctl", SYSTEMCTL);
+    let cellar = f.home.join("brew/Cellar/mailtriage/0.0.1/bin");
+    fs::create_dir_all(&cellar).unwrap();
+    write_tool(
+        &cellar,
+        "mailtriage",
+        "#!/bin/sh\necho 'mailtriage 0.0.1'\n",
+    );
+    let unit = mailtriage::system_service::Unit {
+        account: "work".into(),
+        exe: cellar.join("mailtriage"),
+        config: f.config_path(),
+        interval_seconds: 60,
+        limit: 100,
+        log_dir: f.home.join("logs"),
+        path_env: None,
+    };
+    let (manager, name, text) = if cfg!(target_os = "macos") {
+        (
+            mailtriage::system_service::Manager::Launchd,
+            "digital.wirdrei.mailtriage.work.plist",
+            mailtriage::system_service::plist(&unit),
+        )
+    } else {
+        (
+            mailtriage::system_service::Manager::Systemd,
+            "mailtriage-work.service",
+            mailtriage::system_service::systemd_unit(&unit),
+        )
+    };
+    let dir = mailtriage::system_service::unit_dir(manager, &f.home);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join(name), text).unwrap();
+
+    let (out, v) = f.run_with(&WORK_ENV, "", &[("OPENROUTER_API_KEY", "sk-or-fixture")]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let doctor = &v["setup"]["doctor"];
+    let item = doctor["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["check"] == "update")
+        .cloned()
+        .unwrap_or_else(|| panic!("no update item: {doctor}"));
+    assert_eq!(
+        item,
+        json!({"check":"update","ready":false,"error":"managed_by_homebrew","fix":"run `brew upgrade mailtriage`"})
+    );
+    assert_eq!(doctor["ready"], true, "{doctor}");
+
+    let (out, v) = f.run_with(
+        &[&WORK_ENV[..], &["--update", "--updates", "notify"]].concat(),
+        "",
+        &[("OPENROUTER_API_KEY", "sk-or-fixture")],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let items = v["setup"]["doctor"]["items"].as_array().unwrap();
+    assert!(items.iter().all(|i| i["check"] != "update"), "{items:?}");
+}

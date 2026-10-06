@@ -11,6 +11,7 @@ pub mod github;
 pub mod install;
 pub mod platform;
 pub mod release;
+pub mod report;
 pub mod restart;
 pub mod schedule;
 pub mod service_files;
