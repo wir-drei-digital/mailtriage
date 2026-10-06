@@ -6,13 +6,16 @@ pub mod archive;
 pub mod cache;
 pub mod check;
 pub mod command;
+pub mod events;
 pub mod github;
 pub mod install;
 pub mod platform;
 pub mod release;
+pub mod restart;
 pub mod schedule;
 pub mod service_files;
 pub mod version;
+pub mod watch;
 
 /// The repository releases come from.
 pub const REPO: &str = "wir-drei-digital/mailtriage";

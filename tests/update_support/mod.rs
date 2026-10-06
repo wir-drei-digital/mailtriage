@@ -398,3 +398,185 @@ pub fn run(command: &mut std::process::Command) -> (Option<i32>, Value, String) 
         String::from_utf8_lossy(&out.stderr).into_owned(),
     )
 }
+
+impl Sandbox {
+    /// An offline config (`init`: fake provider, no mail engine) at
+    /// `<tmp>/<name>/mailtriage.json` with `updates` set to `mode`.
+    pub fn config(&self, name: &str, mode: &str) -> PathBuf {
+        let dir = self.root().join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mailtriage.json");
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_mailtriage"))
+            .args(["init", "--json", "--config"])
+            .arg(&path)
+            .current_dir(&dir)
+            .env("HOME", &self.home)
+            .env("XDG_CACHE_HOME", &self.xdg)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        set_updates(&path, mode);
+        path
+    }
+
+    /// `watch --account work --interval-seconds 1 --json` for `config`
+    /// (given through MAILTRIAGE_CONFIG).
+    pub fn watch(&self, server: &Server, config: &Path) -> Watch {
+        self.watch_with_interval(server, config, 1)
+    }
+
+    /// `watch` as above with passes `seconds` apart.
+    pub fn watch_with_interval(&self, server: &Server, config: &Path, seconds: u64) -> Watch {
+        Watch::spawn(
+            self.command(server)
+                .env("MAILTRIAGE_CONFIG", config)
+                .args(["watch", "--account", "work", "--interval-seconds"])
+                .arg(seconds.to_string())
+                .arg("--json"),
+        )
+    }
+}
+
+/// Writes `updates` into the config at `path`, keeping everything else.
+pub fn set_updates(path: &Path, mode: &str) {
+    let mut config: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    config["updates"] = json!(mode);
+    std::fs::write(path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
+}
+
+/// A running `watch` whose stdout lines are collected as JSON. Dropping it
+/// kills a `watch` that still runs, so a failing test leaves none behind.
+pub struct Watch {
+    pub child: std::process::Child,
+    lines: std::sync::mpsc::Receiver<String>,
+    pub seen: Vec<Value>,
+}
+
+impl Watch {
+    pub fn spawn(command: &mut std::process::Command) -> Self {
+        let mut child = command
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (send, lines) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if send.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            child,
+            lines,
+            seen: Vec::new(),
+        }
+    }
+
+    /// Collects lines until `done` holds for what was seen; panics after 60 s.
+    pub fn until(&mut self, what: &str, done: impl Fn(&[Value]) -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while !done(&self.seen) {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match self.lines.recv_timeout(left) {
+                Ok(line) => self
+                    .seen
+                    .push(serde_json::from_str(&line).unwrap_or(Value::String(line))),
+                Err(_) => panic!("watch never showed {what}; saw {:#?}", self.seen),
+            }
+        }
+    }
+
+    /// Waits for the first event of `kind` and returns it.
+    pub fn event(&mut self, kind: &str) -> Value {
+        self.until(kind, |seen| {
+            seen.iter().any(|v| v["update"]["event"] == kind)
+        });
+        self.events(kind)[0].clone()
+    }
+
+    pub fn events(&self, kind: &str) -> Vec<Value> {
+        self.seen
+            .iter()
+            .filter(|v| v["update"]["event"] == kind)
+            .cloned()
+            .collect()
+    }
+
+    /// Pass results seen so far.
+    pub fn passes(&self) -> usize {
+        self.seen
+            .iter()
+            .filter(|v| v.get("discovered").is_some())
+            .count()
+    }
+
+    pub fn wait_passes(&mut self, count: usize) {
+        self.until(&format!("{count} passes"), |seen| {
+            seen.iter()
+                .filter(|v| v.get("discovered").is_some())
+                .count()
+                >= count
+        });
+    }
+
+    /// SIGTERM, then the exit code and the final stop object.
+    pub fn stop(mut self) -> (Option<i32>, Value) {
+        signal(&self.child, "TERM");
+        let status = wait_exit(&mut self.child);
+        while let Ok(line) = self.lines.recv_timeout(Duration::from_secs(5)) {
+            self.seen
+                .push(serde_json::from_str(&line).unwrap_or(Value::String(line)));
+        }
+        (
+            status.code(),
+            self.seen.last().cloned().unwrap_or(Value::Null),
+        )
+    }
+
+    /// SIGKILL, as a crash or a killed service would end it.
+    pub fn kill(mut self) {
+        signal(&self.child, "KILL");
+        let _ = self.child.wait();
+    }
+}
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        if matches!(self.child.try_wait(), Ok(None)) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+/// The exit status of `child`; panics when it runs for another 60 s.
+pub fn wait_exit(child: &mut std::process::Child) -> std::process::ExitStatus {
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return status;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "process {} did not exit",
+            child.id()
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+pub fn signal(child: &std::process::Child, name: &str) {
+    let status = std::process::Command::new("kill")
+        .arg(format!("-{name}"))
+        .arg(child.id().to_string())
+        .status()
+        .unwrap();
+    assert!(status.success());
+}

@@ -641,6 +641,7 @@ mailtriage service uninstall --account work
 `<label>` is `digital.wirdrei.mailtriage.<account>`. With the home config, the log directory is `~/.config/mailtriage/logs`.
 
 - **Repeating `install`** rewrites the file and reloads the job. Run it again after you move the executable or the config, or change your `PATH`.
+- **A replaced binary.** A running service switches to a new binary at the same path by itself, between passes; see [How a running service switches](#how-a-running-service-switches). Moving the binary to another path still needs `service install`.
 - **Marked files.** mailtriage marks the files it writes. It replaces or removes only marked files. An unmarked file at the path exits 5 with `PATH exists and was not written by mailtriage; move it away first`.
 - **Accounts.** `install` and `status` need the account to be in the config (exit 2, `unknown account`). `uninstall` also works for an account you have removed.
 - **PATH.** launchd and systemd start jobs with a short `PATH`. The service file therefore records the `PATH` of the shell that runs `install`, so key tools such as `pass` and `gpg` find their helpers.
@@ -741,7 +742,7 @@ Both read the release list of `wir-drei-digital/mailtriage` from the GitHub API,
 6. unpacks the `mailtriage` executable next to the binary and runs `--version` on it, which must print the release's version. This catches a wrong architecture, a glibc older than the release needs, and macOS refusing to run the binary;
 7. checks that the installed binary did not change meanwhile, keeps it as `<binary>.previous`, and moves the new binary into place with a rename. Running processes keep the old file open, so nothing running is disturbed.
 
-When a step before the rename fails, the binary and `<binary>.previous` are unchanged and the temporary files are removed. After the rename the update counts as done; a later problem, such as keeping the backup or recording the update, is a warning. Releases are verified by HTTPS and `SHA256SUMS`, not by signatures. `update` starts and stops nothing: each running `watch` switches to the new binary by itself.
+When a step before the rename fails, the binary and `<binary>.previous` are unchanged and the temporary files are removed. After the rename the update counts as done; a later problem, such as keeping the backup or recording the update, is a warning. Releases are verified by HTTPS and `SHA256SUMS`, not by signatures. `update` starts and stops nothing: each running `watch` switches to the new binary by itself (see [How a running service switches](#how-a-running-service-switches)).
 
 `--check` reports:
 
@@ -781,6 +782,21 @@ Without `--check`:
 | 2 | Invalid flags. |
 | 3 | GitHub could not be reached or answered with an error, including its rate limit; there is no stable release; the release has no archive for this platform or no `SHA256SUMS` line for it; a checksum mismatch; a bad archive; the new binary did not run; the installed binary changed during the update; no cache directory can be found (see [Files](#files)); or, without `--check`, the binary may not be replaced: the message names the reason and its fix. |
 | 5 | Another update held the installation lock for 60 seconds (`another update is running`). |
+
+### How a running service switches
+
+`watch` records which file it runs when it starts. Before each pass, and every 5 seconds while it waits, it compares that file with the binary at the same path (device, inode, size, modification and change time, mode). When the binary was replaced, by `mailtriage update`, by another account's service, or by `cargo install` over the same path, `watch`:
+
+1. runs `<binary> --version`, which must print `mailtriage <version>`;
+2. checks that the file did not change again meanwhile;
+3. prints `{"schema_version":1,"update":{"event":"restarting","pid":1234,"from":"0.2.0","to":"0.3.0"}}`;
+4. replaces itself with the new binary, with the same arguments and environment. The process ID stays the same, so launchd and systemd see no change, and the account lock is free while this happens.
+
+It never does this during a pass, and after Ctrl-C or SIGTERM it stops instead. It works in every `updates` mode and needs no `service install`; moving the binary to another path does need `service install`.
+
+When the new binary does not run, or the switch fails, `watch` prints one `{"schema_version":1,"update":{"event":"error","message":"…"}}` per file and kind of failure, keeps running the old code, and tries again after 1 minute, doubling up to 1 hour, or at once when the file changes again (for example after `chmod +x`). On Linux, a process whose binary file was replaced uses its absolute `argv[0]` to find the path; when that does not exist either, `watch` prints one error event and does not switch.
+
+Without `--json`, events are one line of text, for example `update: restarting onto 0.3.0 (was 0.2.0, pid 1234)`.
 
 ### Binaries mailtriage does not replace
 
