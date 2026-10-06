@@ -1,7 +1,7 @@
 use clap::Parser;
 use mailtriage_tray::{
     args::{Args, Sub},
-    autostart, tray,
+    autostart, editor, tray,
 };
 
 fn main() {
@@ -9,8 +9,7 @@ fn main() {
     let code = match &args.command {
         None => tray::run(&args),
         Some(Sub::Autostart { action, json }) => autostart::run(&args, *action, *json),
-        // The categories window (Task 8).
-        Some(Sub::Categories { .. }) => 0,
+        Some(Sub::Categories { account }) => editor::run(&args, account.clone()),
     };
     std::process::exit(code);
 }

@@ -4,6 +4,7 @@
 //! is the first two words (`service-status`, `categories-apply`, …) plus
 //! `-apply` with `--apply`. `hold-<key>` or `hold-draft-<N>` makes the call
 //! wait until the file is removed.
+pub mod window;
 use std::{
     fs,
     path::{Path, PathBuf},
