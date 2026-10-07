@@ -172,3 +172,20 @@ To move a message to another category, call `correct --category`. With filing on
 - A folder in `folders` with a `pause_reason` takes no writes until `filing retry --folder NAME`. A folder in state `needs_confirmation` waits for `filing adopt --folder NAME`. Both need the user's confirmation first.
 
 Never loop on `filing retry`. A block, a folder pause or an unresolved arrival means mailtriage could not prove what happened in the mailbox, and retrying without knowing why repeats the problem. Report the item from `filing status` to the user and retry once after they have checked it. Exit code 5 from a filing command means something changed concurrently or the message is not identified yet: let the next pass run, re-read the item, then decide again.
+
+### Refiling after category changes
+
+After the user adds, removes or re-points categories, mail that mailtriage already filed stays in its old folder until it is refiled. `filing refile` previews which filed mail would follow its new category. It reads local state only and is safe to repeat.
+
+```sh
+/opt/mailtriage/mailtriage filing refile --account work --json
+/opt/mailtriage/mailtriage filing refile --account work --folder INBOX.Promotions --json
+/opt/mailtriage/mailtriage filing refile --account work --folder INBOX.Promotions --apply --json
+```
+
+- `categories apply` returns a `hint`; run the preview once the next passes have classified open mail again.
+- Report `total`, the `folders` entries (`retired: true`: no category uses the folder any more) and `waiting` (mail still being classified again; it also counts mail whose classification failed, which `reclassify` queues again) to the user.
+- Run `--apply` only when the user asked to move the mail. It needs filing `live` (exit 2 otherwise) and marks the whole matching set; the following passes move it. Repeating it is harmless: `marked` and `waiting_marked` count only new marks.
+- Pass a folder's `native` name to `--folder`. A configured name that two folders share exits 2 and lists their native names.
+- `skipped` explains what stays. Mail the user corrected, pinned, marked done or moved (`not_filed_by_mailtriage`) is never refiled; do not try to move it. `explicit_target`: an explicit move request is pending; if its category was removed, `correct --category NEW` replaces it. `target_unusable`: the new category's folder is not usable yet; it may not exist yet (a live pass creates it, so in `dry_run` such mail always shows here), or it is paused or awaiting `filing adopt`; a marked message waits for it. `retired_frozen`: the mail sits in a retired folder mailtriage no longer watches.
+- `filing status` reports `refile_marked` and `refile_candidates`; `filing log` shows `refile_marked`, `refile_cleared` and `refile_cancelled` events, and `moved` events with `"reason": "refile"`.

@@ -41,8 +41,8 @@ const NOW: &str = "2026-10-04T12:00:00+00:00";
 fn migration_reaches_v5_and_is_idempotent() {
     let d = tempfile::tempdir().unwrap();
     let p = d.path().join("db");
-    assert_eq!(Store::open(&p).unwrap().schema_version().unwrap(), 5);
-    assert_eq!(Store::open(&p).unwrap().schema_version().unwrap(), 5);
+    assert_eq!(Store::open(&p).unwrap().schema_version().unwrap(), 6);
+    assert_eq!(Store::open(&p).unwrap().schema_version().unwrap(), 6);
 }
 
 #[test]
@@ -362,7 +362,7 @@ fn newer_schema_is_rejected() {
     drop(Store::open(&p).unwrap());
     rusqlite::Connection::open(&p)
         .unwrap()
-        .pragma_update(None, "user_version", 6)
+        .pragma_update(None, "user_version", 7)
         .unwrap();
     assert!(Store::open(&p).is_err());
 }
@@ -960,7 +960,7 @@ PRAGMA user_version=2;",
 }
 
 fn assert_v2_mail_kept(s: &Store) {
-    assert_eq!(s.schema_version().unwrap(), 5);
+    assert_eq!(s.schema_version().unwrap(), 6);
     let r = s.record("work", "msg_1").unwrap().unwrap();
     assert_eq!(r.envelope["subject"], "Hello");
     assert_eq!(r.overrides["urgency"], "high");

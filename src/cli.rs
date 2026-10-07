@@ -6,7 +6,8 @@ use mailtriage::{
     prompt::{self, Prompter},
     secrets::KeyStore,
     service::{
-        is_config_change, Backfill, ErrorKind, ListOptions, RetryTarget, Service, ServiceError,
+        is_config_change, Backfill, ErrorKind, ListOptions, RefileOptions, RetryTarget, Service,
+        ServiceError,
     },
     setup,
     system_service::{self, Context},
@@ -311,6 +312,8 @@ enum FilingCommand {
     Plan(PlanArg),
     /// Make existing inbox mail eligible for filing once.
     Backfill(BackfillArg),
+    /// Move filed mail whose category changed into its new folder.
+    Refile(RefileArg),
     /// Keep a message in its source folder.
     Pin(IdArg),
     /// Let automatic filing apply to a pinned message again, once.
@@ -373,6 +376,24 @@ struct BackfillArg {
     #[arg(long)]
     all: bool,
     /// Make the matched mail eligible (requires filing mode live).
+    #[arg(long)]
+    apply: bool,
+}
+
+#[derive(Args)]
+struct RefileArg {
+    #[arg(long)]
+    account: String,
+    /// Only messages whose new category is ID.
+    #[arg(long)]
+    category: Option<String>,
+    /// Only messages in this folder (its server name, or its configured name).
+    #[arg(long)]
+    folder: Option<String>,
+    /// Candidates to list (the whole set is always counted and marked).
+    #[arg(long, default_value_t = 50, value_parser = parse_limit)]
+    limit: usize,
+    /// Mark the matching mail; the next passes move it (requires filing mode live).
     #[arg(long)]
     apply: bool,
 }
@@ -701,6 +722,18 @@ fn filing(config: &Path, command: &FilingCommand) -> Result<Value, CliError> {
                 None => Backfill::All,
             };
             service.filing_backfill(&arg.account, scope, arg.apply)
+        }
+        FilingCommand::Refile(arg) => {
+            let opts = RefileOptions {
+                category: arg.category.clone(),
+                folder: arg.folder.clone(),
+                limit: arg.limit,
+            };
+            if arg.apply {
+                service.filing_refile_apply(&arg.account, opts)
+            } else {
+                service.filing_refile(&arg.account, opts)
+            }
         }
         FilingCommand::Pin(arg) => service.filing_pin(&arg.account, &arg.id),
         FilingCommand::Unpin(arg) => service.filing_unpin(&arg.account, &arg.id),

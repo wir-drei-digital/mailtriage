@@ -6,6 +6,7 @@ pub mod inputs;
 pub mod observe;
 pub mod planner;
 pub mod recover;
+pub mod refile;
 pub mod store;
 pub mod transitions;
 pub mod types;

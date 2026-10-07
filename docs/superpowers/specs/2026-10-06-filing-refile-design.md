@@ -1,7 +1,7 @@
 # Refiling filed mail after category changes
 
 Date: 2026-10-06
-Status: Design approved in conversation; written spec revised after three Codex review rounds.
+Status: Implemented (plan: docs/superpowers/plans/2026-10-06-filing-refile.md). Design approved in conversation; written spec revised after three Codex review rounds.
 Builds on: [IMAP category filing](2026-10-04-imap-category-filing-design.md) and [guided setup](2026-10-05-guided-setup-design.md).
 
 ## Goal

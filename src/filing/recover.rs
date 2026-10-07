@@ -10,7 +10,10 @@ use super::apply::{
 use super::arrivals::in_race_window;
 use super::observe::FolderMap;
 use super::planner::{CategoryFolder, Locator};
-use super::{FilingSummary, FilingWrite, Intent, IntentPatch, LocationState, PassContext};
+use super::refile;
+use super::{
+    FilingSummary, FilingWrite, Intent, IntentPatch, LocationState, PassContext, Placement,
+};
 use crate::domain::{FilingMode, SourceEnvelope};
 use crate::store::{now, Store};
 use anyhow::{anyhow, Result};
@@ -572,6 +575,12 @@ fn retry_or_supersede(
     if p.desired_rev != intent.desired_rev || p.blocked_reason.is_some() {
         return store.update_intent(intent.id, "superseded", IntentPatch::default(), &ctx.now);
     }
+    // Refile spec "Intents": before every retry a refile intent is checked again.
+    if intent.consumes_refile && map.caps.is_some() {
+        if let Some(reason) = refile::intents::recheck(store, ctx, map, intent, &from)? {
+            return refile::intents::cancel(store, ctx, intent, reason);
+        }
+    }
     if intent.attempts >= ctx.max_attempts {
         return block(
             store,
@@ -684,12 +693,10 @@ fn writable(
             .is_some_and(|r| r.state == "ok"))
 }
 
-/// Spec "Placement transitions", Move applied: home becomes the target
-/// occurrence, `filed_by = mailtriage`; the desired fields are cleared (with a
-/// revision bump) only while the intent's revision is current, so a newer
-/// request is never consumed. In the same transaction the intent is
-/// `applied`, event `moved` is recorded, and arrivals of the intent or at the
-/// new home resolve as `own_move`.
+/// Spec "Placement transitions", Move applied: the placement changes as
+/// `apply_move` says; in the same transaction the intent is `applied`, event
+/// `moved` is recorded (with `"reason": "refile"` for a refile move), and
+/// arrivals of the intent or at the new home resolve as `own_move`.
 pub(crate) fn mark_move_applied(
     store: &mut Store,
     ctx: &PassContext,
@@ -697,21 +704,24 @@ pub(crate) fn mark_move_applied(
     home: (String, u64, u64),
     _summary: &mut FilingSummary,
 ) -> Result<()> {
-    let (folder, epoch, uid) = home;
+    let (folder, epoch, uid) = &home;
     let arrivals: Vec<i64> = store
-        .arrivals_at(ctx.account, &folder, epoch, 0)?
+        .arrivals_at(ctx.account, folder, *epoch, 0)?
         .into_iter()
         .filter(|a| a.state == "pending")
         .filter(|a| {
-            a.intent_id == Some(intent.id) || (a.uid == uid && a.message_id == intent.message_id)
+            a.intent_id == Some(intent.id) || (a.uid == *uid && a.message_id == intent.message_id)
         })
         .map(|a| a.id)
         .collect();
     let mut writes = vec![close(intent.id, "applied", None)];
-    let detail = json!({"intent_id": intent.id, "from": intent.folder});
+    let mut detail = json!({"intent_id": intent.id, "from": intent.folder});
+    if intent.consumes_refile {
+        detail["reason"] = json!("refile");
+    }
     writes.push(event(
         Some(&intent.message_id),
-        Some(&folder),
+        Some(folder),
         "moved",
         detail,
     ));
@@ -720,24 +730,178 @@ pub(crate) fn mark_move_applied(
         state: "resolved",
         kind: Some("own_move"),
     }));
-    let apply_home = |p: &mut super::Placement| {
-        p.home_folder = Some(folder.clone());
-        p.home_epoch = Some(epoch);
-        p.home_uid = Some(uid);
-        p.location_state = LocationState::Known;
-        p.absent_since = None;
-        p.filed_at = Some(ctx.now.clone());
-        p.filed_by = Some("mailtriage".into());
-        if intent.desired_rev == p.desired_rev {
-            let clear_target = p.desired_target.take().is_some();
-            let clear_eligible = intent.consumes_eligible && p.eligible_once;
-            if clear_eligible {
-                p.eligible_once = false;
-            }
-            if clear_target || clear_eligible {
-                p.desired_rev += 1;
-            }
+    commit_with_placement(
+        store,
+        ctx,
+        &intent.message_id,
+        |p| apply_move(p, intent, &home, &ctx.now),
+        &writes,
+    )
+}
+
+/// Move applied, on the placement alone: the home becomes the target
+/// occurrence, `filed_by = mailtriage`; the desired fields the intent
+/// consumes (`desired_target`, and `eligible_once` or `refile_once` when
+/// the intent consumes them) are cleared with a revision bump only while the
+/// intent's revision is current, so a newer request is never consumed.
+/// Refile spec "Filed home": the new home becomes the filed home only when it
+/// is the COPYUID destination this intent recorded, in its target epoch.
+fn apply_move(p: &mut Placement, intent: &Intent, home: &(String, u64, u64), now: &str) {
+    let (folder, epoch, uid) = home;
+    p.home_folder = Some(folder.clone());
+    p.home_epoch = Some(*epoch);
+    p.home_uid = Some(*uid);
+    p.location_state = LocationState::Known;
+    p.absent_since = None;
+    p.filed_at = Some(now.to_string());
+    p.filed_by = Some("mailtriage".into());
+    let proven = intent.target.as_deref() == Some(folder.as_str())
+        && intent.target_epoch == Some(*epoch)
+        && intent.target_uid == Some(*uid);
+    p.filed_home_folder = proven.then(|| folder.clone());
+    p.filed_home_epoch = proven.then_some(*epoch);
+    p.filed_home_uid = proven.then_some(*uid);
+    if intent.desired_rev == p.desired_rev {
+        let clear_target = p.desired_target.take().is_some();
+        let clear_eligible = intent.consumes_eligible && p.eligible_once;
+        if clear_eligible {
+            p.eligible_once = false;
         }
-    };
-    commit_with_placement(store, ctx, &intent.message_id, apply_home, &writes)
+        let clear_refile = intent.consumes_refile && p.refile_once;
+        if clear_refile {
+            p.refile_once = false;
+        }
+        if clear_target || clear_eligible || clear_refile {
+            p.desired_rev += 1;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_move;
+    use crate::filing::{Intent, LocationState, Placement};
+
+    /// Marked, at its filed home in Other.
+    fn placement() -> Placement {
+        Placement {
+            account: "work".into(),
+            message_id: "m".into(),
+            source_folder: "INBOX".into(),
+            home_folder: Some("Other".into()),
+            home_epoch: Some(4),
+            home_uid: Some(9),
+            location_state: LocationState::Known,
+            absent_since: None,
+            desired_target: None,
+            pinned: false,
+            eligible_once: false,
+            desired_rev: 3,
+            filed_at: Some("t0".into()),
+            filed_by: Some("mailtriage".into()),
+            flag_attempted_at: None,
+            flagged_at: None,
+            done_inferred: false,
+            blocked_reason: None,
+            refile_once: true,
+            filed_home_folder: Some("Other".into()),
+            filed_home_epoch: Some(4),
+            filed_home_uid: Some(9),
+        }
+    }
+
+    /// A refile move into Updates claimed in epoch 7.
+    fn intent(target_uid: Option<u64>, desired_rev: i64) -> Intent {
+        Intent {
+            id: 1,
+            account: "work".into(),
+            message_id: "m".into(),
+            kind: "move".into(),
+            folder: "Other".into(),
+            epoch: 4,
+            uid: 9,
+            target: Some("Updates".into()),
+            target_epoch: Some(7),
+            target_uid_next: Some(20),
+            target_uid,
+            desired_rev,
+            consumes_eligible: false,
+            batch: None,
+            state: "sent".into(),
+            attempts: 0,
+            next_after: None,
+            dispatched_at: None,
+            created_at: "t".into(),
+            updated_at: "t".into(),
+            error: None,
+            race_until_uid: None,
+            consumes_refile: true,
+        }
+    }
+
+    fn at(epoch: u64, uid: u64) -> (String, u64, u64) {
+        ("Updates".into(), epoch, uid)
+    }
+
+    #[test]
+    fn a_copyuid_proven_refile_move_grants_the_filed_home_and_consumes_the_mark() {
+        let mut p = placement();
+        apply_move(&mut p, &intent(Some(21), 3), &at(7, 21), "t1");
+        assert_eq!(
+            (p.home_folder.as_deref(), p.home_epoch, p.home_uid),
+            (Some("Updates"), Some(7), Some(21))
+        );
+        assert_eq!(
+            (
+                p.filed_home_folder.as_deref(),
+                p.filed_home_epoch,
+                p.filed_home_uid
+            ),
+            (Some("Updates"), Some(7), Some(21))
+        );
+        assert!(!p.refile_once);
+        assert_eq!(p.desired_rev, 4);
+        assert_eq!(
+            (p.filed_at.as_deref(), p.filed_by.as_deref()),
+            (Some("t1"), Some("mailtriage"))
+        );
+    }
+
+    #[test]
+    fn without_a_matching_copyuid_there_is_no_filed_home() {
+        // No COPYUID; another UID found by fingerprint; another target epoch.
+        for (target_uid, home) in [
+            (None, at(7, 21)),
+            (Some(22), at(7, 21)),
+            (Some(21), at(8, 21)),
+        ] {
+            let mut p = placement();
+            apply_move(&mut p, &intent(target_uid, 3), &home, "t1");
+            assert_eq!(p.filed_home_folder, None, "{target_uid:?} {home:?}");
+            assert!(!p.refile_once, "the mark is consumed either way");
+        }
+    }
+
+    #[test]
+    fn a_stale_revision_keeps_the_mark_and_still_grants_the_proof() {
+        let mut p = placement();
+        apply_move(&mut p, &intent(Some(21), 2), &at(7, 21), "t1");
+        assert!(p.refile_once);
+        assert_eq!(p.desired_rev, 3);
+        assert_eq!(
+            p.filed_home_uid,
+            Some(21),
+            "the filed home follows the proof, not the revision"
+        );
+    }
+
+    #[test]
+    fn a_move_that_is_no_refile_keeps_the_mark() {
+        let mut i = intent(Some(21), 3);
+        i.consumes_refile = false;
+        let mut p = placement();
+        apply_move(&mut p, &i, &at(7, 21), "t1");
+        assert!(p.refile_once);
+        assert_eq!(p.desired_rev, 3);
+    }
 }
