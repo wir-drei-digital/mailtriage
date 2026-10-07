@@ -80,13 +80,18 @@ impl Env {
 
     /// A marked service file for `work` running `exe`.
     fn service_file(&self, exe: &Path) {
+        self.service_file_for("work", exe);
+    }
+
+    /// A marked service file for `account` running `exe`.
+    fn service_file_for(&self, account: &str, exe: &Path) {
         let manager = if cfg!(target_os = "macos") {
             Manager::Launchd
         } else {
             Manager::Systemd
         };
         let unit = Unit {
-            account: "work".into(),
+            account: account.into(),
             exe: exe.to_path_buf(),
             config: self.root.join("mailtriage.json"),
             interval_seconds: 60,
@@ -98,11 +103,11 @@ impl Env {
         fs::create_dir_all(&dir).unwrap();
         let (name, text) = match manager {
             Manager::Launchd => (
-                "digital.wirdrei.mailtriage.work.plist".to_owned(),
+                format!("digital.wirdrei.mailtriage.{account}.plist"),
                 system_service::plist(&unit),
             ),
             Manager::Systemd => (
-                "mailtriage-work.service".to_owned(),
+                format!("mailtriage-{account}.service"),
                 system_service::systemd_unit(&unit),
             ),
         };
@@ -207,6 +212,90 @@ fn doctor_adds_readiness_only_auto_needs() {
     assert_eq!(d["update"]["ready"], true);
     assert_eq!(d["update"]["mode"], "notify");
     assert!(env.server.requests().is_empty());
+}
+
+/// A tray script next to `exe` printing `mailtriage-tray VERSION`; each
+/// `--version` run appends a line to `probes` next to it.
+fn tray_next_to(exe: &Path, version: &str) -> PathBuf {
+    let dir = exe.parent().unwrap();
+    write_tool(
+        dir,
+        "mailtriage-tray",
+        &format!(
+            "#!/bin/sh\necho probe >> '{}'\necho 'mailtriage-tray {version}'\n",
+            dir.join("probes").display()
+        ),
+    );
+    dir.join("mailtriage-tray")
+}
+
+/// The tray next to the service's executable (a sandbox script, never
+/// `target/debug/mailtriage-tray`): its `--version`, and `available` from
+/// the cached release, which says nothing when an older version recorded
+/// it (no `mailtriage-tray` key). `doctor` shares the block.
+#[test]
+fn status_and_doctor_describe_the_tray_next_to_the_services_executable() {
+    let env = Env::new();
+    let exe = env.executable("svc/bin", "0.0.1");
+    env.service_file(&exe);
+    let u = env.status();
+    assert_eq!(u.get("tray"), None, "no tray file: {u}");
+
+    let tray = tray_next_to(&exe, "0.0.1");
+    let release = |archives: Value| json!({"version":"9.9.9","release_url":"u","published_at":null,"archives":archives,"sums":null});
+    let cache = |archives: Value| json!({"schema_version": 1, "release": release(archives), "checked_at": "2026-11-03T07:00:00Z"});
+    env.write_cache(&cache(json!({"mailtriage": null, "mailtriage-tray": null})));
+    let expected = json!({"path": tray, "installed": "0.0.1", "available": true});
+    assert_eq!(env.status()["tray"], expected);
+    assert_eq!(env.doctor()["update"]["tray"], expected);
+
+    env.write_cache(&cache(json!({"mailtriage": null})));
+    assert_eq!(
+        env.status()["tray"],
+        json!({"path": tray, "installed": "0.0.1", "available": false})
+    );
+    env.write_cache(&json!({"schema_version": 1}));
+    assert_eq!(env.status()["tray"]["available"], false);
+    tray_next_to(&exe, "9.9.9");
+    env.write_cache(&cache(json!({"mailtriage": null, "mailtriage-tray": null})));
+    assert_eq!(
+        env.status()["tray"],
+        json!({"path": tray, "installed": "9.9.9", "available": false})
+    );
+    write_tool(
+        exe.parent().unwrap(),
+        "mailtriage-tray",
+        "#!/bin/sh\nexit 1\n",
+    );
+    assert_eq!(
+        env.status()["tray"],
+        json!({"path": tray, "installed": null, "available": false})
+    );
+    assert!(env.server.requests().is_empty());
+}
+
+/// R11-8: `service status` for every account probes a tray they share once.
+#[test]
+fn every_accounts_status_probes_a_shared_tray_once() {
+    let env = Env::new();
+    let path = env.root.join("mailtriage.json");
+    let mut config: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    config["accounts"]["home"] = config["accounts"]["work"].clone();
+    fs::write(&path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
+    let exe = env.executable("svc/bin", "0.0.1");
+    env.service_file_for("work", &exe);
+    env.service_file_for("home", &exe);
+    let tray = tray_next_to(&exe, "0.0.1");
+    let (code, v, stderr) = run(env.command().args(["service", "status", "--json"]));
+    assert_eq!(code, Some(0), "{v} {stderr}");
+    let services = v["services"].as_array().unwrap();
+    assert_eq!(services.len(), 2, "{v}");
+    for s in services {
+        assert_eq!(s["update"]["tray"]["path"], json!(tray), "{s}");
+        assert_eq!(s["update"]["tray"]["installed"], "0.0.1", "{s}");
+    }
+    let probes = fs::read_to_string(exe.parent().unwrap().join("probes")).unwrap();
+    assert_eq!(probes.lines().count(), 1, "{probes}");
 }
 
 /// Phase B: the version that ran the last pass.
