@@ -13,12 +13,14 @@ struct Env {
 }
 
 fn env() -> Option<Env> {
-    Some(Env {
+    let e = Env {
         himalaya: std::env::var("MT_E2E_HIMALAYA").ok()?,
         port: std::env::var("MT_E2E_PORT").ok()?,
         layout: std::env::var("MT_E2E_LAYOUT").ok()?,
         dir: tempfile::tempdir().unwrap(),
-    })
+    };
+    std::fs::create_dir(e.dir.path().join("home")).unwrap();
+    Some(e)
 }
 
 /// The simulated mail client (tests/e2e/imap_client.py); it must succeed.
@@ -39,7 +41,9 @@ fn imap(e: &Env, args: &[&str]) -> Value {
 }
 
 /// The real mailtriage binary with `--json`: its exit code and JSON output,
-/// echoed for the failure report.
+/// echoed for the failure report. It runs with a HOME and XDG_CACHE_HOME in
+/// the test's directory, as `tests/update_support` sandboxes commands, so
+/// `doctor` never reads this user's update cache.
 fn mt_status(e: &Env, args: &[&str]) -> (Option<i32>, Value) {
     let mut full = vec!["--config", "mailtriage.json"];
     full.extend_from_slice(args);
@@ -47,7 +51,11 @@ fn mt_status(e: &Env, args: &[&str]) -> (Option<i32>, Value) {
     let out = Command::new(env!("CARGO_BIN_EXE_mailtriage"))
         .current_dir(e.dir.path())
         .args(&full)
+        .env("HOME", e.dir.path().join("home"))
         .env("XDG_CACHE_HOME", e.dir.path())
+        .env_remove("MAILTRIAGE_CONFIG")
+        .env_remove("MAILTRIAGE_UPDATE_TEST_HOOK")
+        .env_remove("MAILTRIAGE_UPDATE_TEST_LOCK_WAIT_MS")
         .output()
         .unwrap();
     eprintln!(
