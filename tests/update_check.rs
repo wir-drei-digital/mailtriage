@@ -61,6 +61,33 @@ fn the_highest_stable_release_may_sit_on_page_two() {
     assert_eq!(cache.read().release.unwrap().version, "0.10.0");
 }
 
+/// Ruling (a): a check records the archive of every component this version
+/// knows, `null` for one the release lacks, so a missing key can only mean
+/// an older version made the check.
+#[test]
+fn a_check_records_every_components_archive() {
+    let (server, net, cache, dir) = setup();
+    let platform = update_support::platform();
+    let cli = format!("mailtriage-v0.3.0-{platform}.tar.gz");
+    let tray = format!("mailtriage-tray-v0.3.0-{platform}.tar.gz");
+    let archives = || {
+        let text = std::fs::read_to_string(dir.path().join("cache/update.json")).unwrap();
+        serde_json::from_str::<Value>(&text).unwrap()["release"]["archives"].clone()
+    };
+    server.list(&[server.release_json("0.3.0", &[(&cli, 10), ("SHA256SUMS", 5)])]);
+    check::refresh(&net, &cache, Reservation::Required).unwrap();
+    let found = archives();
+    assert_eq!(found["mailtriage"]["name"], cli.as_str(), "{found}");
+    assert_eq!(found.get("mailtriage-tray"), Some(&Value::Null), "{found}");
+
+    server.list(&[server.release_json("0.3.0", &[(&cli, 10), (&tray, 20), ("SHA256SUMS", 5)])]);
+    check::refresh(&net, &cache, Reservation::Required).unwrap();
+    assert_eq!(
+        archives()["mailtriage-tray"],
+        json!({"name": tray, "url": server.url(&format!("/download/v0.3.0/{tray}")), "size": 20})
+    );
+}
+
 #[test]
 fn a_failing_page_fails_the_whole_check() {
     let (server, net, cache, _dir) = setup();

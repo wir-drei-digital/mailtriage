@@ -10,6 +10,9 @@ use crate::{
         self, label, parse_launchctl_print, parse_systemctl_show, tool, unit_name, Context, Manager,
     },
 };
+// The updater's decoders: they invert exactly what the writers write and
+// fail closed (`None`) on anything else.
+use crate::update::service_files::{plist_arguments, unit_arguments};
 use anyhow::Result;
 use fs2::FileExt;
 use serde_json::{json, Value};
@@ -62,29 +65,6 @@ pub fn watch_args(args: &[String]) -> Option<WatchArgs> {
     })
 }
 
-/// The `ProgramArguments` strings of a plist, XML entities decoded.
-pub fn plist_arguments(text: &str) -> Option<Vec<String>> {
-    let rest = &text[text.find("<key>ProgramArguments</key>")?..];
-    let rest = &rest[rest.find("<array>")? + "<array>".len()..];
-    let array = &rest[..rest.find("</array>")?];
-    let mut args = vec![];
-    let mut cursor = array;
-    while let Some(open) = cursor.find("<string>") {
-        let after = &cursor[open + "<string>".len()..];
-        let close = after.find("</string>")?;
-        args.push(
-            after[..close]
-                .replace("&lt;", "<")
-                .replace("&gt;", ">")
-                .replace("&quot;", "\"")
-                .replace("&apos;", "'")
-                .replace("&amp;", "&"),
-        );
-        cursor = &after[close + "</string>".len()..];
-    }
-    Some(args)
-}
-
 /// Splits systemd command-line words: a bare word holds no quote, backslash
 /// or space; a quoted word ends at an unescaped `"` and `\x` stands for `x`.
 fn split_words(line: &str) -> Option<Vec<String>> {
@@ -122,18 +102,6 @@ fn split_words(line: &str) -> Option<Vec<String>> {
         }
         words.push(word);
     }
-}
-
-/// The words of a unit's `ExecStart=`: the inverse of `systemd_arg`,
-/// quoting undone and `%%`/`$$` back to `%`/`$`.
-pub fn unit_arguments(text: &str) -> Option<Vec<String>> {
-    let line = text.lines().find_map(|l| l.strip_prefix("ExecStart="))?;
-    Some(
-        split_words(line)?
-            .into_iter()
-            .map(|w| w.replace("%%", "%").replace("$$", "$"))
-            .collect(),
-    )
 }
 
 /// The `arguments = { … }` block of `launchctl print`: one argument per
@@ -755,6 +723,15 @@ mod tests {
         let args = watch_args(&expected).unwrap();
         assert_eq!(args.config, unit.config);
         assert_eq!(args.interval_seconds, Some(90));
+        // What the writers never write fails closed: `None`, so `inspect`
+        // reports the file's config as unknown rather than a wrong one.
+        assert_eq!(unit_arguments("ExecStart=/a%b watch\n"), None);
+        assert_eq!(unit_arguments("ExecStart=/a/'b' watch\n"), None);
+        for value in ["/a&bogus;b", "/a<b", "/a&amp"] {
+            let text =
+                format!("<key>ProgramArguments</key><array><string>{value}</string></array>");
+            assert_eq!(plist_arguments(&text), None, "{value}");
+        }
     }
 
     #[test]

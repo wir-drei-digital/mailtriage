@@ -34,12 +34,85 @@ pub struct Component {
 /// The `mailtriage` CLI.
 pub const CLI: Component = Component { name: "mailtriage" };
 
+/// The tray app, installed next to the CLI when its file is there.
+pub const TRAY: Component = Component {
+    name: "mailtriage-tray",
+};
+
 /// Every component a release check records archives for.
-pub const COMPONENTS: &[Component] = &[CLI];
+pub const COMPONENTS: &[Component] = &[CLI, TRAY];
 
 impl Component {
     /// `NAME-vX.Y.Z-PLATFORM.tar.gz`.
     pub fn archive_name(self, version: &semver::Version, platform: &str) -> String {
         format!("{}-v{version}-{platform}.tar.gz", self.name)
+    }
+
+    /// Why release `version` cannot be installed for this component: it has
+    /// no archive for `platform`. The tray says which archive is missing.
+    pub fn missing_archive(self, version: &semver::Version, platform: &str) -> String {
+        if self == TRAY {
+            format!("release v{version} has no tray archive for {platform}")
+        } else {
+            format!("release v{version} has no {platform} archive")
+        }
+    }
+}
+
+/// The tray's installation path: `mailtriage-tray` in the directory of
+/// the CLI's canonical path.
+pub fn tray_path(cli: &std::path::Path) -> std::path::PathBuf {
+    cli.with_file_name(TRAY.name)
+}
+
+/// `tray_path(cli)` when it is a regular file (not a link, so the path is
+/// canonical too): only then is there a tray to describe or update.
+pub fn installed_tray(cli: &std::path::Path) -> Option<std::path::PathBuf> {
+    let path = tray_path(cli);
+    std::fs::symlink_metadata(&path)
+        .is_ok_and(|meta| meta.is_file())
+        .then_some(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn the_tray_is_the_regular_file_next_to_the_cli() {
+        let dir = tempfile::tempdir().unwrap();
+        let cli = dir.path().join("mailtriage");
+        assert_eq!(tray_path(&cli), dir.path().join("mailtriage-tray"));
+        assert_eq!(installed_tray(&cli), None);
+        fs::create_dir(dir.path().join("mailtriage-tray")).unwrap();
+        assert_eq!(installed_tray(&cli), None, "a directory");
+        fs::remove_dir(dir.path().join("mailtriage-tray")).unwrap();
+        fs::write(dir.path().join("elsewhere"), "").unwrap();
+        std::os::unix::fs::symlink(
+            dir.path().join("elsewhere"),
+            dir.path().join("mailtriage-tray"),
+        )
+        .unwrap();
+        assert_eq!(installed_tray(&cli), None, "a link");
+        fs::remove_file(dir.path().join("mailtriage-tray")).unwrap();
+        fs::write(dir.path().join("mailtriage-tray"), "").unwrap();
+        assert_eq!(
+            installed_tray(&cli),
+            Some(dir.path().join("mailtriage-tray"))
+        );
+        let v = semver::Version::new(9, 9, 9);
+        assert_eq!(
+            TRAY.archive_name(&v, "linux-amd64"),
+            "mailtriage-tray-v9.9.9-linux-amd64.tar.gz"
+        );
+        assert_eq!(
+            TRAY.missing_archive(&v, "linux-amd64"),
+            "release v9.9.9 has no tray archive for linux-amd64"
+        );
+        assert_eq!(
+            CLI.missing_archive(&v, "linux-amd64"),
+            "release v9.9.9 has no linux-amd64 archive"
+        );
     }
 }

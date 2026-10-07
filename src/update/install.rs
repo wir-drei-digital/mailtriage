@@ -216,7 +216,7 @@ pub fn install(
         .get(job.component.name)
         .cloned()
         .flatten()
-        .ok_or_else(|| anyhow!("release v{candidate} has no {platform_name} archive"))?;
+        .ok_or_else(|| anyhow!(job.component.missing_archive(&candidate, platform_name)))?;
     let sums = job
         .release
         .sums

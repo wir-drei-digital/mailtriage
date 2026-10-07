@@ -19,6 +19,16 @@ pub struct CachedRelease {
     pub sums: Option<Asset>,
 }
 
+impl CachedRelease {
+    /// Whether the check that recorded this release knew `component`. A
+    /// check records an entry for every component it knows (`None` when
+    /// the release lacks its archive), so a missing key means an older
+    /// version made the check and says nothing about the release.
+    pub fn knows(&self, component: Component) -> bool {
+        self.archives.contains_key(component.name)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Asset {
     pub name: String,
@@ -119,7 +129,7 @@ pub fn expected_sha256(sums: &str, name: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::update::CLI;
+    use crate::update::{CLI, COMPONENTS, TRAY};
 
     fn release(tag: &str, draft: bool, prerelease: bool, assets: &[&str]) -> ReleaseJson {
         ReleaseJson {
@@ -217,6 +227,46 @@ mod tests {
         );
         let unsupported = select(&[bare], None, &[CLI]).unwrap();
         assert_eq!(unsupported.archives["mailtriage"], None);
+    }
+
+    /// Ruling (a): every known component gets an entry, `None` when the
+    /// release has no archive for it; a key no check wrote is unknown.
+    #[test]
+    fn every_component_gets_an_entry() {
+        let both = release(
+            "v1.0.0",
+            false,
+            false,
+            &[
+                "mailtriage-v1.0.0-linux-arm64.tar.gz",
+                "mailtriage-tray-v1.0.0-linux-arm64.tar.gz",
+                "SHA256SUMS",
+            ],
+        );
+        let chosen = select(&[both], Some("linux-arm64"), COMPONENTS).unwrap();
+        assert_eq!(
+            chosen.archives["mailtriage-tray"].as_ref().unwrap().name,
+            "mailtriage-tray-v1.0.0-linux-arm64.tar.gz"
+        );
+        assert_eq!(
+            chosen.archives["mailtriage"].as_ref().unwrap().name,
+            "mailtriage-v1.0.0-linux-arm64.tar.gz"
+        );
+        assert!(chosen.knows(TRAY) && chosen.knows(CLI));
+        let cli_only = release(
+            "v1.0.0",
+            false,
+            false,
+            &["mailtriage-v1.0.0-linux-arm64.tar.gz", "SHA256SUMS"],
+        );
+        let chosen = select(&[cli_only], Some("linux-arm64"), COMPONENTS).unwrap();
+        assert_eq!(chosen.archives.get("mailtriage-tray"), Some(&None));
+        assert!(chosen.knows(TRAY));
+        let older = CachedRelease {
+            archives: [("mailtriage".to_owned(), None)].into_iter().collect(),
+            ..chosen
+        };
+        assert!(older.knows(CLI) && !older.knows(TRAY));
     }
 
     #[test]
