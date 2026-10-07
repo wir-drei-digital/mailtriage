@@ -504,8 +504,11 @@ impl Window {
 
     /// Why Apply is disabled; `None` when it is enabled.
     pub fn apply_blocked(&self) -> Option<&'static str> {
-        if self.loaded.is_none() || self.loading() {
+        if self.loading() {
             return Some("Wait until loading finishes");
+        }
+        if self.loaded.is_none() {
+            return Some(words::NOT_LOADED);
         }
         if self.running.is_some() || self.closing {
             return Some("Wait until the current action finishes");
@@ -1846,7 +1849,13 @@ mod tests {
     #[test]
     fn apply_explains_why_it_is_disabled() {
         let mut w = Window::new(Options::default(), None);
+        w.update(Msg::Start, t0());
         assert_eq!(w.apply_blocked(), Some("Wait until loading finishes"));
+        // Nothing loaded and no load running: no waiting helps.
+        assert_eq!(
+            Window::failed("mailtriage not found".into()).apply_blocked(),
+            Some(words::NOT_LOADED)
+        );
         w = opened();
         assert_eq!(w.apply_blocked(), Some("No changes to apply"));
         rename_news(&mut w, "Newsletters");
@@ -1914,6 +1923,8 @@ mod tests {
                 details: Some(details())
             })
         );
+        assert!(w.read_only());
+        assert_eq!(w.apply_blocked(), Some(words::NOT_LOADED));
     }
 
     fn preview() -> RefilePreview {

@@ -13,6 +13,10 @@ pub const CATEGORIES_CHANGED: &str = "These categories were changed somewhere el
 pub const BUSY_RETRYING: &str = "mailtriage is busy; trying again…";
 pub const BUSY: &str = "mailtriage is busy.";
 pub const RECHECKING: &str = "The configuration changed while saving. Checking your changes again.";
+/// Why the form and Apply are off when nothing is loaded and no load runs
+/// (mailtriage missing, not set up, or the first load failed).
+pub const NOT_LOADED: &str =
+    "The categories could not be loaded; the message at the bottom says why";
 
 /// `n messages`, or `1 message`.
 pub fn messages(n: u64) -> String {

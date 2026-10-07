@@ -284,7 +284,7 @@ fn dry_run_shows_the_preview_only() {
 #[test]
 fn a_window_without_mailtriage_explains_and_exits_3() {
     let exit = Arc::new(AtomicI32::new(0));
-    let h = Harness::builder()
+    let mut h = Harness::builder()
         .with_size(egui::vec2(720.0, 520.0))
         .build_eframe(|cc| {
             Editor::new(
@@ -295,6 +295,103 @@ fn a_window_without_mailtriage_explains_and_exits_3() {
         });
     assert!(h.query_by_label_contains("mailtriage not found").is_some());
     assert_eq!(exit.load(std::sync::atomic::Ordering::SeqCst), 3);
+    // No load runs, so the disabled controls do not ask to wait for one.
+    for label in ["Add", "Apply"] {
+        assert!(disabled(&h, label), "{label} is disabled");
+        assert!(
+            says_why(&mut h, label, words::NOT_LOADED),
+            "{label} says why"
+        );
+    }
+}
+
+/// A dialog's buttons sit at its right edge, the confirming one rightmost,
+/// and are created in that order, so Tab and screen readers meet the
+/// other choice first.
+#[test]
+fn dialogs_end_with_the_confirming_button_at_the_right() {
+    let fake = fake();
+    let drafts = tempfile::tempdir().unwrap();
+    let mut h = open(&fake, drafts.path());
+    rename_news(&mut h);
+    let check = |h: &Harness<Editor>, title: &str, confirm: &str| {
+        let title = h.get_by_label_contains(title).rect();
+        let cancel = h.get_by_label("Cancel").rect();
+        let confirm_rect = h.get_by_label(confirm).rect();
+        assert!(
+            cancel.max.x < confirm_rect.min.x,
+            "Cancel {cancel:?} is left of {confirm} {confirm_rect:?}"
+        );
+        // The dialog's content is 440 px wide, starting where its text does.
+        assert!(
+            (confirm_rect.max.x - (title.min.x + 440.0)).abs() <= 1.0,
+            "{confirm} {confirm_rect:?} ends at the right edge of the dialog that starts at {title:?}"
+        );
+        let labels: Vec<String> = h
+            .query_all_by(|n| n.label().is_some())
+            .filter_map(|n| n.accesskit_node().label())
+            .collect();
+        let at = |label: &str| labels.iter().position(|l| l == label).unwrap();
+        assert!(at("Cancel") < at(confirm), "{labels:#?}");
+    };
+    click(&mut h, "Apply");
+    check(&h, "Apply these changes", "Apply changes");
+    click(&mut h, "Cancel");
+    click(&mut h, "Promotions\nPromotions");
+    click(&mut h, "Remove category");
+    check(&h, "Remove Promotions?", "Remove");
+}
+
+/// "Show details" opens the exact command, its exit code and its output in a
+/// text box that screen readers announce as "Details", with Copy and Close.
+#[test]
+fn show_details_opens_the_command_in_a_labelled_box() {
+    let fake = fake();
+    let drafts = tempfile::tempdir().unwrap();
+    let mut h = open(&fake, drafts.path());
+    fake.fail(
+        "categories-validate",
+        2,
+        "invalid categories; require unique IDs, descriptions and exactly one catch-all",
+        None,
+    );
+    click(&mut h, "News\nNews");
+    type_into(&mut h, "What belongs here", "");
+    settle(&mut h, |h| shows(h, "Every category needs a name"));
+    click(&mut h, "Show details");
+    let text = h
+        .query_all_by_label("Details")
+        .find(|n| n.accesskit_node().role() == egui::accesskit::Role::MultilineTextInput)
+        .expect("a text box labelled Details");
+    let value = text.accesskit_node().value().unwrap_or_default();
+    assert!(
+        value.contains("categories validate --account daniel"),
+        "{value}"
+    );
+    assert!(value.contains("exit code: 2"), "{value}");
+    assert!(h.query_by_label("Copy").is_some());
+    click(&mut h, "Close");
+    assert!(h.query_by_label("Copy").is_none());
+}
+
+/// The refile panel's fixed room holds a whole preview, "Not moved"
+/// included, above the footer.
+#[test]
+fn the_refile_panel_shows_a_whole_preview() {
+    let fake = fake();
+    fake.respond_fixture("filing-refile", "refile-preview.json");
+    let drafts = tempfile::tempdir().unwrap();
+    let mut h = open(&fake, drafts.path());
+    click(&mut h, "Move filed mail…");
+    settle(&mut h, |h| shows(h, "Move all 38"));
+    let last = h.get_by_label("Not moved").rect();
+    // The footer's buttons sit 8 px below its top; the panel's content ends
+    // 8 px above that.
+    let footer_top = h.get_by_label("Move filed mail…").rect().min.y - 8.0;
+    assert!(
+        last.max.y <= footer_top - 8.0,
+        "\"Not moved\" {last:?} ends above the footer at {footer_top}"
+    );
 }
 
 /// The window after a rename, with the refile panel open: every kind of

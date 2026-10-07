@@ -14,9 +14,10 @@ use crate::{
 };
 use chrono::Utc;
 use eframe::egui::{
-    self, pos2, text::LayoutJob, Align, Button, CollapsingHeader, Color32, ComboBox, FontId, Frame,
-    Id, Key, KeyboardShortcut, Layout, Margin, Modal, Modifiers, Rect, RichText, ScrollArea,
-    Spinner, TextEdit, TextFormat, TextStyle, UiBuilder, ViewportCommand, WidgetInfo, WidgetType,
+    self, pos2, style::ScrollStyle, text::LayoutJob, Align, Button, CollapsingHeader, Color32,
+    ComboBox, FontId, Frame, Id, Key, KeyboardShortcut, Layout, Margin, Modal, Modifiers, Rect,
+    RichText, ScrollArea, Spinner, TextEdit, TextFormat, TextStyle, Theme, UiBuilder,
+    ViewportCommand, WidgetInfo, WidgetType,
 };
 use std::{
     fs::{self, File, OpenOptions},
@@ -93,6 +94,18 @@ pub fn style(ctx: &egui::Context) {
         style.spacing.menu_margin = Margin::same(8);
         style.spacing.indent = 16.0;
         style.spacing.icon_spacing = 8.0;
+        // Secondary text (a category's folder, notes, placeholders) at
+        // about 4:1 in light mode and 3.5:1 in dark mode instead of under
+        // 3:1, still lighter than the text itself.
+        style.visuals.weak_text_alpha = 0.75;
+    });
+    // Error messages at 6:1 contrast on the window in both modes; egui's
+    // pure red reaches 3.8:1 in light mode and 4.3:1 in dark mode.
+    ctx.style_mut_of(Theme::Light, |style| {
+        style.visuals.error_fg_color = Color32::from_rgb(0xb4, 0x1e, 0x1e);
+    });
+    ctx.style_mut_of(Theme::Dark, |style| {
+        style.visuals.error_fg_color = Color32::from_rgb(0xff, 0x6e, 0x6e);
     });
 }
 
@@ -283,6 +296,10 @@ impl Editor {
     fn read_only_reason(&self) -> &'static str {
         if self.model.running.is_some() || self.model.closing {
             WAIT_ACTION
+        } else if self.model.loaded.is_none() && !self.model.loading() {
+            // mailtriage missing, not set up, or the first load failed:
+            // no load is coming, so waiting would not help.
+            words::NOT_LOADED
         } else {
             WAIT_LOADING
         }
@@ -378,17 +395,36 @@ fn text_area(
 }
 
 /// The primary button: white text on a blue dark enough for it in both
-/// light and dark mode.
+/// light and dark mode. Disabled, it looks like every other disabled
+/// button: a dimmed blue still reads as clickable, and its text is faint.
 fn primary(ui: &mut egui::Ui, text: &str, enabled: bool) -> egui::Response {
+    if !enabled {
+        return ui.add_enabled(false, Button::new(text));
+    }
     let fill = if ui.visuals().dark_mode {
         Color32::from_rgb(0x2a, 0x6e, 0xd6)
     } else {
         Color32::from_rgb(0x1f, 0x5f, 0xc7)
     };
-    ui.add_enabled(
-        enabled,
-        Button::new(RichText::new(text).color(Color32::WHITE).strong()).fill(fill),
-    )
+    ui.add(Button::new(RichText::new(text).color(Color32::WHITE).strong()).fill(fill))
+}
+
+/// A dialog's buttons in one row at its right edge, created from left to
+/// right so Tab and screen readers meet them in the order shown; the
+/// confirming button comes last, rightmost. The row's width comes from the
+/// last pass; when it changes, egui draws the frame again at once.
+fn dialog_buttons(ui: &mut egui::Ui, buttons: impl FnOnce(&mut egui::Ui)) {
+    let id = ui.id().with("dialog-buttons");
+    let width = ui.ctx().data(|d| d.get_temp::<f32>(id)).unwrap_or(0.0);
+    ui.horizontal(|ui| {
+        ui.add_space((ui.available_width() - width).max(0.0));
+        let row = ui.horizontal(buttons).response.rect.width();
+        if (row - width).abs() > 0.5 {
+            ui.ctx().data_mut(|d| d.insert_temp(id, row));
+            ui.ctx()
+                .request_discard("the dialog's buttons changed width");
+        }
+    });
 }
 
 /// A panel's frame with margins on the 8 px grid.
@@ -453,11 +489,20 @@ impl Editor {
         let filing_on = self.model.filing_on();
         let weak = ui.visuals().weak_text_color();
         let strong = ui.visuals().text_color();
+        // The selected row's text takes the selection's own text colour:
+        // the plain text colour on the selection fill is 2.2:1 in dark mode.
+        let on_selection = ui.visuals().selection.stroke.color;
         ScrollArea::vertical()
             .max_height(ui.available_height() - 48.0)
             .show(ui, |ui| {
                 ui.with_layout(Layout::top_down_justified(Align::LEFT), |ui| {
                     for (i, c) in self.model.draft.iter().enumerate() {
+                        let selected = i == self.model.selected;
+                        let (strong, weak) = if selected {
+                            (on_selection, on_selection)
+                        } else {
+                            (strong, weak)
+                        };
                         // The name, then the mail folder and the default mark.
                         let mut second = vec![];
                         if filing_on {
@@ -483,16 +528,14 @@ impl Editor {
                                 TextFormat::simple(FontId::proportional(12.0), weak),
                             );
                         }
-                        if ui
-                            .add(Button::selectable(i == self.model.selected, job))
-                            .clicked()
-                        {
+                        if ui.add(Button::selectable(selected, job)).clicked() {
                             msgs.push(Msg::Select(i));
                         }
                     }
                 });
+                // What to do, in the text colour: weak text is under 3:1.
                 if self.model.draft.len() == 1 {
-                    ui.label(RichText::new(words::EMPTY).weak());
+                    ui.label(words::EMPTY);
                 }
             });
         let add = ui
@@ -621,16 +664,20 @@ impl Editor {
                 }
             });
         }
+        // Its button follows the sentence, as each folder's "Move" does, so
+        // a whole preview fits the panel's fixed height.
         if let Some(row) = words::all_row(preview) {
-            ui.label(row);
-            if !refile.dry_run
-                && ui
-                    .add_enabled(can_move, Button::new(format!("Move all {}", preview.total)))
-                    .on_disabled_hover_text(why)
-                    .clicked()
-            {
-                msgs.push(Msg::MoveAll);
-            }
+            ui.horizontal_wrapped(|ui| {
+                ui.label(row);
+                if !refile.dry_run
+                    && ui
+                        .add_enabled(can_move, Button::new(format!("Move all {}", preview.total)))
+                        .on_disabled_hover_text(why)
+                        .clicked()
+                {
+                    msgs.push(Msg::MoveAll);
+                }
+            });
         }
         if let Some(row) = words::waiting_row(preview) {
             ui.label(row);
@@ -793,12 +840,12 @@ impl Editor {
             match dialog {
                 Dialog::Discard { question, .. } => {
                     ui.heading(question);
-                    ui.horizontal(|ui| {
-                        if ui.button("Discard").clicked() {
-                            msgs.push(Msg::Confirm);
-                        }
+                    dialog_buttons(ui, |ui| {
                         if ui.button("Cancel").clicked() {
                             msgs.push(Msg::Cancel);
+                        }
+                        if ui.button("Discard").clicked() {
+                            msgs.push(Msg::Confirm);
                         }
                     });
                 }
@@ -815,39 +862,39 @@ impl Editor {
                     if let Some(warning) = warning {
                         ui.label(RichText::new(warning).strong());
                     }
-                    ui.horizontal(|ui| {
-                        if primary(ui, "Apply changes", true).clicked() {
-                            msgs.push(Msg::Confirm);
-                        }
+                    dialog_buttons(ui, |ui| {
                         if ui.button("Cancel").clicked() {
                             msgs.push(Msg::Cancel);
+                        }
+                        if primary(ui, "Apply changes", true).clicked() {
+                            msgs.push(Msg::Confirm);
                         }
                     });
                 }
                 Dialog::ConfirmRemove { question, .. } => {
                     ui.label(question);
-                    ui.horizontal(|ui| {
-                        if ui.button("Remove").clicked() {
-                            msgs.push(Msg::Confirm);
-                        }
+                    dialog_buttons(ui, |ui| {
                         if ui.button("Cancel").clicked() {
                             msgs.push(Msg::Cancel);
+                        }
+                        if ui.button("Remove").clicked() {
+                            msgs.push(Msg::Confirm);
                         }
                     });
                 }
                 Dialog::CategoriesChanged => {
                     ui.heading(words::CATEGORIES_CHANGED);
-                    ui.horizontal(|ui| {
-                        if ui.button("Reload (discard my edits)").clicked() {
-                            msgs.push(Msg::ReloadDiscarding);
-                        }
+                    dialog_buttons(ui, |ui| {
                         if ui.button("Keep editing").clicked() {
                             msgs.push(Msg::KeepEditing);
+                        }
+                        if ui.button("Reload (discard my edits)").clicked() {
+                            msgs.push(Msg::ReloadDiscarding);
                         }
                     });
                 }
                 Dialog::Details(details) => {
-                    ui.heading("Details");
+                    let heading = ui.heading("Details");
                     let mut text = details.text();
                     ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
                         ui.add(
@@ -855,9 +902,10 @@ impl Editor {
                                 .font(TextStyle::Monospace)
                                 .desired_width(f32::INFINITY)
                                 .interactive(false),
-                        );
+                        )
+                        .labelled_by(heading.id);
                     });
-                    ui.horizontal(|ui| {
+                    dialog_buttons(ui, |ui| {
                         if ui.button("Copy").clicked() {
                             ui.ctx().copy_text(details.text());
                         }
@@ -937,6 +985,10 @@ impl eframe::App for Editor {
             });
         if let Some((refile, rect)) = refile {
             let mut panel = reserved_ui(ui, "refile-contents", rect, Layout::top_down(Align::Min));
+            // More than the panel holds (a result line, "Not moved" opened)
+            // scrolls; a scroll bar that stays visible and takes its own
+            // room shows that, and keeps text from running under it.
+            panel.spacing_mut().scroll = ScrollStyle::thin();
             ScrollArea::vertical().show(&mut panel, |ui| self.refile(ui, &refile, &mut controls));
         }
         self.footer(ui, footer, &mut controls);
