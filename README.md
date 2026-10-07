@@ -11,7 +11,7 @@ mailtriage is a local command-line tool that classifies your email. For each mes
 
 ## Requirements
 
-- [Himalaya v2.1.0](https://github.com/pimalaya/himalaya/releases/tag/v2.1.0) with IMAP support (`himalaya --version` shows `+imap`).
+- [Himalaya](https://github.com/pimalaya/himalaya) with IMAP support (`himalaya --version` shows `+imap`), in a version mailtriage is tested with: 2.1.0 or 2.2.1 ([Himalaya versions](docs/guide.md#himalaya-versions)).
 - An IMAP account. Filing needs a server with the MOVE extension.
 - An [OpenRouter](https://openrouter.ai) API key.
 - macOS or Linux. The background service uses launchd on macOS and systemd on Linux.

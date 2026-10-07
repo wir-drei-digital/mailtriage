@@ -339,12 +339,17 @@ impl Service {
             )
         };
         let key_present = key_error.is_none();
+        let failed = || json!({"configured":true,"ready":false,"error":"Himalaya version/config check failed"});
         let transport = match self.engine(&account).map(|e| e.map(|e| e.version())) {
             Ok(None) => json!({"configured":false,"ready":true}),
-            Ok(Some(Ok(v))) => json!({"configured":true,"ready":true,"version":v}),
-            _ => {
-                json!({"configured":true,"ready":false,"error":"Himalaya version/config check failed"})
-            }
+            Ok(Some(Ok(v))) => json!({"configured":true,"ready":true,"version":v,"tested":true}),
+            Ok(Some(Err(e))) => match e.downcast_ref::<engine::versions::Untested>() {
+                Some(untested) => {
+                    json!({"configured":true,"ready":false,"version":untested.line,"tested":false,"error":untested.to_string()})
+                }
+                None => failed(),
+            },
+            Err(_) => failed(),
         };
         let mut out = json!({"schema_version":1,"account":name,"ready":provider_valid&&key_present&&transport["ready"]==true,"provider":{"kind":self.config.provider.kind,"model":self.config.provider.model,"configuration_valid":provider_valid,"key_source":key_source,"key_present":key_present},"transport":transport,"review_mode":self.config.policy.review_mode,"state_dir":self.config.state_dir,"live_checks_performed":false,"coverage":self.coverage(name)?});
         if let Some(e) = key_error {
@@ -594,7 +599,7 @@ impl Service {
         let now = now();
         self.store.sync_filing_mode(name, mode, &now)?;
         if let Some(h) = &engine {
-            h.version().map_err(abort_on_config_change)?;
+            h.version().map_err(version_error)?;
         }
         let verify_binding = self.binding_verifier(name, &account)?;
         // `Some` only with filing on.
@@ -1815,6 +1820,15 @@ fn mark_skipped(out: &mut Value, skipped: Option<String>) {
 
 fn config_changed() -> anyhow::Error {
     config_err("mail engine configuration changed during operation")
+}
+
+/// A Himalaya that is not a tested version fails the pass with exit 3 and
+/// says which versions are tested; any other version error is as before.
+fn version_error(e: anyhow::Error) -> anyhow::Error {
+    match e.downcast_ref::<engine::versions::Untested>() {
+        Some(untested) => err(3, untested.to_string()),
+        None => abort_on_config_change(e),
+    }
 }
 
 fn abort_on_config_change(e: anyhow::Error) -> anyhow::Error {

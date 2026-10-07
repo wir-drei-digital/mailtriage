@@ -1,0 +1,6 @@
+{"versions":[
+  {"version":"2.1.0","roles":{},
+   "assets":{"aarch64-darwin":"sha256:a5a787b7c4dbf065408e7772908fc75c799626f4cebab8e9c78fafe3e2fa585c","x86_64-linux":"sha256:683a2ab8e1534f01e6bda3a69e204d564c31fbfbe20511fc7bc60b67f2e85884","aarch64-linux":"sha256:c41adab4bc220ba816cdbf865a5df8dc3b358b39ec58b4be0ed2f64e46b1d182"}},
+  {"version":"2.2.1","roles":{"inbox":"INBOX"},
+   "assets":{"aarch64-darwin":"sha256:a5d97a1f7bbca45e58bddde3f9f17325f614c9cd6d5f17fabf38ddcb030869ab","x86_64-linux":"sha256:5c5ba2724c162f82d0a0c71b6c03224ed44f8bef7b14ace5da0635d3af2665a0","aarch64-linux":"sha256:1dc21c3dd6d948929e22e5cae49b9d0b3b30ff88fafd4493fd4460c6252e9d90"}}
+]}

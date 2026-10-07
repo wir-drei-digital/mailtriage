@@ -6,6 +6,7 @@
 pub mod fake;
 pub mod himalaya;
 pub mod raw;
+pub mod versions;
 
 use crate::domain::{EngineConfig, MailboxSnapshot, SourceEnvelope};
 use anyhow::Result;

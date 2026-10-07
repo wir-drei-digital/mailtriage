@@ -8,7 +8,7 @@ use crate::{
         AccountConfig, AppConfig, Category, EngineConfig, FilingConfig, FilingMode, HimalayaConfig,
         ProviderConfig, UpdateMode,
     },
-    engine::{self, himalaya},
+    engine::{self, versions},
     filing, process,
     prompt::Prompter,
     provider,
@@ -30,7 +30,6 @@ use std::{
 
 pub const DEFAULT_MODEL: &str = "typesafe/jev-1.13";
 pub const DEFAULT_KEY_ENV: &str = "OPENROUTER_API_KEY";
-const HIMALAYA_VERSION: &str = "2.1.0";
 const HIMALAYA_TIMEOUT: Duration = Duration::from_secs(60);
 const HIMALAYA_MAX_OUTPUT: usize = 1024 * 1024;
 
@@ -89,6 +88,9 @@ enum Intent {
 
 struct HimalayaChoice {
     binary: PathBuf,
+    /// The tested version `--version` reported, as `X.Y.Z`; written to
+    /// `expected_version`.
+    version: String,
     toml: PathBuf,
     account: String,
     email: Option<String>,
@@ -168,7 +170,7 @@ pub fn run(args: &SetupArgs, path: &Path, p: &mut Prompter) -> Result<Value> {
         config: h.toml.clone(),
         account: h.account.clone(),
         mailboxes: vec!["INBOX".to_owned()],
-        expected_version: HIMALAYA_VERSION.to_owned(),
+        expected_version: h.version.clone(),
         timeout_seconds: old_engine.as_ref().map_or(60, |e| e.timeout_seconds),
         max_output_bytes: old_engine
             .as_ref()
@@ -435,22 +437,35 @@ fn himalaya_step(
         (None, None) => process::find_on_path("himalaya").ok_or_else(|| {
             err(
                 3,
-                "step 2 (Himalaya): himalaya is not on PATH; install Himalaya v2.1.0 or pass --himalaya-binary",
+                format!(
+                    "step 2 (Himalaya): himalaya is not on PATH; install a tested Himalaya ({}) or pass --himalaya-binary",
+                    versions::listed()
+                ),
             )
         })?,
     };
-    let version = run_himalaya(&binary, &[OsStr::new("--version")])
-        .and_then(|out| himalaya::check_version_output(&out, HIMALAYA_VERSION))
-        .map_err(|_| {
+    let (line, tested) = match run_himalaya(&binary, &[OsStr::new("--version")]) {
+        Ok(out) => versions::check_version_output(&out).map_err(|untested| {
             err(
                 3,
                 format!(
-                    "step 2 (Himalaya): {} is not Himalaya v{HIMALAYA_VERSION} with IMAP; install v{HIMALAYA_VERSION} or pass --himalaya-binary",
+                    "step 2 (Himalaya): {}: {untested}; install a tested Himalaya or pass --himalaya-binary",
                     binary.display()
                 ),
             )
-        })?;
-    p.say(&format!("Using {version} at {}.", binary.display()));
+        })?,
+        Err(_) => {
+            return Err(err(
+                3,
+                format!(
+                    "step 2 (Himalaya): {} does not run; install a tested Himalaya ({}) or pass --himalaya-binary",
+                    binary.display(),
+                    versions::listed()
+                ),
+            ))
+        }
+    };
+    p.say(&format!("Using {line} at {}.", binary.display()));
     let explicit = match (&args.himalaya_config, stored) {
         (Some(toml), _) => {
             let toml = absolute(toml, "--himalaya-config")?;
@@ -543,6 +558,7 @@ fn himalaya_step(
         let email = account_email(&toml, &name);
         return Ok(HimalayaChoice {
             binary,
+            version: tested.version.clone(),
             toml,
             account: name,
             email,

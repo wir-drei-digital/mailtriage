@@ -1,7 +1,10 @@
-//! Narrow Himalaya v2.1.0 IMAP adapter. Its only writes are folder create and
+//! Narrow Himalaya IMAP adapter for the tested versions in
+//! `himalaya-versions.json`. Its only writes are folder create and
 //! subscribe, UID MOVE and adding \Flagged, the last two through `imap raw`.
 use super::{
-    raw, ConfigChanged, EngineCapabilities, FolderInfo, MailEngine, WriteOutcome, SPECIAL_USE_ROLES,
+    raw,
+    versions::{self, Tested},
+    ConfigChanged, EngineCapabilities, FolderInfo, MailEngine, WriteOutcome, SPECIAL_USE_ROLES,
 };
 use crate::domain::{Address, HimalayaConfig, MailboxSnapshot, SourceEnvelope};
 use crate::process::{read_bounded, terminate};
@@ -28,6 +31,8 @@ pub struct Himalaya {
     /// SHA-256 of the TOML read at open; every spawn re-checks it.
     config_hash: String,
     caps: OnceCell<EngineCapabilities>,
+    /// The tested version `--version` reported, once read.
+    tested: OnceCell<&'static Tested>,
     /// Folders beyond `config.mailboxes` that this pass may touch.
     scope: RefCell<BTreeSet<String>>,
 }
@@ -64,9 +69,6 @@ impl Himalaya {
         if config.account.trim().is_empty() || config.mailboxes.is_empty() {
             bail!("Himalaya account and mailboxes must be configured");
         }
-        if config.expected_version != "2.1.0" {
-            bail!("Himalaya compatibility target must be 2.1.0");
-        }
         if config.timeout_seconds == 0 || config.timeout_seconds > 600 {
             bail!("Himalaya timeout must be between 1 and 600 seconds");
         }
@@ -82,15 +84,30 @@ impl Himalaya {
             config: config.clone(),
             config_hash: sha256_hex(&toml),
             caps: OnceCell::new(),
+            tested: OnceCell::new(),
             scope: RefCell::new(BTreeSet::new()),
         })
     }
 
+    /// The first line of `--version`, when it names a tested version with
+    /// `+imap`; otherwise a `versions::Untested` error. `expected_version`
+    /// is not compared: any tested version is accepted.
     pub fn version(&self) -> Result<String> {
-        check_version_output(
-            &self.run(&["--version"], false)?,
-            &self.config.expected_version,
-        )
+        let (line, tested) = versions::check_version_output(&self.run(&["--version"], false)?)?;
+        let _ = self.tested.set(tested);
+        Ok(line)
+    }
+
+    /// The tested version this binary reports, read once.
+    pub fn tested(&self) -> Result<&'static Tested> {
+        if let Some(tested) = self.tested.get() {
+            return Ok(tested);
+        }
+        self.version()?;
+        self.tested
+            .get()
+            .copied()
+            .ok_or_else(|| anyhow!("Himalaya version unknown"))
     }
 
     pub fn snapshot(&self, mailbox: &str) -> Result<MailboxSnapshot> {
@@ -623,21 +640,6 @@ pub(crate) fn check_write_uids(uids: &[u64]) -> Result<()> {
         bail!("UID must be positive");
     }
     Ok(())
-}
-
-/// The version line of `himalaya --version` when it is `expected` with IMAP.
-pub fn check_version_output(output: &[u8], expected: &str) -> Result<String> {
-    let text = std::str::from_utf8(output).context("invalid Himalaya version output")?;
-    let version = text.lines().next().unwrap_or_default().trim();
-    let mut words = version.split_ascii_whitespace();
-    let wanted = format!("v{expected}");
-    if words.next() != Some("himalaya")
-        || words.next() != Some(wanted.as_str())
-        || !words.any(|feature| feature == "+imap")
-    {
-        bail!("unsupported Himalaya version; expected {expected}");
-    }
-    Ok(version.to_owned())
 }
 
 /// Parses `imap list` JSON: an array of rows or an object with `mailboxes`.

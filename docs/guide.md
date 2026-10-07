@@ -11,6 +11,7 @@ This guide is the full reference: setup, configuration, the OpenRouter key, the 
 - [The OpenRouter key](#the-openrouter-key)
 - [Background service](#background-service)
 - [Updates](#updates)
+- [Himalaya versions](#himalaya-versions)
 - [Daily use](#daily-use)
 - [Categories](#categories)
 - [Filing into folders](#filing-into-folders)
@@ -41,7 +42,7 @@ mailtriage list --account work --view attention --json
 You need:
 
 - macOS arm64, Linux amd64 or Linux arm64,
-- Himalaya v2.1.0 with IMAP support,
+- Himalaya with IMAP support, in a [tested version](#himalaya-versions) (2.1.0 or 2.2.1),
 - an IMAP account whose server supports UID and UIDVALIDITY (the MOVE extension too, if you want filing),
 - an OpenRouter API key,
 - for the background service: launchd (macOS) or systemd (Linux).
@@ -109,7 +110,7 @@ mailtriage setup
 
 **Step 2, Himalaya.**
 
-- Binary: `--himalaya-binary`, else the stored binary of the account being updated, else the first `himalaya` on `PATH`. Setup stores it as an absolute path. Its `--version` must report `himalaya v2.1.0` with `+imap`; otherwise setup exits 3.
+- Binary: `--himalaya-binary`, else the stored binary of the account being updated, else the first `himalaya` on `PATH`. Setup stores it as an absolute path. Its `--version` must report a [tested version](#himalaya-versions) with `+imap`; otherwise setup exits 3. Setup writes the version it found into `expected_version`.
 - Config file: `--himalaya-config`, else the stored file of the account being updated, else `HIMALAYA_CONFIG`, else Himalaya's default. `HIMALAYA_CONFIG` must name one file; several `:`-separated files exit 2.
 - Himalaya's default is the first existing file of: `~/Library/Application Support/himalaya/config.toml` on macOS, or `$XDG_CONFIG_HOME/himalaya/config.toml` on Linux when `XDG_CONFIG_HOME` is an absolute path; then `~/.config/himalaya/config.toml`; then `~/.himalayarc`.
 - Account: setup offers only accounts with an IMAP backend. The default is the account being updated, else Himalaya's default account.
@@ -251,7 +252,7 @@ Progress and the check summary go to stderr. stdout carries one result object, o
 | --- | --- |
 | 0 | Setup finished. `doctor` items that are not ready are listed in the result. |
 | 2 | Invalid input; a required flag missing without prompts; an invalid account name; conflicting key flags, or key flags with `--provider fake`; a key tool not on `PATH`; a tool store without a terminal; setup aborted; the service on an unsupported platform. |
-| 3 | Himalaya missing or not v2.1.0 with IMAP; `account check` failed; the folders could not be listed; a key tool or key command failed; the config could not be written; `launchctl` or `systemctl` failed. |
+| 3 | Himalaya missing or not a tested version with IMAP; `account check` failed; the folders could not be listed; a key tool or key command failed; the config could not be written; `launchctl` or `systemctl` failed. |
 | 5 | The config exists and `--update` was not given (without prompts); the account is bound to another mailbox (its identity, Himalaya account or IMAP server would change); a service file exists that mailtriage did not write; another command is editing the config (`config_busy`), or it changed since setup read it (`config_changed`). |
 
 Every error except the two abort messages (`setup aborted; nothing was changed`, `setup aborted: input ended`) starts with `step N (name): ` and names the flag or command that fixes it, for example `step 2 (Himalaya): --himalaya-account is required without prompts`. Step 10 errors (`step 10 (service): `) happen after the config is written; they name the `mailtriage service install` command, with `--config` and this run's `--interval-seconds` and `--limit`, to run once the cause is fixed. On a platform without launchd or systemd the fix is to drop `--service install` instead.
@@ -262,7 +263,7 @@ Write the configuration yourself when you want full control, for example on a se
 
 ### 1. Set up Himalaya
 
-mailtriage runs the `himalaya` executable for every mailbox operation. It accepts only Himalaya v2.1.0 with IMAP support: the first line of `himalaya --version` must start with `himalaya v2.1.0` and contain `+imap`. Install it from the [v2.1.0 release](https://github.com/pimalaya/himalaya/releases/tag/v2.1.0) or a package manager, then check:
+mailtriage runs the `himalaya` executable for every mailbox operation. It accepts only the [tested versions](#himalaya-versions) with IMAP support: the first line of `himalaya --version` must start with `himalaya v` and a tested version, such as `himalaya v2.2.1`, and contain `+imap`. Install one from [Himalaya's releases](https://github.com/pimalaya/himalaya/releases) or a package manager, then check:
 
 ```sh
 himalaya --version
@@ -336,8 +337,9 @@ Run it in the same environment as the command you are checking. `doctor` exits 0
 | `provider.key_present` | `true` | The key command printed a key, or the variable named in `api_key_env` is set and not blank in this process. Always `true` for `fake`. |
 | `provider.key_error` | absent | Present only when the key is missing: one of the fixed messages in [Key command rules](#key-command-rules), or `OpenRouter API key environment variable is missing`, or `OpenRouter API key environment variable is empty`. |
 | `transport.configured` | `true` | The account has an `engine`. Without one, `transport.ready` is `true` as well. |
-| `transport.ready` | `true` | The Himalaya configuration file was read and `himalaya --version` reported v2.1.0 with `+imap`. Otherwise `transport.error` is set. |
-| `transport.version` | `himalaya v2.1.0 ...` | The first line of `himalaya --version`. |
+| `transport.ready` | `true` | The Himalaya configuration file was read and `himalaya --version` reported a [tested version](#himalaya-versions) with `+imap`. Otherwise `transport.error` is set. |
+| `transport.version` | `himalaya v2.2.1 ...` | The first line of `himalaya --version`. |
+| `transport.tested` | `true` | The version is one mailtriage is tested with. `false` makes the transport not ready, with `transport.error` `Himalaya X is not a tested version (tested: 2.1.0, 2.2.1)`. |
 | `live_checks_performed` | `false` | Always `false`. |
 | `update.ready` | `true` | `update` is the block [`service status`](#service-commands) shows, plus `ready`: `false` only when `updates` is `auto` and the binary may not be replaced, and then `fix` says what to do. The top-level `ready` ignores it. |
 
@@ -526,11 +528,11 @@ Engine (`accounts.NAME.engine`):
 | `config` | Path to the Himalaya configuration file: absolute, or relative to `mailtriage.json`. `~` is not expanded. |
 | `account` | The account name in that file (`[accounts.work]` means `"work"`). |
 | `mailboxes` | The source folders to watch, usually `["INBOX"]`, spelled as `himalaya imap list --all` prints them. With filing on, each must be printable ASCII without `\`, `"` or `&` and must not start with `-`. |
-| `expected_version` | `"2.1.0"`. Other values are refused. |
+| `expected_version` | The Himalaya version setup found, such as `"2.2.1"`. It must not be empty, but it is not compared: any [tested version](#himalaya-versions) is accepted whatever it says. The field stays so that older mailtriage versions can read the config. |
 | `timeout_seconds` | Time limit for each Himalaya call, 1 to 600. |
 | `max_output_bytes` | Output limit for each Himalaya call, 1 to 268435456 (256 MiB). A message larger than this cannot be fetched and is recorded as a failed fetch. |
 
-`doctor` reports an engine whose `expected_version`, `timeout_seconds` or `max_output_bytes` is out of range as `transport.ready: false`. Configurations written before schema 2 have a `himalaya` block instead of `engine`. mailtriage still reads it and writes it back as `engine` the next time it saves the file. An account cannot have both.
+`doctor` reports an engine whose `timeout_seconds` or `max_output_bytes` is out of range as `transport.ready: false`. Configurations written before schema 2 have a `himalaya` block instead of `engine`. mailtriage still reads it and writes it back as `engine` the next time it saves the file. An account cannot have both.
 
 Provider (`provider`):
 
@@ -970,6 +972,14 @@ There is no rollback command; a bad release is normally fixed by a newer one. To
 4. Start them again: `mailtriage service install --account NAME`.
 
 This works only when the newer release did not migrate the state database. An older binary refuses a newer database (`database schema is newer than this binary`); then roll forward to a fixed release instead.
+
+## Himalaya versions
+
+mailtriage runs Himalaya for every mailbox operation and accepts only the versions it is tested with: **2.1.0** and **2.2.1**. The list, with the SHA-256 of each version's release archives, is compiled into mailtriage from `src/engine/himalaya-versions.json`; a newer mailtriage release can add versions.
+
+- The first line of `himalaya --version` must name a tested version, such as `himalaya v2.2.1 …`, and contain `+imap`. Any other version, a newer patch release included, is refused until a mailtriage release tests it.
+- Setup writes the version it found into `engine.expected_version`, but mailtriage does not compare it: a config that says `2.1.0` works with Himalaya 2.2.1.
+- `doctor` reports `transport.tested`. An untested Himalaya makes the transport not ready, with `"error": "Himalaya 2.2.2 is not a tested version (tested: 2.1.0, 2.2.1)"`. `sync` and `watch` passes exit 3 with that message, and setup refuses it in step 2.
 
 ## Daily use
 
