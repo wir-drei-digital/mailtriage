@@ -82,6 +82,8 @@ struct State {
     config_changed: bool,
     /// Folders `alias_conflicts` reports when asked about them.
     alias_conflicts: BTreeSet<String>,
+    /// `alias_conflicts` fails, as for a configuration it cannot parse.
+    alias_check_fails: bool,
     /// Folders whose next `snapshot` fails, one entry per failure.
     snapshot_faults: Vec<String>,
 }
@@ -296,6 +298,7 @@ impl FakeEngine {
                 config_changed_from: None,
                 config_changed: false,
                 alias_conflicts: BTreeSet::new(),
+                alias_check_fails: false,
                 snapshot_faults: Vec::new(),
             })),
         }
@@ -483,6 +486,12 @@ impl FakeEngine {
     /// reports those it is asked about. Replaces the previous set.
     pub fn set_alias_conflicts(&self, folders: &[&str]) {
         self.state().alias_conflicts = folders.iter().map(|f| f.to_string()).collect();
+    }
+
+    /// Makes `alias_conflicts` fail (or succeed again), as the Himalaya
+    /// engine does for a configuration it cannot read or parse.
+    pub fn fail_alias_check(&self, fails: bool) {
+        self.state().alias_check_fails = fails;
     }
 
     /// Strict scope (mirrors the Himalaya engine): when set, every
@@ -701,6 +710,9 @@ impl MailEngine for FakeEngine {
     fn alias_conflicts(&self, folders: &[String]) -> Result<Vec<String>> {
         let mut s = self.state();
         s.enter(None, format!("alias_conflicts {}", folders.join(",")), &[])?;
+        if s.alias_check_fails {
+            bail!("cannot read the Himalaya configuration: it is not valid TOML");
+        }
         Ok(folders
             .iter()
             .filter(|f| s.alias_conflicts.contains(*f))

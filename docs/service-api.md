@@ -147,6 +147,18 @@ config lock (`config_busy`), or a config that changed since step 1 read it
 `OpenRouter API key environment variable is empty`. For `command`, `doctor` runs
 the key command (once per `Service`; `secrets::KeyCache`).
 
+`transport` carries `configured` and `ready`, and for a configured engine
+`version` (the first line of `himalaya --version`) and `tested` (whether that is
+a tested version). When the version is tested, it also carries
+`alias_conflicts` (the source folders Himalaya resolves to another mailbox,
+which no pass reads from). When it is not ready, `error` is
+`Himalaya X is not a tested version (tested: …)`,
+`Himalaya X was built without IMAP (+imap)`,
+`Himalaya printed no version mailtriage knows (tested: …)`,
+`cannot read the Himalaya configuration: …` (no folder is read), or
+`Himalaya version/config check failed` (then without `version`, `tested` or
+`alias_conflicts`).
+
 ## Classification without a key
 
 `sync`, `classify` and `reclassify` resolve the OpenRouter key once through the

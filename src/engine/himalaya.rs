@@ -3,6 +3,7 @@
 //! subscribe, UID MOVE and adding \Flagged, the last two through `imap raw`.
 use super::{
     raw,
+    targets::Resolver,
     versions::{self, Tested},
     ConfigChanged, EngineCapabilities, FolderInfo, MailEngine, WriteOutcome, SPECIAL_USE_ROLES,
 };
@@ -178,6 +179,7 @@ impl Himalaya {
         if uid >= before.uid_next {
             bail!("UID is outside mailbox snapshot");
         }
+        self.check_read(mailbox)?;
         let uid_text = uid.to_string();
         // No --json: raw mode writes the exact RFC 5322 bytes. No --seen.
         let raw = self.run(
@@ -192,6 +194,34 @@ impl Himalaya {
             bail!("Himalaya returned an empty raw message");
         }
         Ok(raw)
+    }
+
+    /// `message read --mailbox` resolves aliases and roles: refuses a folder
+    /// whose effective target is another mailbox, and reads nothing when
+    /// the TOML cannot be read or parsed. Every `message read` passes here,
+    /// whatever the filing mode.
+    fn check_read(&self, mailbox: &str) -> Result<()> {
+        if self.resolver()?.conflicts(&[mailbox.to_owned()]).is_empty() {
+            return Ok(());
+        }
+        Err(err(
+            3,
+            format!("alias_conflict:{mailbox}: Himalaya resolves this folder to another mailbox (an alias or role); mailtriage does not read it"),
+        ))
+    }
+
+    /// The account's resolver: the TOML read at open (unchanged since) and
+    /// the reported version's roles.
+    fn resolver(&self) -> Result<Resolver> {
+        let toml = String::from_utf8(self.current_config()?).map_err(|_| {
+            err(
+                2,
+                "cannot read the Himalaya configuration: it is not valid TOML",
+            )
+        })?;
+        let roles = &self.tested()?.roles;
+        Resolver::from_toml(&toml, &self.config.account, roles)
+            .map_err(|why| err(2, format!("cannot read the Himalaya configuration: {why}")))
     }
 
     /// Passes for a configured source mailbox or a folder in the watch scope.
@@ -566,46 +596,12 @@ impl MailEngine for Himalaya {
         *self.scope.borrow_mut() = folders.iter().cloned().collect();
     }
 
+    /// The folders whose effective target (merged aliases, then the
+    /// version's roles, then the name) is another mailbox. `Err` when the
+    /// TOML cannot be read or parsed.
     fn alias_conflicts(&self, folders: &[String]) -> Result<Vec<String>> {
-        let toml = String::from_utf8(self.current_config()?)
-            .map_err(|_| err(2, "invalid Himalaya TOML configuration"))?;
-        let parsed: toml::Value =
-            toml::from_str(&toml).map_err(|_| err(2, "invalid Himalaya TOML configuration"))?;
-        let Some(aliases) = parsed
-            .get("accounts")
-            .and_then(|v| v.get(&self.config.account))
-            .and_then(|v| v.get("mailbox"))
-            .and_then(|v| v.get("alias"))
-        else {
-            return Ok(Vec::new());
-        };
-        let aliases = aliases
-            .as_table()
-            .ok_or_else(|| err(2, "invalid Himalaya mailbox alias table"))?
-            .iter()
-            .map(|(key, native)| {
-                native
-                    .as_str()
-                    .map(|native| (key.as_str(), native))
-                    .ok_or_else(|| err(2, "invalid Himalaya mailbox alias table"))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        Ok(folders
-            .iter()
-            .filter(|folder| {
-                aliases.iter().any(|(key, native)| {
-                    key.eq_ignore_ascii_case(folder) && !same_mailbox(native, folder)
-                })
-            })
-            .cloned()
-            .collect())
+        Ok(self.resolver()?.conflicts(folders))
     }
-}
-
-/// Whether two native names select the same mailbox: equal, or both INBOX,
-/// whose name IMAP treats case-insensitively (RFC 3501 5.1).
-fn same_mailbox(a: &str, b: &str) -> bool {
-    a == b || (a.eq_ignore_ascii_case("INBOX") && b.eq_ignore_ascii_case("INBOX"))
 }
 
 /// Maps one SELECT-plus-command session. `Err` means the SELECT result was not

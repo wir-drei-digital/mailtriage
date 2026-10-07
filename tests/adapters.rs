@@ -244,7 +244,7 @@ fn himalaya_discovery_allows_missing_sender_but_rejects_wrong_type() {
 fn himalaya_rejects_epoch_reset_timeout_and_large_output() {
     let temp = TempDir::new().unwrap();
     let counter = temp.path().join("counter");
-    let script = format!("#!/bin/sh\ncase \"$*\" in\n *'imap status INBOX'*) n=$(cat '{}'); n=$((n+1)); printf '%s' \"$n\" > '{}'; if [ \"$n\" -eq 1 ]; then printf '{{\"uid_validity\":1,\"uid_next\":3}}'; else printf '{{\"uid_validity\":2,\"uid_next\":3}}'; fi ;;\n *'message read --mailbox INBOX --raw 1'*) printf 'abc' ;;\n *) exit 7 ;;\nesac\n", counter.display(), counter.display());
+    let script = format!("#!/bin/sh\ncase \"$*\" in\n *--version*) printf 'himalaya v2.1.0 +imap\\n' ;;\n *'imap status INBOX'*) n=$(cat '{}'); n=$((n+1)); printf '%s' \"$n\" > '{}'; if [ \"$n\" -eq 1 ]; then printf '{{\"uid_validity\":1,\"uid_next\":3}}'; else printf '{{\"uid_validity\":2,\"uid_next\":3}}'; fi ;;\n *'message read --mailbox INBOX --raw 1'*) printf 'abc' ;;\n *) exit 7 ;;\nesac\n", counter.display(), counter.display());
     fs::write(&counter, "0").unwrap();
     let (_fixture, adapter) = fake_himalaya(&script);
     assert!(adapter

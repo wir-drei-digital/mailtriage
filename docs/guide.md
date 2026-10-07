@@ -284,7 +284,7 @@ imap.sasl.plain.password.cmd = "security find-generic-password -s imap.example.o
 - `imap.server`: `imaps://HOST:993` for TLS. A bare `HOST` also means `imaps://`. For STARTTLS on port 143, use `imap://HOST:143` with `imap.starttls = true`.
 - Credentials use Himalaya's own mechanism. `password.cmd` (also spelled `password.command`) runs a command that prints the password. The example reads it from the macOS keychain; store it there once with `security add-generic-password -s imap.example.org -a alice@example.org -w`, which prompts for the password. On Linux, a command such as `pass show mail/work` works the same way. `password.raw` stores the password in the file; avoid it. For OAuth servers, Himalaya offers `imap.sasl.oauthbearer` and `imap.sasl.xoauth2`; see [Himalaya's sample configuration](https://github.com/pimalaya/himalaya/blob/v2.1.0/config.sample.toml).
 - mailtriage starts Himalaya with no terminal input and passes on its own environment. The password command must not prompt, and the commands it calls must be found on that environment's `PATH`.
-- Do not add a `mailbox.alias` entry to this account that maps a watched folder or category folder name to a different mailbox. With filing on, mailtriage stops scanning such a folder and makes no filing writes until the alias is removed.
+- Do not add a `mailbox.alias` entry, globally or for this account, that maps a watched folder or category folder name to a different mailbox. mailtriage never reads mail from such a folder, whatever the filing mode; its mail waits until the alias is removed. With filing on, it also stops scanning the folder and makes no filing writes. See [Folder names Himalaya resolves](#folder-names-himalaya-resolves).
 
 Check the login and the folder names. These commands contact the server:
 
@@ -340,6 +340,7 @@ Run it in the same environment as the command you are checking. `doctor` exits 0
 | `transport.ready` | `true` | The Himalaya configuration file was read and `himalaya --version` reported a [tested version](#himalaya-versions) with `+imap`. Otherwise `transport.error` is set. |
 | `transport.version` | `himalaya v2.2.1 ...` | The first line of `himalaya --version`. |
 | `transport.tested` | `true` | The version is one mailtriage is tested with. `false` makes the transport not ready, with `transport.error` `Himalaya X is not a tested version (tested: 2.1.0, 2.2.1)`. |
+| `transport.alias_conflicts` | `[]` | Source folders that Himalaya would resolve to another mailbox; mailtriage reads no mail from them. When the Himalaya configuration cannot be parsed, `transport.ready` is `false` and `transport.error` says why: no folder is read. |
 | `live_checks_performed` | `false` | Always `false`. |
 | `update.ready` | `true` | `update` is the block [`service status`](#service-commands) shows, plus `ready`: `false` only when `updates` is `auto` and the binary may not be replaced, and then `fix` says what to do. The top-level `ready` ignores it. |
 
@@ -980,6 +981,16 @@ mailtriage runs Himalaya for every mailbox operation and accepts only the versio
 - The first line of `himalaya --version` must name a tested version, such as `himalaya v2.2.1 …`, and contain `+imap`. Any other version, a newer patch release included, is refused until a mailtriage release tests it.
 - Setup writes the version it found into `engine.expected_version`, but mailtriage does not compare it: a config that says `2.1.0` works with Himalaya 2.2.1.
 - `doctor` reports `transport.tested`. An untested Himalaya makes the transport not ready, with `"error": "Himalaya 2.2.2 is not a tested version (tested: 2.1.0, 2.2.1)"`. `sync` and `watch` passes exit 3 with that message, and setup refuses it in step 2.
+
+### Folder names Himalaya resolves
+
+mailtriage gives `--mailbox` only to `message read`, which fetches a message's text, and Himalaya resolves that name before it opens a mailbox:
+
+1. through the merged alias map: the global `mailbox.alias` table, overridden key by key by the account's `accounts.NAME.mailbox.alias`. Keys compare case-insensitively, and `mailbox.aliases` is the same table;
+2. then, from 2.2 on, through the version's mailbox roles: 2.2.1 maps only `inbox` to `INBOX` for IMAP;
+3. else the name itself.
+
+A watched folder or category folder whose result is another mailbox (with `INBOX` compared case-insensitively) is an alias conflict. mailtriage never reads mail from it, in every filing mode; its mail stays queued without using a retry attempt. With filing on, the pass also reports `alias_conflict:FOLDER`, stops scanning the folder and makes no filing writes. Two alias keys that differ only in case and name different mailboxes count as a conflict too. When the Himalaya configuration cannot be parsed, mailtriage reads no folder at all, and `doctor` reports why in `transport.error`.
 
 ## Daily use
 
