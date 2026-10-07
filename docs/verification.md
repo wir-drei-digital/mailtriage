@@ -287,3 +287,24 @@ The automated review renders every window screen in light and dark mode (`cargo 
 | 16-not-found | pass: "mailtriage not found (looked in …)" (the spec's text; the guide says what to do) | pass | pass: error colour as 05 | fixed: Add and Apply said "Wait until loading finishes" for a load that never comes; they now say "The categories could not be loaded; the message at the bottom says why" (window and model tests) | pass: the message names where the tray looked | pass: exits 3 (window test) | 2026-10-07 |
 | Menus (`menus.txt`, 8 states) | pass: "Running · checked HH:MM", "Stopped", "Problem since HH:MM", "Open log", "Status unknown", "Runs another config" with "Runs PATH"; no exit codes or JSON. Commands in menu lines keep the spec's backticks, which a native menu shows as typed | pass: summary, notices, accounts with a submenu each, then Refresh now, Start at login, Quit. With every account off, including one whose service runs another config, the summary reads "Stopped", as the spec's icon rule says | native drawing: human check | pass: "Starting…", "Stopping…", "Installing…" replace the service item while it runs | pass: "No check yet", "Not installed" with "Install service" | native menu: human check | 2026-10-07 |
 | Menu bar (real) | menu bar: human check | menu bar: human check | menu bar: human check | menu bar: human check | menu bar: human check | menu bar: human check | 2026-10-07 |
+
+## Automatic updates on a real machine (human check)
+
+The automated tests use a loopback server instead of GitHub and a script instead of a release binary. Check once on macOS arm64 and once on Linux with two consecutive published releases, the older one installed:
+
+1. Install the older release into `~/.local/bin` from its archive, run `mailtriage service install --account work`, and wait for one pass.
+2. Run `mailtriage update --check --json`.
+3. Run `mailtriage update --json`.
+4. Wait one interval, read the service log, and run `mailtriage service status --account work --json`.
+5. Run `mailtriage update --json` again.
+6. Copy the older release to `/usr/local/bin/mailtriage` with `sudo install -m 0755` and run `/usr/local/bin/mailtriage update --check --json` and `/usr/local/bin/mailtriage update --json`.
+
+| Check | Result | Evidence | Date |
+| --- | --- | --- | --- |
+| `--check` reports the newer release as `latest`, `available: true` and `install.replaceable: true` | | | |
+| `update` reports `action: updated` and lists the service with `same_binary: true`; `~/.local/bin/mailtriage.previous` is the older binary | | | |
+| The download followed GitHub's real redirect to its asset host | | | |
+| macOS: the new binary runs (no Gatekeeper dialog, not killed); `xattr ~/.local/bin/mailtriage` shows no `com.apple.quarantine` | | | |
+| The log shows `{"schema_version":1,"update":{"event":"restarting",…}}` with the service's PID, then passes; `service status` shows the same `pid` and the new version in `last_pass.version` | | | |
+| The second `update` reports `action: current` | | | |
+| The root-owned copy: `--check` reports `unsafe_permissions` with its fix; `update` exits 3 and leaves the file unchanged | | | |

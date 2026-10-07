@@ -92,21 +92,24 @@ impl Context {
     }
 
     pub fn unit_path(&self, account: &str) -> PathBuf {
+        let dir = unit_dir(self.manager, &self.home);
         match self.manager {
-            Manager::Launchd => self
-                .home
-                .join("Library/LaunchAgents")
-                .join(format!("{}.plist", label(account))),
-            Manager::Systemd => self
-                .home
-                .join(".config/systemd/user")
-                .join(unit_name(account)),
+            Manager::Launchd => dir.join(format!("{}.plist", label(account))),
+            Manager::Systemd => dir.join(unit_name(account)),
         }
     }
 }
 
+/// The directory that holds `manager`'s per-user service files.
+pub fn unit_dir(manager: Manager, home: &Path) -> PathBuf {
+    match manager {
+        Manager::Launchd => home.join("Library/LaunchAgents"),
+        Manager::Systemd => home.join(".config/systemd/user"),
+    }
+}
+
 #[cfg(unix)]
-fn current_uid() -> u32 {
+pub(crate) fn current_uid() -> u32 {
     unsafe extern "C" {
         fn getuid() -> u32;
     }
@@ -115,7 +118,7 @@ fn current_uid() -> u32 {
 }
 
 #[cfg(not(unix))]
-fn current_uid() -> u32 {
+pub(crate) fn current_uid() -> u32 {
     0
 }
 
@@ -586,6 +589,8 @@ pub fn status_account(
     let mut out = status(ctx, account, &log_dir);
     out["account"] = json!(account);
     out["last_pass"] = service.store.heartbeat(account)?.unwrap_or(Value::Null);
+    let unit = ctx.map(|c| (c.manager, c.unit_path(account)));
+    out["update"] = crate::update::report::update_block(service.config.updates, unit);
     Ok(out)
 }
 

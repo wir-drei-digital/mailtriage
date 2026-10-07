@@ -6,7 +6,7 @@ use crate::{
     config,
     domain::{
         AccountConfig, AppConfig, Category, EngineConfig, FilingConfig, FilingMode, HimalayaConfig,
-        ProviderConfig,
+        ProviderConfig, UpdateMode,
     },
     engine::{self, himalaya},
     filing, process,
@@ -18,10 +18,11 @@ use crate::{
     system_service::{self, Context, Manager},
 };
 use anyhow::{anyhow, Result};
+use fs2::FileExt;
 use serde_json::{json, Value};
 use std::{
     ffi::OsStr,
-    fs,
+    fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::Duration,
@@ -67,6 +68,9 @@ pub struct SetupArgs {
     pub service: Option<bool>,
     pub interval_seconds: u64,
     pub limit: usize,
+    /// `--updates`; `None` keeps the existing config's value (a new config
+    /// gets `auto`).
+    pub updates: Option<UpdateMode>,
 }
 
 /// What step 1 decided.
@@ -96,8 +100,8 @@ struct HimalayaAccount {
 }
 
 pub fn run(args: &SetupArgs, path: &Path, p: &mut Prompter) -> Result<Value> {
-    // 1. Config.
-    let (mut cfg, intent) = load_target(args, path, p)?;
+    // 1. Config, and the bytes it was read from for the write in step 8.
+    let (mut cfg, intent, read) = load_target(args, path, p)?;
     // 2. Himalaya. An account being updated keeps its own by default.
     let stored = match &intent {
         Intent::Update(name) => cfg
@@ -214,6 +218,7 @@ pub fn run(args: &SetupArgs, path: &Path, p: &mut Prompter) -> Result<Value> {
         },
     );
     cfg.provider = provider;
+    cfg.updates = args.updates.unwrap_or(cfg.updates);
     config::validate(&cfg).map_err(|e| {
         err(
             2,
@@ -241,7 +246,7 @@ pub fn run(args: &SetupArgs, path: &Path, p: &mut Prompter) -> Result<Value> {
             ),
         )
     };
-    config::save(path, &cfg).map_err(|_| unwritable())?;
+    write_config(path, &cfg, read.as_deref(), unwritable)?;
     let path = fs::canonicalize(path).map_err(|_| unwritable())?;
     p.say(&format!("Wrote {}.", path.display()));
     let shown = printed_config(p, &path);
@@ -254,7 +259,7 @@ pub fn run(args: &SetupArgs, path: &Path, p: &mut Prompter) -> Result<Value> {
         ));
     }
     // 9. Check.
-    let doctor = doctor_step(p, &path, shown, &name, &cfg.provider, &engine);
+    let doctor = doctor_step(p, &path, shown, &name, &cfg, &engine);
     // 10. Service, only when the state check passed: otherwise every pass
     // of the service would fail.
     let state_ok = doctor["items"]
@@ -271,20 +276,83 @@ pub fn run(args: &SetupArgs, path: &Path, p: &mut Prompter) -> Result<Value> {
         "key_source": key_source_value(&cfg.provider),
         "key_store": store.map(KeyStore::flag),
         "filing": filing::mode_str(mode),
+        "updates": cfg.updates.as_str(),
         "doctor": doctor,
         "service": service,
     }}))
 }
 
-/// Step 1: the config to change and what to do with it.
-fn load_target(args: &SetupArgs, path: &Path, p: &mut Prompter) -> Result<(AppConfig, Intent)> {
+/// Step 8's write: under the exclusive config lock, and only when the file
+/// still holds the bytes step 1 read (`None`: there was no file).
+fn write_config(
+    path: &Path,
+    cfg: &AppConfig,
+    read: Option<&[u8]>,
+    unwritable: impl Fn() -> anyhow::Error,
+) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    fs::create_dir_all(parent).map_err(|_| unwritable())?;
+    let lock = config_lock(path).map_err(|_| unwritable())?;
+    lock.try_lock_exclusive().map_err(|_| {
+        err_kind(
+            5,
+            ErrorKind::ConfigBusy,
+            "step 8 (write): configuration is being edited; nothing was written; run setup again when the other command has finished",
+        )
+    })?;
+    if fs::read(path).ok().as_deref() != read {
+        return Err(err_kind(
+            5,
+            ErrorKind::ConfigChanged,
+            format!(
+                "step 8 (write): {} changed since setup read it; nothing was written; run setup again",
+                path.display()
+            ),
+        ));
+    }
+    config::save(path, cfg).map_err(|_| unwritable())
+}
+
+/// The lock file of the commands that edit `path`: `mailtriage.lock` next
+/// to `mailtriage.json`, as `Service` uses it. Like `Service`, it is next
+/// to the canonical path, so a symlinked config shares the lock of the file
+/// it names; without a file yet, it is next to `path`.
+fn config_lock(path: &Path) -> std::io::Result<File> {
+    let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path.with_extension("lock"))
+}
+
+/// Step 1: the config to change, what to do with it, and the bytes it was
+/// read from (`None` when there is no config yet).
+fn load_target(
+    args: &SetupArgs,
+    path: &Path,
+    p: &mut Prompter,
+) -> Result<(AppConfig, Intent, Option<Vec<u8>>)> {
     if !path.exists() {
         let mut cfg = config::default_config();
         cfg.accounts.clear();
         cfg.state_dir = PathBuf::from("state");
-        return Ok((cfg, Intent::Create));
+        return Ok((cfg, Intent::Create, None));
     }
-    let cfg = config::load(path).map_err(|e| {
+    let bytes = fs::read(path).map_err(|e| {
+        err(
+            2,
+            format!(
+                "step 1 (config): cannot read {} ({e}); fix it or pass --config",
+                path.display()
+            ),
+        )
+    })?;
+    let cfg = config::from_bytes(&bytes).map_err(|e| {
         err(
             2,
             format!(
@@ -312,11 +380,11 @@ fn load_target(args: &SetupArgs, path: &Path, p: &mut Prompter) -> Result<(AppCo
                 ),
             ));
         }
-        return Ok((cfg, named.unwrap_or(Intent::UpdateOrAdd)));
+        return Ok((cfg, named.unwrap_or(Intent::UpdateOrAdd), Some(bytes)));
     }
     p.say(&format!("A config already exists at {}.", path.display()));
     if let Some(intent) = named {
-        return Ok((cfg, intent));
+        return Ok((cfg, intent, Some(bytes)));
     }
     let actions = ["Update an account", "Add an account", "Abort"].map(String::from);
     match p.choose("What would you like to do?", &actions, 0)? {
@@ -324,9 +392,9 @@ fn load_target(args: &SetupArgs, path: &Path, p: &mut Prompter) -> Result<(AppCo
             let names: Vec<String> = cfg.accounts.keys().cloned().collect();
             let pick = p.choose("Which account?", &names, 0)?;
             let name = names[pick].clone();
-            Ok((cfg, Intent::Update(name)))
+            Ok((cfg, Intent::Update(name), Some(bytes)))
         }
-        1 => Ok((cfg, Intent::Add)),
+        1 => Ok((cfg, Intent::Add, Some(bytes))),
         _ => Err(err(2, "setup aborted; nothing was changed")),
     }
 }
@@ -1161,9 +1229,10 @@ fn doctor_step(
     path: &Path,
     shown: Option<&Path>,
     name: &str,
-    provider: &ProviderConfig,
+    cfg: &AppConfig,
     engine: &HimalayaConfig,
 ) -> Value {
+    let provider = &cfg.provider;
     let mut items = Vec::new();
     match Service::open(path).and_then(|mut service| service.doctor(name)) {
         Err(e) => items.push(check_item(
@@ -1241,6 +1310,18 @@ fn doctor_step(
             }
         }
     }
+    // Like doctor's top-level `ready`, setup's ignores the update item.
+    let ready = items.iter().all(|i| i["ready"] == true);
+    let unit = crate::update::report::unit_of(name);
+    let update = crate::update::report::doctor_block(cfg.updates, unit);
+    if update["ready"] == false {
+        items.push(check_item(
+            "update",
+            false,
+            update["reason"].as_str().map(str::to_owned),
+            update["fix"].as_str().unwrap_or_default().to_owned(),
+        ));
+    }
     p.say("Checks:");
     for item in &items {
         let check = item["check"].as_str().unwrap_or_default();
@@ -1249,7 +1330,7 @@ fn doctor_step(
             Some(fix) => p.say(&format!("  not ready  {check}: {fix}")),
         }
     }
-    json!({"ready": items.iter().all(|i| i["ready"] == true), "items": items})
+    json!({"ready": ready, "items": items})
 }
 
 /// One doctor item; `error` and `fix` only when it is not ready.

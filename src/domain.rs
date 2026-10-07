@@ -4,10 +4,37 @@ use std::{collections::BTreeMap, path::PathBuf};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub schema_version: u32,
+    /// What `watch` does about new releases; a config without it means `auto`.
+    #[serde(default)]
+    pub updates: UpdateMode,
     pub state_dir: PathBuf,
     pub provider: ProviderConfig,
     pub policy: PolicyConfig,
     pub accounts: BTreeMap<String, AccountConfig>,
+}
+
+/// The `updates` setting: `auto` installs new releases in the background,
+/// `notify` only reports them, `off` makes no network calls.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateMode {
+    #[default]
+    Auto,
+    Notify,
+    Off,
+}
+impl UpdateMode {
+    pub const ALL: [UpdateMode; 3] = [UpdateMode::Auto, UpdateMode::Notify, UpdateMode::Off];
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UpdateMode::Auto => "auto",
+            UpdateMode::Notify => "notify",
+            UpdateMode::Off => "off",
+        }
+    }
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|mode| mode.as_str() == value)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -364,6 +364,7 @@ fn service_commands_through_the_cli() {
             .current_dir(&cwd)
             .args(args)
             .env("HOME", &home)
+            .env("XDG_CACHE_HOME", home.join(".cache"))
             .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
             .env_remove("MAILTRIAGE_CONFIG")
             .output()

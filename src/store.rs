@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 /// Schema migrations: (version reached, SQL). Each runs in its own
 /// `BEGIN IMMEDIATE` transaction that re-reads `user_version` first.
-const MIGRATIONS: [(u32, &str); 5] = [
+const MIGRATIONS: [(u32, &str); 7] = [
     (
         1,
         "CREATE TABLE metadata(key TEXT PRIMARY KEY, value INTEGER NOT NULL);
@@ -83,7 +83,30 @@ CREATE INDEX event_account ON filing_events(account, id);
         5,
         "CREATE TABLE pass_heartbeats(account TEXT PRIMARY KEY, finished_at TEXT NOT NULL, partial INTEGER NOT NULL, exit_code INTEGER NOT NULL, mode TEXT NOT NULL);",
     ),
+    (
+        6,
+        "ALTER TABLE placements ADD COLUMN refile_once INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE placements ADD COLUMN filed_home_folder TEXT;
+ALTER TABLE placements ADD COLUMN filed_home_epoch INTEGER;
+ALTER TABLE placements ADD COLUMN filed_home_uid INTEGER;
+ALTER TABLE filing_intents ADD COLUMN consumes_refile INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE folders ADD COLUMN drain_until_uid INTEGER;
+WITH newest(account,mid,id) AS (SELECT account,message_id,MAX(id) FROM filing_intents
+  WHERE kind='move' AND state='applied' GROUP BY account,message_id)
+UPDATE placements SET filed_home_folder=home_folder,filed_home_epoch=home_epoch,filed_home_uid=home_uid
+ WHERE location_state='known' AND home_folder IS NOT NULL AND home_epoch IS NOT NULL AND home_uid IS NOT NULL
+ AND NOT EXISTS(SELECT 1 FROM folders f WHERE f.account=placements.account AND f.native=placements.home_folder AND f.state='retired')
+ AND EXISTS(SELECT 1 FROM newest w JOIN filing_intents i ON i.id=w.id
+  WHERE w.account=placements.account AND w.mid=placements.message_id
+  AND i.target_uid IS NOT NULL AND i.target=placements.home_folder AND i.target_epoch=placements.home_epoch AND i.target_uid=placements.home_uid);",
+    ),
+    // The version that ran each pass; nullable, so processes of the
+    // previous release keep inserting heartbeats (spec "Rolling updates").
+    (7, "ALTER TABLE pass_heartbeats ADD COLUMN version TEXT;"),
 ];
+
+/// The schema this binary migrates to; a newer database is refused.
+const LATEST: u32 = MIGRATIONS[MIGRATIONS.len() - 1].0;
 
 /// Runs one migration under the write lock, unless another process applied
 /// it since this one read `user_version`: the version is re-read inside the
@@ -131,7 +154,7 @@ impl Store {
         db.busy_timeout(StdDuration::from_secs(5))?;
         db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;")?;
         let version: u32 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 5 {
+        if version > LATEST {
             bail!("database schema is newer than this binary");
         }
         for (to, sql) in MIGRATIONS {
@@ -158,7 +181,8 @@ impl Store {
             )
             .optional()?)
     }
-    /// Records how the account's latest sync pass ended.
+    /// Records how the account's latest sync pass ended, and the version
+    /// of mailtriage that ran it.
     pub fn record_heartbeat(
         &self,
         account: &str,
@@ -167,19 +191,20 @@ impl Store {
         mode: &str,
     ) -> Result<()> {
         self.db.execute(
-            "INSERT INTO pass_heartbeats(account,finished_at,partial,exit_code,mode) VALUES(?,?,?,?,?)
+            "INSERT INTO pass_heartbeats(account,finished_at,partial,exit_code,mode,version) VALUES(?,?,?,?,?,?)
              ON CONFLICT(account) DO UPDATE SET finished_at=excluded.finished_at,partial=excluded.partial,
-             exit_code=excluded.exit_code,mode=excluded.mode",
-            params![account, now(), partial, exit_code, mode],
+             exit_code=excluded.exit_code,mode=excluded.mode,version=excluded.version",
+            params![account, now(), partial, exit_code, mode, env!("CARGO_PKG_VERSION")],
         )?;
         Ok(())
     }
-    /// The latest pass: `{finished_at, partial, exit_code, mode}`.
+    /// The latest pass: `{finished_at, partial, exit_code, mode, version}`;
+    /// `version` is `null` for rows written before schema 7.
     pub fn heartbeat(&self, account: &str) -> Result<Option<Value>> {
         Ok(self
             .db
             .query_row(
-                "SELECT finished_at,partial,exit_code,mode FROM pass_heartbeats WHERE account=?",
+                "SELECT finished_at,partial,exit_code,mode,version FROM pass_heartbeats WHERE account=?",
                 [account],
                 |r| {
                     Ok(json!({
@@ -187,6 +212,7 @@ impl Store {
                         "partial": r.get::<_, bool>(1)?,
                         "exit_code": r.get::<_, i64>(2)?,
                         "mode": r.get::<_, String>(3)?,
+                        "version": r.get::<_, Option<String>>(4)?,
                     }))
                 },
             )
@@ -634,12 +660,20 @@ fn capture_rescan_set(
     ] {
         tx.execute(sql, params![account, mailbox, new])?;
     }
+    // Refile spec "Filed home": a UIDVALIDITY change ends every filed home in
+    // the folder; rediscovering the message never restores one.
+    tx.execute(
+        "UPDATE placements SET filed_home_folder=NULL,filed_home_epoch=NULL,filed_home_uid=NULL WHERE account=?1 AND filed_home_folder=?2",
+        params![account, mailbox],
+    )?;
     tx.execute(
         "UPDATE arrivals SET state='vanished',resolved_at=?3 WHERE account=?1 AND folder=?2 AND state='pending'",
         params![account, mailbox, now()],
     )?;
+    // Refile spec "Draining": an epoch change during draining records a new
+    // snapshot (the reset-time UIDNEXT).
     tx.execute(
-        "UPDATE folders SET rescan_epoch=?3,rescan_below_uid=?4,rescan_complete=0,epoch=?3,watch_from_uid=NULL WHERE account=?1 AND native=?2",
+        "UPDATE folders SET rescan_epoch=?3,rescan_below_uid=?4,rescan_complete=0,epoch=?3,watch_from_uid=NULL,drain_until_uid=CASE WHEN drain_until_uid>0 THEN ?4 ELSE drain_until_uid END WHERE account=?1 AND native=?2",
         params![account, mailbox, new, snapshot.uid_next],
     )?;
     Ok(())
@@ -702,4 +736,92 @@ pub(crate) fn bump(db: &Connection) -> Result<()> {
 }
 pub fn now() -> String {
     Utc::now().to_rfc3339()
+}
+
+#[cfg(test)]
+mod schema_7 {
+    use super::*;
+
+    /// A database migrated only up to `version`, as an older binary left it.
+    fn database_at(version: u32) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        let db = Connection::open(&path).unwrap();
+        for (to, sql) in MIGRATIONS.iter().filter(|(to, _)| *to <= version) {
+            migrate(&db, *to, sql).unwrap();
+        }
+        (dir, path)
+    }
+
+    fn user_version(path: &Path) -> u32 {
+        Connection::open(path)
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// The heartbeat statement of the release before schema 7.
+    const V6_INSERT: &str = "INSERT INTO pass_heartbeats(account,finished_at,partial,exit_code,mode) VALUES(?,?,?,?,?)
+             ON CONFLICT(account) DO UPDATE SET finished_at=excluded.finished_at,partial=excluded.partial,
+             exit_code=excluded.exit_code,mode=excluded.mode";
+
+    #[test]
+    fn every_older_schema_migrates_to_7() {
+        for from in [0, 5, 6] {
+            let (_dir, path) = database_at(from);
+            Store::open(&path).unwrap();
+            assert_eq!(user_version(&path), 7, "from {from}");
+        }
+    }
+
+    #[test]
+    fn a_database_at_8_is_refused() {
+        let (_dir, path) = database_at(7);
+        Connection::open(&path)
+            .unwrap()
+            .pragma_update(None, "user_version", 8)
+            .unwrap();
+        let error = Store::open(&path).err().unwrap();
+        assert_eq!(
+            error.to_string(),
+            "database schema is newer than this binary"
+        );
+    }
+
+    #[test]
+    fn old_rows_read_as_version_null() {
+        let (_dir, path) = database_at(6);
+        let old = Connection::open(&path).unwrap();
+        old.execute(V6_INSERT, params!["work", now(), false, 0, "off"])
+            .unwrap();
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.heartbeat("work").unwrap().unwrap()["version"],
+            Value::Null
+        );
+        store.record_heartbeat("work", false, 0, "off").unwrap();
+        assert_eq!(
+            store.heartbeat("work").unwrap().unwrap()["version"],
+            env!("CARGO_PKG_VERSION")
+        );
+    }
+
+    /// Rolling updates: a process of the previous release keeps its open
+    /// connection and inserts heartbeats after another one migrated.
+    #[test]
+    fn a_connection_opened_at_6_still_inserts_after_the_migration() {
+        let (_dir, path) = database_at(6);
+        let old = Connection::open(&path).unwrap();
+        old.execute(V6_INSERT, params!["home", now(), false, 0, "off"])
+            .unwrap();
+        let store = Store::open(&path).unwrap();
+        assert_eq!(user_version(&path), 7);
+        old.execute(V6_INSERT, params!["work", now(), true, 4, "live"])
+            .unwrap();
+        let beat = store.heartbeat("work").unwrap().unwrap();
+        assert_eq!(
+            (beat["exit_code"].clone(), beat["version"].clone()),
+            (json!(4), Value::Null)
+        );
+    }
 }

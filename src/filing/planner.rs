@@ -1,7 +1,11 @@
 //! Pure filing planner (spec "Planner"): local state in, actions out.
+use super::refile::rules::{self, RefileInput, Verdict};
 use crate::domain::{FilingMode, Urgency};
 use chrono::{DateTime, Utc};
-use std::{cmp::Ordering, collections::BTreeMap};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Locator {
@@ -42,6 +46,9 @@ pub struct Plan {
     /// Flag-eligible messages that already carry `\Flagged`: their one flag
     /// attempt is consumed without an engine call.
     pub satisfied_flags: Vec<String>,
+    /// Refile spec: messages whose `Move` consumes their refile mark.
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    pub refile_moves: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,6 +125,8 @@ pub struct PlanInput {
 
 enum MoveDecision {
     Move(Action),
+    /// A move that consumes the message's refile mark.
+    Refile(Action),
     Clear,
     Nothing,
 }
@@ -130,6 +139,13 @@ enum FlagDecision {
 }
 
 pub fn plan(input: &PlanInput) -> Plan {
+    plan_with_refile(input, &RefileInput::default())
+}
+
+/// `plan` plus the refile rule (refile spec "Each pass", Planning): a marked
+/// message whose candidate rules hold moves to its effective category's
+/// folder, after the explicit-target rule and before the source-folder rule.
+pub fn plan_with_refile(input: &PlanInput, refile: &RefileInput) -> Plan {
     let mut out = Plan::default();
     if input.mode == FilingMode::Off {
         return out;
@@ -153,8 +169,12 @@ pub fn plan(input: &PlanInput) -> Plan {
             FlagDecision::Satisfied => out.satisfied_flags.push(m.message_id.clone()),
             FlagDecision::Nothing => {}
         }
-        match move_action(input, m, home, home_view) {
+        match move_action(input, m, home, home_view, refile) {
             MoveDecision::Move(a) => actions.push(a),
+            MoveDecision::Refile(a) => {
+                out.refile_moves.insert(m.message_id.clone());
+                actions.push(a);
+            }
             MoveDecision::Clear => out
                 .cleared_requests
                 .push((m.message_id.clone(), m.desired_rev)),
@@ -178,6 +198,13 @@ pub fn plan(input: &PlanInput) -> Plan {
         .flat_map(|(_, _, a)| a)
         .take(input.max_actions)
         .collect();
+    let kept: BTreeSet<&str> = out
+        .actions
+        .iter()
+        .filter(|a| matches!(a, Action::Move { .. }))
+        .map(Action::message_id)
+        .collect();
+    out.refile_moves.retain(|id| kept.contains(id.as_str()));
     out
 }
 
@@ -247,7 +274,7 @@ fn resolve_target(input: &PlanInput, m: &PlanMessage, target: &str) -> Option<St
 /// a move into a folder without a checkpoint could land below its first
 /// watch and never be discovered. A preview also counts a folder it would
 /// create.
-fn target_usable(input: &PlanInput, folder: &str) -> bool {
+pub(crate) fn target_usable(input: &PlanInput, folder: &str) -> bool {
     match input.folders.get(folder) {
         Some(v) if !v.paused => match v.usable {
             FolderUse::WouldCreate => input.preview,
@@ -264,6 +291,7 @@ fn move_action(
     m: &PlanMessage,
     home: &Locator,
     home_view: &FolderView,
+    refile: &RefileInput,
 ) -> MoveDecision {
     if m.open_move_intent {
         return MoveDecision::Nothing;
@@ -288,6 +316,23 @@ fn move_action(
             desired_rev: m.desired_rev,
             consumes_eligible: false,
         });
+    }
+    // Refile: a marked message outside the source folders, with the home an
+    // explicit move needs; it waits while any candidate rule fails.
+    let marked = refile.facts.get(&m.message_id).is_some_and(|f| f.marked);
+    if marked && !home_view.is_source {
+        let home_ok = (home_view.is_category && home_view.usable == FolderUse::Ok)
+            || home_view.retired_listed;
+        return match rules::verdict(input, m, refile) {
+            Verdict::Candidate(c) if home_ok => MoveDecision::Refile(Action::Move {
+                message_id: m.message_id.clone(),
+                from: home.clone(),
+                to: c.target,
+                desired_rev: m.desired_rev,
+                consumes_eligible: false,
+            }),
+            _ => MoveDecision::Nothing,
+        };
     }
     if !home_view.is_source || m.pinned {
         return MoveDecision::Nothing;
@@ -823,5 +868,289 @@ mod tests {
         assert!(plan(&i).folders_to_create.is_empty());
         i.preview = true;
         assert_eq!(plan(&i).folders_to_create, vec!["Newsletters".to_string()]);
+    }
+
+    /// Refile spec "Candidates" and the planner's refile rule.
+    mod refile {
+        use super::{flags, homed, input, moves, msg, t, view};
+        use crate::filing::planner::{
+            plan, plan_with_refile, Action, FolderUse, PlanInput, PlanMessage,
+        };
+        use crate::filing::refile::rules::{
+            verdict, Candidate, Reason, RefileFacts, RefileInput, Skip, Verdict,
+        };
+        use std::collections::BTreeSet;
+
+        /// Filed by mailtriage into Newsletters; `category` is its current classification.
+        fn filed(id: &str, category: &str) -> PlanMessage {
+            let mut m = homed(msg(id, category), "Newsletters", 2);
+            m.filed_at = Some("x".into());
+            m
+        }
+
+        /// Marked, at its filed home, every placement rule holding.
+        fn facts(m: &PlanMessage) -> RefileFacts {
+            RefileFacts {
+                marked: true,
+                at_filed_home: true,
+                home_folder: m.home.as_ref().map(|h| h.folder.clone()),
+                single_occurrence: true,
+                ..Default::default()
+            }
+        }
+
+        /// `updates` is configured but missing from `input()`'s folder map,
+        /// as a category whose folder collides with a source is.
+        fn refile(entries: &[(&PlanMessage, RefileFacts)]) -> RefileInput {
+            RefileInput {
+                facts: entries
+                    .iter()
+                    .map(|(m, f)| (m.message_id.clone(), f.clone()))
+                    .collect(),
+                frozen: BTreeSet::new(),
+                categories: [
+                    "correspondence",
+                    "transactions",
+                    "newsletters",
+                    "updates",
+                    "other",
+                ]
+                .map(String::from)
+                .into_iter()
+                .collect(),
+            }
+        }
+
+        fn plan_of(i: &PlanInput, r: &RefileInput) -> Vec<(String, String)> {
+            moves(&plan_with_refile(i, r))
+        }
+
+        #[test]
+        fn a_marked_message_moves_to_its_new_category_folder() {
+            let m = filed("m", "transactions");
+            let p = plan_with_refile(&input(vec![m.clone()]), &refile(&[(&m, facts(&m))]));
+            assert_eq!(moves(&p), vec![("m".into(), "Transactions".into())]);
+            assert_eq!(p.refile_moves, BTreeSet::from(["m".to_string()]));
+            assert!(matches!(
+                &p.actions[0],
+                Action::Move {
+                    consumes_eligible: false,
+                    desired_rev: 0,
+                    ..
+                }
+            ));
+            let mut unmarked = facts(&m);
+            unmarked.marked = false;
+            assert!(
+                plan_of(&input(vec![m.clone()]), &refile(&[(&m, unmarked)])).is_empty(),
+                "only marked mail is refiled"
+            );
+            assert!(
+                plan(&input(vec![m])).actions.is_empty(),
+                "`plan` has no refile facts"
+            );
+        }
+
+        #[test]
+        fn every_placement_rule_keeps_a_marked_message_where_it_is() {
+            type Change = fn(&mut PlanMessage, &mut RefileFacts);
+            let cases: [(&str, Change); 7] = [
+                ("not at its filed home", |_, f| f.at_filed_home = false),
+                ("pinned", |m, f| {
+                    m.pinned = true;
+                    f.pinned = true;
+                }),
+                ("blocked", |m, f| {
+                    m.blocked = true;
+                    f.blocked = true;
+                }),
+                ("done", |_, f| f.done = true),
+                ("open move intent", |m, f| {
+                    m.open_move_intent = true;
+                    f.open_move_intent = true;
+                }),
+                ("corrected", |m, f| {
+                    m.effective.category_from_override = true;
+                    f.corrected = true;
+                }),
+                ("two copies", |_, f| f.single_occurrence = false),
+            ];
+            for (name, change) in cases {
+                let mut m = filed("m", "transactions");
+                let mut f = facts(&m);
+                change(&mut m, &mut f);
+                assert!(
+                    plan_of(&input(vec![m.clone()]), &refile(&[(&m, f)])).is_empty(),
+                    "{name}"
+                );
+            }
+        }
+
+        #[test]
+        fn an_explicit_target_and_the_source_rule_come_first() {
+            let mut m = filed("m", "transactions");
+            m.desired_target = Some("transactions".into());
+            m.desired_rev = 4;
+            let mut f = facts(&m);
+            f.explicit_target = true;
+            let p = plan_with_refile(&input(vec![m.clone()]), &refile(&[(&m, f)]));
+            assert_eq!(moves(&p), vec![("m".into(), "Transactions".into())]);
+            assert!(
+                p.refile_moves.is_empty(),
+                "the explicit request's move consumes no mark"
+            );
+            let s = msg("s", "newsletters");
+            let p = plan_with_refile(&input(vec![s.clone()]), &refile(&[(&s, facts(&s))]));
+            assert_eq!(moves(&p), vec![("s".into(), "Newsletters".into())]);
+            assert!(
+                p.refile_moves.is_empty(),
+                "a source folder's mail follows the source rule"
+            );
+        }
+
+        #[test]
+        fn a_marked_message_waits_for_a_current_classification_and_a_usable_target() {
+            let mut stale = filed("stale", "transactions");
+            stale.effective.current = false;
+            let paused = filed("paused", "transactions");
+            let r = refile(&[(&stale, facts(&stale)), (&paused, facts(&paused))]);
+            let mut i = input(vec![stale.clone(), paused.clone()]);
+            i.folders.get_mut("Transactions").unwrap().paused = true;
+            assert!(plan_of(&i, &r).is_empty());
+            assert_eq!(verdict(&i, &stale, &r), Verdict::Waiting);
+            assert_eq!(
+                verdict(&i, &paused, &r),
+                Verdict::Skipped(Skip::TargetUnusable)
+            );
+            let mut i = input(vec![paused.clone()]);
+            i.folders.get_mut("Transactions").unwrap().epoch = None;
+            assert!(
+                plan_of(&i, &r).is_empty(),
+                "a target without established discovery"
+            );
+        }
+
+        #[test]
+        fn incomplete_input_never_moves() {
+            let mut m = filed("m", "transactions");
+            m.effective.input_incomplete = true;
+            let r = refile(&[(&m, facts(&m))]);
+            let i = input(vec![m.clone()]);
+            assert!(plan_of(&i, &r).is_empty());
+            assert_eq!(verdict(&i, &m, &r), Verdict::Skipped(Skip::IncompleteInput));
+        }
+
+        #[test]
+        fn inbox_and_source_folders_are_never_targets() {
+            let inbox = filed("inbox", "correspondence");
+            let collides = filed("collides", "updates");
+            let unknown = filed("unknown", "removed");
+            let r = refile(&[
+                (&inbox, facts(&inbox)),
+                (&collides, facts(&collides)),
+                (&unknown, facts(&unknown)),
+            ]);
+            let i = input(vec![inbox.clone(), collides.clone(), unknown.clone()]);
+            assert!(plan_of(&i, &r).is_empty());
+            assert_eq!(
+                verdict(&i, &inbox, &r),
+                Verdict::Skipped(Skip::TargetInboxOrSource)
+            );
+            assert_eq!(
+                verdict(&i, &collides, &r),
+                Verdict::Skipped(Skip::TargetInboxOrSource)
+            );
+            assert_eq!(
+                verdict(&i, &unknown, &r),
+                Verdict::Skipped(Skip::TargetUnusable)
+            );
+        }
+
+        #[test]
+        fn verdicts_name_the_target_and_why_it_moves() {
+            let here = filed("here", "newsletters");
+            let changed = filed("changed", "transactions");
+            let mut i = input(vec![]);
+            i.folders
+                .insert("Old".into(), view(FolderUse::Unusable, false, true, 5));
+            i.folders
+                .insert("Gone".into(), view(FolderUse::Unusable, false, false, 6));
+            let mut retired = homed(msg("retired", "transactions"), "Old", 5);
+            retired.filed_at = Some("x".into());
+            let mut unlisted = homed(msg("unlisted", "transactions"), "Gone", 6);
+            unlisted.filed_at = Some("x".into());
+            let source = msg("source", "transactions");
+            let r = refile(&[
+                (&here, facts(&here)),
+                (&changed, facts(&changed)),
+                (&retired, facts(&retired)),
+                (&unlisted, facts(&unlisted)),
+                (&source, facts(&source)),
+            ]);
+            let to_transactions = |reason| {
+                Verdict::Candidate(Candidate {
+                    target: "Transactions".into(),
+                    category: "transactions".into(),
+                    reason,
+                })
+            };
+            assert_eq!(verdict(&i, &here, &r), Verdict::InPlace);
+            assert_eq!(
+                verdict(&i, &changed, &r),
+                to_transactions(Reason::CategoryChanged)
+            );
+            assert_eq!(
+                verdict(&i, &retired, &r),
+                to_transactions(Reason::FolderRetired)
+            );
+            assert_eq!(
+                verdict(&i, &unlisted, &r),
+                to_transactions(Reason::FolderRetired)
+            );
+            assert_eq!(verdict(&i, &source, &r), Verdict::OutOfScope);
+            i.messages = vec![retired, unlisted];
+            assert_eq!(
+                plan_of(&i, &r),
+                vec![("retired".into(), "Transactions".into())],
+                "out of a retired folder only while LIST reports it"
+            );
+        }
+
+        #[test]
+        fn the_refile_move_writes_no_flag_and_the_flag_rule_is_unchanged() {
+            let mut actionable = filed("act", "transactions");
+            actionable.effective.action_required = Some(true);
+            let quiet = filed("quiet", "transactions");
+            let r = refile(&[(&actionable, facts(&actionable)), (&quiet, facts(&quiet))]);
+            let p = plan_with_refile(&input(vec![actionable, quiet]), &r);
+            assert_eq!(
+                flags(&p),
+                vec!["act".to_string()],
+                "the existing rule flags filed mail"
+            );
+            assert!(
+                matches!(&p.actions[0], Action::Flag { at, .. } if at.folder == "Newsletters"),
+                "where it is, before the move"
+            );
+            assert_eq!(moves(&p).len(), 2);
+        }
+
+        #[test]
+        fn refile_moves_share_the_cap() {
+            let mut a = filed("a", "transactions");
+            a.internal_date = Some(t(11));
+            let mut b = filed("b", "transactions");
+            b.internal_date = Some(t(10));
+            let r = refile(&[(&a, facts(&a)), (&b, facts(&b))]);
+            let mut i = input(vec![a, b]);
+            i.max_actions = 1;
+            let p = plan_with_refile(&i, &r);
+            assert_eq!(moves(&p), vec![("b".into(), "Transactions".into())]);
+            assert_eq!(
+                p.refile_moves,
+                BTreeSet::from(["b".to_string()]),
+                "only moves that made the cut"
+            );
+        }
     }
 }

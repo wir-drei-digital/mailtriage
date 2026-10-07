@@ -81,6 +81,7 @@ stdout:
   "key_source": "command",
   "key_store": "keychain",
   "filing": "dry_run",
+  "updates": "auto",
   "doctor": {"ready": false, "items": [
     {"check": "provider", "ready": true},
     {"check": "key", "ready": false,
@@ -97,6 +98,8 @@ stdout:
   openrouter` changed it without a key flag (the key source is kept), or it is
   `fake`.
 - `filing`: `off`, `dry_run` or `live`.
+- `updates`: the config's `updates` after this run (`auto`, `notify` or `off`);
+  `--updates` sets it, otherwise an existing config keeps its value.
 - `doctor.items[].check`: `provider`, `key`, `mail`, and `filing` when filing is
   on; `state` (not ready) when `doctor` itself failed, for example when the
   state database cannot be opened. `error` and `fix` appear only when `ready`
@@ -128,7 +131,9 @@ it. Codes: 2 input, missing flag without
 prompts, key flags with `--provider fake`, abort (`setup aborted; nothing was
 changed`, `setup aborted: input ended`); 3 Himalaya, key tool or service
 manager failure, unwritable config; 5 config exists without `--update`, a
-binding-changing update, unmarked service file.
+binding-changing update, unmarked service file, another command holding the
+config lock (`config_busy`), or a config that changed since step 1 read it
+(`config_changed`); step 8 writes under the exclusive config lock.
 
 ## `doctor` key fields
 
@@ -175,12 +180,31 @@ The CLI wraps each in `{"schema_version":1,"service":{...}}`.
   "not_installed", manager, account, unit_path}`.
 - `system_service::status_account(&Service, config, account,
   Option<&Context>)`: `{manager:"launchd"|"systemd"|"none", account, installed,
-  loaded, running, pid, last_exit_status, unit_path, log_paths, last_pass}`.
-  `last_pass` is `{finished_at, partial, exit_code, mode}` or `null`.
+  loaded, running, pid, last_exit_status, unit_path, log_paths, last_pass,
+  update}`. `last_pass` is `{finished_at, partial, exit_code, mode, version}`
+  or `null`.
+  `update` is `update::report::update_block(mode, Option<(Manager, unit
+  path)>)`: `{mode, executable, installed, latest, available, checked_at,
+  last_error, replaceable, reason}`. `doctor` adds `update::report::doctor_block`
+  (the same plus `ready`, and `fix` when not ready), and setup step 9 adds an
+  `update` item when that block is not ready.
 - `Context::detect()` fails with exit 2 on platforms other than macOS and
   Linux and exit 3 on Linux without `systemctl`; `status` then reports
   `manager:"none"`. Unknown account: exit 2. Unmarked file at the unit path:
   exit 5. A failed `launchctl`/`systemctl` call: exit 3.
+
+## `update`
+
+`update::command::run(check_only, &dyn Hooks) -> Result<Value>` is
+`mailtriage update [--check]`; it opens no config. Errors are `ServiceError`s:
+3 for network, release, archive, smoke-test and replaceability problems, 5
+when the installation lock stayed held for 60 s. The JSON results are in the
+[guide](guide.md#updates). The code is in `src/update/`: `github` (URL rules,
+release list, downloads), `release` (candidate, archive names,
+`SHA256SUMS`), `cache` (`update.json`), `schedule`, `check` (one refresh),
+`platform` (file identity, replaceability, `--version` probes), `archive`,
+`install` (the transaction under the installation lock), `service_files`
+(decoding service files) and `command`.
 
 ## Heartbeat (schema v5)
 
@@ -406,3 +430,54 @@ pub fn stop(ctx: &Context, service: &Service, config_path: &Path, account: &str,
   `{"schema_version":1,"service":{...}}`.
 - `system_service::install` now runs `launchctl enable gui/<uid>/<label>`
   between the bootout and the `bootstrap`, so a reinstall clears a `stop`.
+
+## `filing refile` (schema v6)
+
+```rust
+// mailtriage::service::RefileOptions (= filing::refile::command::RefileOptions)
+pub struct RefileOptions {
+  pub category: Option<String>, // only candidates whose new category is this id
+  pub folder: Option<String>,   // a folder's native name, or its configured name
+  pub limit: usize,             // 1..=500, default 50; lists candidates only
+}
+impl Service {
+  // Preview: no locks, no engine calls; may bring the generation up to date.
+  pub fn filing_refile(&mut self, account: &str, opts: RefileOptions) -> Result<Value>;
+  // Filing `live` only; shared configuration lock; `mailtriage.json` must be unchanged.
+  pub fn filing_refile_apply(&mut self, account: &str, opts: RefileOptions) -> Result<Value>;
+}
+```
+
+Preview result (filing `off`: the same shape, empty):
+
+```json
+{"schema_version":1,"account":"work","mode":"live",
+ "candidates":[{"id":"msg_…","folder":"INBOX.Other","target":"INBOX.Updates","category":"updates","reason":"category_changed"}],
+ "total":1,
+ "folders":[{"folder":"Other","native":"INBOX.Other","retired":false,"candidates":1,"waiting":0}],
+ "waiting":0,
+ "skipped":{"not_filed_by_mailtriage":0,"corrected":0,"pinned":0,"blocked":0,"done":0,"open_intent":0,"explicit_target":0,"multiple_copies":0,"incomplete_input":0,"retired_frozen":0,"target_unusable":0,"target_inbox_or_source":0}}
+```
+
+`reason` is `category_changed` or `folder_retired`. Candidates and waiting messages are ordered by native folder, then UID; `folders` by native name. `--category` filters `candidates` and `skipped`, not `waiting`.
+
+Apply result: `{"schema_version":1,"account":"work","marked":N,"waiting_marked":W}`. `marked` counts candidates newly marked, `waiting_marked` waiting messages newly marked (only with `folder` and no `category`). Repeating it marks 0.
+
+Errors: 2 for `--apply` outside `live` (`refile --apply requires filing mode live`), an unknown category, a folder that names no category or retired folder (`unknown folder: not a category or retired folder`) or several (`folder name matches several folders; pass the native name: A, B`), a limit outside 1..=500, an unknown account; 3 when the state database is unavailable; 5 when `mailtriage.json` changed (`reason: config_changed`) or the placements kept changing (`placements changed concurrently; retry`).
+
+Schema v6 (migration 6): `placements.refile_once`, `placements.filed_home_folder`/`filed_home_epoch`/`filed_home_uid` (the occurrence a COPYUID-proven mailtriage move produced; kept only while it is the known home), `filing_intents.consumes_refile`, `folders.drain_until_uid` (NULL: frozen; 0: retained in the last pass; N: draining until UID N). The newer-schema guard is `LATEST` (7 since schema v7, below).
+
+Also: `filing status` gains `refile_marked` and `refile_candidates`; `categories apply` gains `hint` (null with filing `off`); `filing plan` refile moves carry `"reason":"refile"`; events `refile_marked`, `refile_cleared {reason}`, `refile_cancelled {intent_id, reason}`, and `moved` with `"reason":"refile"`.
+
+## Heartbeat version (schema v7)
+
+Migration 7 adds the nullable column `pass_heartbeats.version`.
+`Store::record_heartbeat` writes the running version (`CARGO_PKG_VERSION`) on
+every heartbeat, error heartbeats included, and `Store::heartbeat` returns it
+as `version` (`null` for rows written before v7). The newer-schema guard is
+`LATEST`, the last migration's version. Like every migration of a stable
+release, it is additive, so a process of the previous release keeps
+inserting heartbeats on an open connection after another process migrated.
+A process of a release before v7 updates an existing heartbeat row without
+touching `version`, so during a rolling update a row can keep the newer
+process's version until the next pass of a v7-capable process.

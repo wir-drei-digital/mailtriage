@@ -6,6 +6,7 @@ use crate::{
         self, arrivals, inputs,
         observe::{self, FolderMap, OfflineEngine, WatchRole, WatchSpec},
         planner::{self, Plan},
+        refile,
         transitions::{self, Transition},
         FilingSummary, FilingWrite, FolderRecord, Intent, LocationState, PassContext, Placement,
         StageOptions,
@@ -161,6 +162,9 @@ pub enum RetryTarget {
     Arrival(i64),
 }
 
+/// `filing refile` filters (refile spec "Command").
+pub use crate::filing::refile::command::RefileOptions;
+
 pub struct Service {
     pub config: AppConfig,
     path: PathBuf,
@@ -178,7 +182,10 @@ impl Service {
             )
         })?;
         let bytes = fs::read(&path)?;
-        let mut cfg = config::load(&path).map_err(|_| {
+        let mut cfg = config::load(&path).map_err(|e| {
+            if e.downcast_ref::<config::InvalidUpdates>().is_some() {
+                return err(2, config::UPDATES_RULE);
+            }
             err(
                 2,
                 "invalid configuration; check required fields, categories and provider settings",
@@ -689,8 +696,7 @@ impl Service {
         let store = &mut self.store;
         let result = (|| {
             let preview = ctx.mode == FilingMode::DryRun;
-            let plan =
-                filing::planner::plan(&filing::inputs::plan_input(store, ctx, map, preview)?);
+            let plan = filing::refile::plan_pass(store, ctx, map, preview)?;
             summary.planned = plan.actions.len();
             filing::apply::apply(store, ctx, map, &plan, summary)
         })();
@@ -1320,7 +1326,7 @@ impl Service {
     }
     /// `filing status`: configuration and stored state only, no engine calls.
     pub fn filing_status(&mut self, name: &str) -> Result<Value> {
-        let (account, _) = self.ensure(name)?;
+        let (account, generation) = self.ensure(name)?;
         let state = self.store.filing_state(name)?;
         let map = observe::offline_map(&self.store, name, &account)?;
         let folders = self.store.folder_records(name)?;
@@ -1332,7 +1338,11 @@ impl Service {
         let moving = open_moves(&self.store, name)?;
         let (mut blocked, mut quarantined, mut ambiguous) = (vec![], vec![], vec![]);
         let (mut eligible, mut stale) = (0, vec![]);
+        let mut refile_marked = 0;
         for (_, p, meta) in self.store.records_for_planning(name)? {
+            if p.refile_once {
+                refile_marked += 1;
+            }
             match p.blocked_reason.as_deref() {
                 Some("quarantined") => quarantined.push(p.message_id.clone()),
                 Some(reason) => blocked.push(json!({"id": p.message_id, "blocked_reason": reason})),
@@ -1356,6 +1366,8 @@ impl Service {
                 stale.push(p.message_id);
             }
         }
+        let refile_candidates =
+            refile::command::candidate_total(&self.store, name, &account, &generation)?;
         let unresolved = self.store.arrivals(name, Some("unresolved"))?;
         let last_pass = state.last_pass.clone().unwrap_or(Value::Null);
         Ok(json!({
@@ -1380,6 +1392,8 @@ impl Service {
             "unresolved_arrival_items": listed(&unresolved),
             "eligible_unfiled": eligible,
             "stale_requests": {"count": stale.len(), "ids": listed(&stale)},
+            "refile_marked": refile_marked,
+            "refile_candidates": refile_candidates,
             "alias_conflicts": map.alias_conflicts,
             "problems": last_pass.get("problems").cloned().unwrap_or(json!([])),
             "last_pass": last_pass,
@@ -1408,9 +1422,15 @@ impl Service {
                 max_attempts: self.config.policy.max_attempts,
                 verify_binding: &no_binding_check,
             };
-            planner::plan(&inputs::plan_input(&self.store, &ctx, &map, true)?)
+            let input = inputs::plan_input(&self.store, &ctx, &map, true)?;
+            let gone = refile::rules::gone(&self.store, name, &map.listed)?;
+            let facts = refile::rules::input(&self.store, name, &account, &gone)?;
+            planner::plan_with_refile(&input, &facts)
         };
-        let shown = &plan.actions[..plan.actions.len().min(limit)];
+        let shown: Vec<Value> = plan.actions[..plan.actions.len().min(limit)]
+            .iter()
+            .map(|a| plan_action(&plan, a))
+            .collect();
         Ok(
             json!({"schema_version":1,"account":name,"mode":filing::mode_str(mode),"folders_to_create":plan.folders_to_create,"actions":shown,"total":plan.actions.len()}),
         )
@@ -1477,6 +1497,25 @@ impl Service {
             }
         }
         Err(err(5, "placements changed concurrently; retry"))
+    }
+    /// `filing refile` without `--apply` (refile spec "Command"): which
+    /// filed mail would follow its new category. Read-only; it may bring the
+    /// classification generation up to date, as `filing plan` does.
+    pub fn filing_refile(&mut self, name: &str, opts: RefileOptions) -> Result<Value> {
+        let (account, generation) = self.ensure(name)?;
+        refile::command::preview(&self.store, name, &account, &generation, &opts)
+    }
+    /// `filing refile --apply` (refile spec "Command"): with filing `live`,
+    /// under the configuration lock and with `mailtriage.json` unchanged,
+    /// marks the matching set; the next passes move it.
+    pub fn filing_refile_apply(&mut self, name: &str, opts: RefileOptions) -> Result<Value> {
+        let _config_lock = self.shared_config_lock()?;
+        self.require_unchanged()?;
+        let (account, generation) = self.ensure(name)?;
+        if filing_mode(&account) != FilingMode::Live {
+            return Err(err(2, "refile --apply requires filing mode live"));
+        }
+        refile::command::apply(&mut self.store, name, &account, &generation, &opts)
     }
     pub fn review(&mut self, name: &str, id: &str, done: bool) -> Result<Value> {
         let (_, generation) = self.ensure(name)?;
@@ -1549,7 +1588,9 @@ impl Service {
         self.config_bytes_hash = hash(&fs::read(&self.path)?);
         self.config = updated;
         self.ensure(name)?;
-        self.categories(name)
+        let mut out = self.categories(name)?;
+        out["hint"] = refile::command::hint(name, &self.account(name)?);
+        Ok(out)
     }
     /// `categories validate --account`: the configuration checks of `apply`
     /// against the account's current configuration and filing mode, folder
@@ -1837,6 +1878,17 @@ fn listed<T>(all: &[T]) -> &[T] {
     &all[..all.len().min(LISTED)]
 }
 
+/// A `filing plan` action; a refile move carries `"reason": "refile"`.
+fn plan_action(plan: &Plan, action: &planner::Action) -> Value {
+    let mut value = json!(action);
+    if matches!(action, planner::Action::Move { .. })
+        && plan.refile_moves.contains(action.message_id())
+    {
+        value["reason"] = json!("refile");
+    }
+    value
+}
+
 /// Messages with an open move intent: moved or being moved, but not yet
 /// confirmed, so their placement still names the old home.
 fn open_moves(store: &Store, name: &str) -> Result<BTreeSet<String>> {
@@ -1849,7 +1901,7 @@ fn open_moves(store: &Store, name: &str) -> Result<BTreeSet<String>> {
 }
 
 /// The filing mode a pass would run: the configured one, `off` without an engine.
-fn filing_mode(account: &AccountConfig) -> FilingMode {
+pub(crate) fn filing_mode(account: &AccountConfig) -> FilingMode {
     match account.engine_config() {
         Some(_) => account.filing.mode,
         None => FilingMode::Off,

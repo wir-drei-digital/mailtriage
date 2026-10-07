@@ -15,6 +15,7 @@ fn mailtriage(cwd: &Path, home: Option<&Path>, env_config: Option<&Path>, args: 
         .current_dir(cwd)
         .args(args)
         .env_remove("MAILTRIAGE_CONFIG")
+        .env("XDG_CACHE_HOME", cwd)
         .env_remove("HOME");
     if let Some(home) = home {
         command.env("HOME", home);

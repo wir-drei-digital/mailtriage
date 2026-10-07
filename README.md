@@ -18,24 +18,28 @@ mailtriage is a local command-line tool that classifies your email. For each mes
 
 ## Install
 
-From a release (macOS arm64, Linux amd64 or Linux arm64), with the GitHub CLI:
+From a release (macOS arm64, Linux amd64 or Linux arm64), with the GitHub CLI; on Linux, set `PLATFORM` to `linux-amd64` or `linux-arm64` and use `sha256sum --check` in place of `shasum -a 256 --check`:
 
 ```sh
-VERSION=0.1.0
-gh release download "v$VERSION" --repo wir-drei-digital/mailtriage --pattern "mailtriage-v$VERSION-macos-arm64.tar.gz*"
-shasum -a 256 --check "mailtriage-v$VERSION-macos-arm64.tar.gz.sha256"
-tar -xzf "mailtriage-v$VERSION-macos-arm64.tar.gz"
-sudo install -m 0755 mailtriage /usr/local/bin/mailtriage
+VERSION=0.1.0 PLATFORM=macos-arm64
+gh release download "v$VERSION" --repo wir-drei-digital/mailtriage --pattern "mailtriage-v$VERSION-$PLATFORM.tar.gz*" &&
+  shasum -a 256 --check "mailtriage-v$VERSION-$PLATFORM.tar.gz.sha256" &&
+  tar -xzf "mailtriage-v$VERSION-$PLATFORM.tar.gz" &&
+  install -d ~/.local/bin &&
+  install -m 0755 mailtriage ~/.local/bin/mailtriage
 ```
 
-On Linux, use `linux-amd64` or `linux-arm64` in the file name and `sha256sum --check`. The macOS executable is unsigned and not notarized.
+The macOS executable is unsigned and not notarized. `~/.local/bin` must be on your `PATH`: if `command -v mailtriage` prints nothing, add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile (`~/.zprofile` on macOS, `~/.bashrc` on Linux) and open a new terminal.
 
 From source, with a stable Rust toolchain:
 
 ```sh
-cargo build --release --locked
-sudo install -m 0755 target/release/mailtriage /usr/local/bin/mailtriage
+cargo build --release --locked &&
+  install -d ~/.local/bin &&
+  install -m 0755 target/release/mailtriage ~/.local/bin/mailtriage
 ```
+
+mailtriage keeps itself up to date: the background service installs new releases by itself, and `mailtriage update` installs one now. A root-owned or otherwise unsafe install, for example one made with `sudo` into `/usr/local/bin`, is not replaced: mailtriage only reports new releases for it ([Binaries mailtriage does not replace](docs/guide.md#binaries-mailtriage-does-not-replace)).
 
 ## Get started
 

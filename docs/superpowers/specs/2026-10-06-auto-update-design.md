@@ -284,6 +284,13 @@ rename) under the cache lock:
   component with `release vX.Y.Z has no PLATFORM archive`.
 - `configs` is keyed by canonical config path, and `installs` by canonical
   installation path. A process only uses its own entries.
+- Keys a binary does not know, at the top level and inside `configs` and `installs`
+  entries, are kept on every rewrite, so binaries of different releases (and the
+  tray) do not drop each other's data. Keys inside the nested objects it does know
+  (`release` and its assets, `identity`, error records) are not kept by a binary that
+  does not know them: any rewrite by it drops them, so newer fields there must be
+  optional. Each successful check replaces `release` as a whole; until then,
+  `release.archives` keeps every component's entry.
 - Errors are `null` or `{"at":"…","message":"…"}`.
 - A missing or unreadable file counts as empty. A file that cannot be written stops
   `watch`'s network work (see below).
@@ -484,8 +491,9 @@ update has committed.
   prerelease, never installed automatically) to try a build on one machine first, and
   drops the note about the repository being private.
 - **Release workflow changes.**
-  - Publishing uses one concurrency group across all tags (queued, never cancelled),
-    so two releases never publish at once.
+  - Publishing uses one concurrency group across tags, so two releases never publish
+    at once. A newer pending run can cancel a waiting one, which must then be re-run;
+    `releases.md` says so.
   - A stable release is marked Latest only when it is higher than every published
     stable release. The updater does not depend on this, but people browsing GitHub
     do.

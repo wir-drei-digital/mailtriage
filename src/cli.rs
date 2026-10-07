@@ -1,15 +1,17 @@
 use clap::{ArgGroup, Args, Parser, Subcommand};
 use mailtriage::{
     config,
-    domain::{Category, FilingMode},
+    domain::{Category, FilingMode, UpdateMode},
     engine::ConfigChanged,
     prompt::{self, Prompter},
     secrets::KeyStore,
     service::{
-        is_config_change, Backfill, ErrorKind, ListOptions, RetryTarget, Service, ServiceError,
+        is_config_change, Backfill, ErrorKind, ListOptions, RefileOptions, RetryTarget, Service,
+        ServiceError,
     },
     service_control, setup,
     system_service::{self, Context},
+    update,
 };
 use serde_json::{json, Value};
 use std::{
@@ -86,6 +88,15 @@ enum Command {
         #[command(subcommand)]
         command: ServiceCommand,
     },
+    /// Install the newest stable release from GitHub; needs no config.
+    Update(UpdateArg),
+}
+
+#[derive(Args)]
+struct UpdateArg {
+    /// Only report whether an update is available; install nothing.
+    #[arg(long)]
+    check: bool,
 }
 
 #[derive(Args)]
@@ -142,6 +153,9 @@ struct SetupArg {
     interval_seconds: u64,
     #[arg(long, default_value_t = 100, value_parser = parse_limit)]
     limit: usize,
+    /// What `watch` does about new releases (default: keep the config's value; auto for a new config).
+    #[arg(long, value_parser = ["auto", "notify", "off"])]
+    updates: Option<String>,
 }
 
 impl SetupArg {
@@ -173,6 +187,7 @@ impl SetupArg {
             service: self.service.as_deref().map(|s| s == "install"),
             interval_seconds: self.interval_seconds,
             limit: self.limit,
+            updates: self.updates.as_deref().and_then(UpdateMode::parse),
         }
     }
 }
@@ -301,6 +316,8 @@ enum FilingCommand {
     Plan(PlanArg),
     /// Make existing inbox mail eligible for filing once.
     Backfill(BackfillArg),
+    /// Move filed mail whose category changed into its new folder.
+    Refile(RefileArg),
     /// Keep a message in its source folder.
     Pin(IdArg),
     /// Let automatic filing apply to a pinned message again, once.
@@ -375,6 +392,24 @@ struct BackfillArg {
     #[arg(long)]
     all: bool,
     /// Make the matched mail eligible (requires filing mode live).
+    #[arg(long)]
+    apply: bool,
+}
+
+#[derive(Args)]
+struct RefileArg {
+    #[arg(long)]
+    account: String,
+    /// Only messages whose new category is ID.
+    #[arg(long)]
+    category: Option<String>,
+    /// Only messages in this folder (its server name, or its configured name).
+    #[arg(long)]
+    folder: Option<String>,
+    /// Candidates to list (the whole set is always counted and marked).
+    #[arg(long, default_value_t = 50, value_parser = parse_limit)]
+    limit: usize,
+    /// Mark the matching mail; the next passes move it (requires filing mode live).
     #[arg(long)]
     apply: bool,
 }
@@ -565,9 +600,13 @@ fn execute(cli: &Cli) -> Result<Value, CliError> {
             )
         }
         Command::Setup(arg) => setup(cli, arg),
-        Command::Doctor(arg) => open(&cli.config_path()?)?
-            .doctor(&arg.account)
-            .map_err(service_error),
+        Command::Doctor(arg) => {
+            let mut service = open(&cli.config_path()?)?;
+            let mut report = service.doctor(&arg.account).map_err(service_error)?;
+            let unit = update::report::unit_of(&arg.account);
+            report["update"] = update::report::doctor_block(service.config.updates, unit);
+            Ok(report)
+        }
         Command::Classify(arg) => {
             let data = read_input(&arg.input, 16 * 1024 * 1024)?;
             open(&cli.config_path()?)?
@@ -660,6 +699,9 @@ fn execute(cli: &Cli) -> Result<Value, CliError> {
             .map_err(service_error),
         Command::Filing { command } => filing(&cli.config_path()?, command),
         Command::Service { command } => service_command(&cli.config_path()?, command),
+        Command::Update(arg) => {
+            update::command::run(arg.check, &update::install::EnvHooks).map_err(service_error)
+        }
     }
 }
 
@@ -700,6 +742,18 @@ fn filing(config: &Path, command: &FilingCommand) -> Result<Value, CliError> {
                 None => Backfill::All,
             };
             service.filing_backfill(&arg.account, scope, arg.apply)
+        }
+        FilingCommand::Refile(arg) => {
+            let opts = RefileOptions {
+                category: arg.category.clone(),
+                folder: arg.folder.clone(),
+                limit: arg.limit,
+            };
+            if arg.apply {
+                service.filing_refile_apply(&arg.account, opts)
+            } else {
+                service.filing_refile(&arg.account, opts)
+            }
         }
         FilingCommand::Pin(arg) => service.filing_pin(&arg.account, &arg.id),
         FilingCommand::Unpin(arg) => service.filing_unpin(&arg.account, &arg.id),
@@ -828,6 +882,8 @@ fn validate_categories(categories: &[Category]) -> Result<(), CliError> {
 }
 
 fn watch(cli: &Cli, arg: &WatchArg) -> Result<Value, CliError> {
+    // Before anything else: which file this process runs, for the restart rule.
+    let mut updates = update::watch::WatchUpdates::start(cli.json);
     let path = cli.config_path()?;
     let stop = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&stop);
@@ -835,10 +891,16 @@ fn watch(cli: &Cli, arg: &WatchArg) -> Result<Value, CliError> {
         flag.store(true, Ordering::SeqCst);
     })
     .map_err(|_| CliError::operational())?;
+    let stopped = || stop.load(Ordering::SeqCst);
+    // The update hooks run only between passes, when no `Service` is open.
     let tally = watch_loop(
-        || stop.load(Ordering::SeqCst),
+        stopped,
         arg.interval_seconds,
         cli.json,
+        |moment| match moment {
+            Moment::BeforePass => updates.before_pass(&path, &stopped),
+            Moment::Waiting => updates.while_waiting(&stopped),
+        },
         || Service::open(&path)?.sync(&arg.account, arg.limit),
     )?;
     let partial = tally.partial_passes > 0 || tally.skipped_passes > 0;
@@ -855,20 +917,35 @@ struct WatchTally {
     skipped_passes: u64,
 }
 
+/// When `watch_loop` calls its `between` hook.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Moment {
+    /// Before each pass.
+    BeforePass,
+    /// Every 5 s while waiting for the next pass.
+    Waiting,
+}
+
 /// Runs `run_pass` (a fresh open and one sync) until `stopped`, printing
-/// each pass and waiting `interval_seconds` between passes. A pass that
-/// failed because `mailtriage.json` or the mail engine's configuration
-/// changed mid-pass is skipped: its error object is printed and the next
-/// pass reads the current configuration. Any other error, a changed account
-/// binding included, ends the loop.
+/// each pass and waiting `interval_seconds` between passes. `between` runs
+/// before each pass and every 5 s of the wait; it cannot fail a pass. A
+/// pass that failed because `mailtriage.json` or the mail engine's
+/// configuration changed mid-pass is skipped: its error object is printed
+/// and the next pass reads the current configuration. Any other error, a
+/// changed account binding included, ends the loop.
 fn watch_loop(
     stopped: impl Fn() -> bool,
     interval_seconds: u64,
     json_mode: bool,
+    mut between: impl FnMut(Moment),
     mut run_pass: impl FnMut() -> anyhow::Result<Value>,
 ) -> Result<WatchTally, CliError> {
     let mut tally = WatchTally::default();
     while !stopped() {
+        between(Moment::BeforePass);
+        if stopped() {
+            break;
+        }
         match run_pass() {
             Ok(result) => {
                 if result.get("partial").and_then(Value::as_bool) == Some(true) {
@@ -883,11 +960,14 @@ fn watch_loop(
             Err(error) => return Err(service_error(error)),
         }
         tally.passes += 1;
-        for _ in 0..interval_seconds.saturating_mul(5) {
+        for tick in 1..=interval_seconds.saturating_mul(5) {
             if stopped() {
                 break;
             }
             thread::sleep(Duration::from_millis(200));
+            if tick % 25 == 0 {
+                between(Moment::Waiting);
+            }
         }
     }
     Ok(tally)
@@ -916,6 +996,7 @@ mod tests {
             || left.get() == 0,
             0,
             true,
+            |_| {},
             || {
                 left.set(left.get() - 1);
                 passes.next().unwrap()
@@ -942,6 +1023,33 @@ mod tests {
                 passes: 3,
                 partial_passes: 0,
                 skipped_passes: 2,
+            }
+        );
+    }
+
+    /// The update hook runs before every pass; it cannot fail or skip one.
+    #[test]
+    fn the_update_hook_runs_before_each_pass() {
+        let moments = std::cell::RefCell::new(Vec::new());
+        let left = Cell::new(2);
+        let tally = watch_loop(
+            || left.get() == 0,
+            0,
+            true,
+            |moment| moments.borrow_mut().push(moment),
+            || {
+                left.set(left.get() - 1);
+                Ok(json!({"partial": false}))
+            },
+        )
+        .unwrap_or_else(|e| panic!("stopped: {} {}", e.code, e.message));
+        assert_eq!(*moments.borrow(), [Moment::BeforePass, Moment::BeforePass]);
+        assert_eq!(
+            tally,
+            WatchTally {
+                passes: 2,
+                partial_passes: 0,
+                skipped_passes: 0,
             }
         );
     }

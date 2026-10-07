@@ -9,13 +9,13 @@ use crate::store::{bump, envelope_of, merge_envelope, now, row_record, Record, S
 use anyhow::{bail, Result};
 use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
-const PLACEMENT_COLUMNS: &str = "account,message_id,source_folder,home_folder,home_epoch,home_uid,location_state,absent_since,desired_target,pinned,eligible_once,desired_rev,filed_at,filed_by,flag_attempted_at,flagged_at,done_inferred,blocked_reason";
+const PLACEMENT_COLUMNS: &str = "account,message_id,source_folder,home_folder,home_epoch,home_uid,location_state,absent_since,desired_target,pinned,eligible_once,desired_rev,filed_at,filed_by,flag_attempted_at,flagged_at,done_inferred,blocked_reason,refile_once,filed_home_folder,filed_home_epoch,filed_home_uid";
 const FOLDER_COLUMNS: &str = "account,native,configured,category_id,origin,state,role_verified,confirmed,subscribed,pause_reason,epoch,watch_from_uid,rescan_epoch,rescan_below_uid,rescan_complete,checked_at,error";
 const ARRIVAL_COLUMNS: &str = "id,account,folder,epoch,uid,message_id,rfc_message_id,state,kind,intent_id,created_at,resolved_at";
-const INTENT_COLUMNS: &str = "id,account,message_id,kind,folder,epoch,uid,target,target_epoch,target_uid_next,target_uid,desired_rev,consumes_eligible,batch,state,attempts,next_after,dispatched_at,created_at,updated_at,error,race_until_uid";
+const INTENT_COLUMNS: &str = "id,account,message_id,kind,folder,epoch,uid,target,target_epoch,target_uid_next,target_uid,desired_rev,consumes_eligible,batch,state,attempts,next_after,dispatched_at,created_at,updated_at,error,race_until_uid,consumes_refile";
 const REVERT_COLUMNS: &str = "id,account,parent_intent,folder,folder_epoch,uid,target,target_epoch,state,target_uid,created_at,updated_at,error";
 
 impl Store {
@@ -1044,6 +1044,23 @@ impl Store {
         &self,
         account: &str,
     ) -> Result<Vec<(Record, Placement, MessageMeta)>> {
+        self.planning_rows(account, None)
+    }
+
+    /// `records_for_planning` for one message.
+    pub fn record_for_planning(
+        &self,
+        account: &str,
+        id: &str,
+    ) -> Result<Option<(Record, Placement, MessageMeta)>> {
+        Ok(self.planning_rows(account, Some(id))?.pop())
+    }
+
+    fn planning_rows(
+        &self,
+        account: &str,
+        id: Option<&str>,
+    ) -> Result<Vec<(Record, Placement, MessageMeta)>> {
         let placement: Vec<String> = PLACEMENT_COLUMNS
             .split(',')
             .map(|c| format!("p.{c}"))
@@ -1051,20 +1068,20 @@ impl Store {
         let mut st = self.db.prepare(&format!(
             "SELECT m.id,m.account,NULL,m.envelope,m.status,m.classification,m.overrides,m.review_state,m.observed_at,m.error,m.generation,{},
  m.rfc_message_id,m.size,m.internal_date,m.fingerprint IS NOT NULL,m.source_managed
- FROM placements p JOIN messages m ON m.id=p.message_id WHERE p.account=? ORDER BY p.message_id",
+ FROM placements p JOIN messages m ON m.id=p.message_id WHERE p.account=?1 AND (?2 IS NULL OR p.message_id=?2) ORDER BY p.message_id",
             placement.join(",")
         ))?;
         let rows = st
-            .query_map([account], |r| {
+            .query_map(params![account, id], |r| {
                 let record = row_record(r)?;
                 let placement = row_placement_at(r, 11)?;
                 let meta = MessageMeta {
-                    rfc_message_id: r.get(29)?,
-                    size: r.get(30)?,
-                    internal_date: r.get(31)?,
+                    rfc_message_id: r.get(33)?,
+                    size: r.get(34)?,
+                    internal_date: r.get(35)?,
                     flags: envelope_flags(&record.envelope),
-                    fingerprinted: r.get(32)?,
-                    source_managed: r.get(33)?,
+                    fingerprinted: r.get(36)?,
+                    source_managed: r.get(37)?,
                 };
                 Ok((record, placement, meta))
             })?
@@ -1093,6 +1110,27 @@ impl Store {
         target_uid_next: u64,
         batch: &str,
         now: &str,
+    ) -> Result<Option<i64>> {
+        self.claim_move_with(
+            account,
+            action,
+            (target_epoch, target_uid_next),
+            batch,
+            now,
+            false,
+        )
+    }
+
+    /// `claim_move` with the target snapshot as `(epoch, UIDNEXT)`; the
+    /// intent records whether it consumes a refile mark (refile spec).
+    pub fn claim_move_with(
+        &mut self,
+        account: &str,
+        action: &Action,
+        (target_epoch, target_uid_next): (u64, u64),
+        batch: &str,
+        now: &str,
+        consumes_refile: bool,
     ) -> Result<Option<i64>> {
         let Action::Move {
             message_id,
@@ -1123,9 +1161,9 @@ impl Store {
         if !ok {
             return Ok(None);
         }
-        tx.execute("INSERT INTO filing_intents(account,message_id,kind,folder,epoch,uid,target,target_epoch,target_uid_next,desired_rev,consumes_eligible,batch,state,dispatched_at,created_at,updated_at)
-                VALUES(?,?,'move',?,?,?,?,?,?,?,?,?,'in_flight',?,?,?)",
-            params![account, message_id, from.folder, from.epoch, from.uid, to, target_epoch, target_uid_next, desired_rev, consumes_eligible, batch, now, now, now])?;
+        tx.execute("INSERT INTO filing_intents(account,message_id,kind,folder,epoch,uid,target,target_epoch,target_uid_next,desired_rev,consumes_eligible,consumes_refile,batch,state,dispatched_at,created_at,updated_at)
+                VALUES(?,?,'move',?,?,?,?,?,?,?,?,?,?,'in_flight',?,?,?)",
+            params![account, message_id, from.folder, from.epoch, from.uid, to, target_epoch, target_uid_next, desired_rev, consumes_eligible, consumes_refile, batch, now, now, now])?;
         let id = tx.last_insert_rowid();
         tx.commit()?;
         Ok(Some(id))
@@ -1264,6 +1302,90 @@ impl Store {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    /// Recorded occurrences per message.
+    pub fn occurrence_counts(&self, account: &str) -> Result<BTreeMap<String, usize>> {
+        let mut st = self.db.prepare(
+            "SELECT message_id, COUNT(*) FROM occurrences WHERE account=? GROUP BY message_id",
+        )?;
+        let rows = st
+            .query_map([account], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? as usize)))?
+            .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
+        Ok(rows)
+    }
+
+    /// Refile spec "Retired folders": retired folders neither retained nor
+    /// draining (`drain_until_uid` NULL).
+    pub fn frozen_folders(&self, account: &str) -> Result<BTreeSet<String>> {
+        let mut st = self.db.prepare(
+            "SELECT native FROM folders WHERE account=? AND state='retired' AND drain_until_uid IS NULL",
+        )?;
+        let rows = st
+            .query_map([account], |r| r.get(0))?
+            .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Refile spec "Retired folders": `drain_until_uid` where it is set
+    /// (0: retained in an earlier pass; N: draining until UID N).
+    pub fn drain_states(&self, account: &str) -> Result<BTreeMap<String, u64>> {
+        let mut st = self.db.prepare(
+            "SELECT native, drain_until_uid FROM folders WHERE account=? AND drain_until_uid IS NOT NULL",
+        )?;
+        let rows = st
+            .query_map([account], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
+        Ok(rows)
+    }
+
+    pub fn set_drain_until_uid(
+        &mut self,
+        account: &str,
+        native: &str,
+        until: Option<u64>,
+    ) -> Result<()> {
+        self.db.execute(
+            "UPDATE folders SET drain_until_uid=? WHERE account=? AND native=?",
+            params![until, account, native],
+        )?;
+        Ok(())
+    }
+
+    /// Draining is finished once discovery passed the snapshot in the
+    /// checkpoint's epoch (a reset records a new snapshot), no reset rescan
+    /// runs, no arrival in the folder is pending, and no known home in it
+    /// lost its occurrence unnoticed.
+    pub fn drain_finished(&self, account: &str, native: &str) -> Result<bool> {
+        Ok(self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM folders f JOIN checkpoints c ON c.account=f.account AND c.mailbox=f.native
+  WHERE f.account=?1 AND f.native=?2 AND f.drain_until_uid>0 AND c.last_uid>=f.drain_until_uid-1
+  AND NOT (f.rescan_complete=0 AND f.rescan_epoch IS NOT NULL))
+ AND NOT EXISTS(SELECT 1 FROM arrivals WHERE account=?1 AND folder=?2 AND state='pending')
+ AND NOT EXISTS(SELECT 1 FROM placements p JOIN checkpoints c ON c.account=p.account AND c.mailbox=p.home_folder AND c.epoch=p.home_epoch
+  WHERE p.account=?1 AND p.home_folder=?2 AND p.location_state='known'
+  AND NOT EXISTS(SELECT 1 FROM occurrences o WHERE o.account=p.account AND o.mailbox=p.home_folder AND o.epoch=p.home_epoch AND o.uid=p.home_uid AND o.message_id=p.message_id))",
+            params![account, native],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Freezes a retired folder for refile: no drain state and no filed
+    /// home in it, so it is never retained again; in one transaction.
+    pub fn freeze_retired(&mut self, account: &str, native: &str) -> Result<()> {
+        let tx = self.db.transaction()?;
+        let changed = tx.execute(
+            "UPDATE folders SET drain_until_uid=NULL WHERE account=?1 AND native=?2 AND drain_until_uid IS NOT NULL",
+            params![account, native],
+        )? + tx.execute(
+            "UPDATE placements SET filed_home_folder=NULL,filed_home_epoch=NULL,filed_home_uid=NULL WHERE account=?1 AND filed_home_folder=?2",
+            params![account, native],
+        )?;
+        if changed > 0 {
+            bump(&tx)?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn remove_occurrence(
@@ -1517,7 +1639,9 @@ enum BlockWrite<'a> {
 
 /// `save_placement` inside a caller's transaction; does not bump the
 /// revision. `done_inferred` is never written here: only done inference,
-/// reopening and explicit review change it.
+/// reopening and explicit review change it. Refile spec "Filed home": the
+/// filed home is stored only while it is the known home, so every other
+/// change of the home clears it.
 fn write_placement(
     tx: &Connection,
     p: &Placement,
@@ -1531,8 +1655,9 @@ fn write_placement(
             (changed, changed.then_some(read))
         }
     };
+    let filed = p.at_filed_home();
     let n = tx.execute(
-        "UPDATE placements SET source_folder=?3,home_folder=?4,home_epoch=?5,home_uid=?6,location_state=?7,absent_since=?8,desired_target=?9,pinned=?10,eligible_once=?11,desired_rev=?12,filed_at=?13,filed_by=?14,flag_attempted_at=?15,flagged_at=?16,blocked_reason=CASE WHEN ?17 THEN ?18 ELSE blocked_reason END
+        "UPDATE placements SET source_folder=?3,home_folder=?4,home_epoch=?5,home_uid=?6,location_state=?7,absent_since=?8,desired_target=?9,pinned=?10,eligible_once=?11,desired_rev=?12,filed_at=?13,filed_by=?14,flag_attempted_at=?15,flagged_at=?16,blocked_reason=CASE WHEN ?17 THEN ?18 ELSE blocked_reason END,refile_once=?22,filed_home_folder=?23,filed_home_epoch=?24,filed_home_uid=?25
  WHERE account=?1 AND message_id=?2 AND (?19 IS NULL OR desired_rev=?19) AND (?20=0 OR blocked_reason IS ?21)",
         params![
             p.account,
@@ -1555,7 +1680,11 @@ fn write_placement(
             p.blocked_reason,
             expected_rev,
             read_block.is_some(),
-            read_block.flatten()
+            read_block.flatten(),
+            p.refile_once,
+            p.filed_home_folder.as_deref().filter(|_| filed),
+            p.filed_home_epoch.filter(|_| filed),
+            p.filed_home_uid.filter(|_| filed)
         ],
     )?;
     Ok(n == 1)
@@ -1800,6 +1929,10 @@ fn row_placement_at(r: &Row<'_>, at: usize) -> rusqlite::Result<Placement> {
         flagged_at: r.get(at + 15)?,
         done_inferred: r.get(at + 16)?,
         blocked_reason: r.get(at + 17)?,
+        refile_once: r.get(at + 18)?,
+        filed_home_folder: r.get(at + 19)?,
+        filed_home_epoch: r.get(at + 20)?,
+        filed_home_uid: r.get(at + 21)?,
     })
 }
 
@@ -1880,6 +2013,7 @@ fn row_intent(r: &Row<'_>) -> rusqlite::Result<Intent> {
         updated_at: r.get(19)?,
         error: r.get(20)?,
         race_until_uid: r.get(21)?,
+        consumes_refile: r.get(22)?,
     })
 }
 

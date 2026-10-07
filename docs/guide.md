@@ -10,6 +10,7 @@ This guide is the full reference: setup, configuration, the OpenRouter key, the 
 - [Configuration](#configuration)
 - [The OpenRouter key](#the-openrouter-key)
 - [Background service](#background-service)
+- [Updates](#updates)
 - [Daily use](#daily-use)
 - [Categories](#categories)
 - [Filing into folders](#filing-into-folders)
@@ -45,27 +46,29 @@ You need:
 - an OpenRouter API key,
 - for the background service: launchd (macOS) or systemd (Linux).
 
-From a GitHub release: each release carries `mailtriage-vVERSION-linux-amd64.tar.gz`, `-linux-arm64.tar.gz` and `-macos-arm64.tar.gz`, a `.sha256` file per archive and a combined `SHA256SUMS`. Each archive holds the `mailtriage` executable, the README and the license. While the repository is private, download with authenticated access, for example with the GitHub CLI:
+From a GitHub release: each release carries `mailtriage-vVERSION-linux-amd64.tar.gz`, `-linux-arm64.tar.gz` and `-macos-arm64.tar.gz`, a `.sha256` file per archive and a combined `SHA256SUMS`. Each archive holds the `mailtriage` executable, the README and the license. For example, with the GitHub CLI; on Linux, set `PLATFORM` to `linux-amd64` or `linux-arm64` and use `sha256sum --check` in place of `shasum -a 256 --check`:
 
 ```sh
-VERSION=0.1.0
-gh release download "v$VERSION" --repo wir-drei-digital/mailtriage --pattern "mailtriage-v$VERSION-macos-arm64.tar.gz*"
-shasum -a 256 --check "mailtriage-v$VERSION-macos-arm64.tar.gz.sha256"   # Linux: sha256sum --check
-tar -xzf "mailtriage-v$VERSION-macos-arm64.tar.gz"
-sudo install -m 0755 mailtriage /usr/local/bin/mailtriage
+VERSION=0.1.0 PLATFORM=macos-arm64
+gh release download "v$VERSION" --repo wir-drei-digital/mailtriage --pattern "mailtriage-v$VERSION-$PLATFORM.tar.gz*" &&
+  shasum -a 256 --check "mailtriage-v$VERSION-$PLATFORM.tar.gz.sha256" &&
+  tar -xzf "mailtriage-v$VERSION-$PLATFORM.tar.gz" &&
+  install -d ~/.local/bin &&
+  install -m 0755 mailtriage ~/.local/bin/mailtriage
 ```
 
-The macOS executable is unsigned and not notarized. See the [release guide](releases.md) for how releases are made.
+The macOS executable is unsigned and not notarized. See the [release guide](releases.md) for how releases are made. A root-owned or otherwise unsafe install, for example one made with `sudo` into `/usr/local/bin`, is not replaced: mailtriage only reports new releases for it (see [Binaries mailtriage does not replace](#binaries-mailtriage-does-not-replace)).
 
 From source, with a stable Rust toolchain:
 
 ```sh
-cargo build --release --locked
-sudo install -m 0755 target/release/mailtriage /usr/local/bin/mailtriage
-mailtriage --version
+cargo build --release --locked &&
+  install -d ~/.local/bin &&
+  install -m 0755 target/release/mailtriage ~/.local/bin/mailtriage &&
+  mailtriage --version
 ```
 
-The examples below assume `mailtriage` is on your `PATH`. The background service records the absolute path of the executable that installs it, so install the binary in its final place first.
+`~/.local/bin` must be on your `PATH`; the examples below assume `mailtriage` is. If `command -v mailtriage` prints nothing, add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile (`~/.zprofile` on macOS, `~/.bashrc` on Linux) and open a new terminal. The background service records the absolute path of the executable that installs it, so install the binary in its final place first.
 
 ## Guided setup
 
@@ -93,7 +96,7 @@ mailtriage setup
 | 5. Classifier | OpenRouter or the offline `fake` provider, the model, and where the key lives. | `--provider`, `--model`, `--key-store`, `--key-command`, `--key-env`, `--key-stored` |
 | 6. Categories | Six default categories for a new account. | none |
 | 7. Filing | `dry_run` or `off`. | `--filing` |
-| 8. Write | Validates and writes the config. | none |
+| 8. Write | Validates and writes the config, including `updates`. | `--updates` |
 | 9. Check | Runs `doctor` and prints each item with its fix. | none |
 | 10. Service | Offers to run `watch` in the background. | `--service`, `--interval-seconds`, `--limit` |
 
@@ -143,9 +146,9 @@ mailtriage setup
 
 **Step 7, filing.** `--filing dry-run` plans moves and flags and writes nothing; it is the default for a new account, and an updated account defaults to its current mode. `--filing off` only classifies. Setup never selects `live`. An account that is already `live` stays `live` unless you pass `--filing`. To go live, follow the [rollout](#rollout).
 
-**Step 8, write.** Setup validates the whole config and writes it atomically with mode 0600. The state directory is created with mode 0700. If the result is invalid, setup exits 2 and writes nothing. If the state directory already holds a binding for the account and the new answers would change it, setup exits 5 and writes nothing; see [Updating an account](#updating-an-account).
+**Step 8, write.** `--updates auto|notify|off` sets [`updates`](#updates), with no prompt: a new config gets `auto`, and an existing one keeps its value unless `--updates` is given. Setup validates the whole config and writes it atomically with mode 0600, under the configuration lock (`mailtriage.lock`). When another command holds that lock, setup exits 5 (reason `config_busy`); when the file changed since step 1 read it, setup exits 5 (reason `config_changed`). Either way it writes nothing; run it again. The state directory is created with mode 0700. If the result is invalid, setup exits 2 and writes nothing. If the state directory already holds a binding for the account and the new answers would change it, setup exits 5 and writes nothing; see [Updating an account](#updating-an-account).
 
-**Step 9, check.** Setup runs `doctor` for the account. It prints each item (`provider`, `key`, `mail`, and `filing` when filing is on) as `ok`, or as `not ready` with the one command that fixes it. If `doctor` itself fails, for example because the state database cannot be opened, setup reports a single not-ready `state` item instead. Setup exits 0 even when an item is not ready.
+**Step 9, check.** Setup runs `doctor` for the account. It prints each item (`provider`, `key`, `mail`, `filing` when filing is on, and `update` when `updates` is `auto` but the binary may not be replaced) as `ok`, or as `not ready` with the one command that fixes it. The `update` item does not make `doctor.ready` false, as in `doctor` itself. If `doctor` itself fails, for example because the state database cannot be opened, setup reports a single not-ready `state` item instead. Setup exits 0 even when an item is not ready.
 
 **Step 10, service.** With prompts on macOS or Linux, setup asks whether to run `watch` in the background (default yes); on other platforms it skips this step. When the key comes from an environment variable, the default is no, because the service does not inherit the variable; setup says so and prints the command that moves the key into a key store. Without prompts, `--service install` installs it and `--service skip` (the default) does not. `--interval-seconds` (1 to 86400, default 60) and `--limit` (1 to 500, default 100) are passed to `watch`. When step 9 reported a not-ready `state` item, setup installs no service, since every pass would fail; it prints the `service install` command to run once that is fixed. See [Background service](#background-service).
 
@@ -227,7 +230,7 @@ mailtriage setup --update --account home --himalaya-account home
 Progress and the check summary go to stderr. stdout carries one result object, on one line with `--json`:
 
 ```json
-{"schema_version":1,"setup":{"account":"work","config":"/Users/alice/.config/mailtriage/mailtriage.json","doctor":{"items":[{"check":"provider","ready":true},{"check":"key","ready":true},{"check":"mail","ready":true},{"check":"filing","ready":true}],"ready":true},"filing":"dry_run","key_source":"command","key_store":"keychain","mailboxes":["INBOX"],"model":"typesafe/jev-1.13","provider":"openrouter","service":null}}
+{"schema_version":1,"setup":{"account":"work","config":"/Users/alice/.config/mailtriage/mailtriage.json","doctor":{"items":[{"check":"provider","ready":true},{"check":"key","ready":true},{"check":"mail","ready":true},{"check":"filing","ready":true}],"ready":true},"filing":"dry_run","key_source":"command","key_store":"keychain","mailboxes":["INBOX"],"model":"typesafe/jev-1.13","provider":"openrouter","service":null,"updates":"auto"}}
 ```
 
 | Field | Content |
@@ -238,6 +241,7 @@ Progress and the check summary go to stderr. stdout carries one result object, o
 | `key_source` | `command`, `env`, or `null` for `fake`. |
 | `key_store` | The `--key-store` value chosen in this run; `null` when no store was chosen: the classifier or its key source was kept, or it is `fake`. |
 | `filing` | `off`, `dry_run` or `live`. |
+| `updates` | The config's `updates` after this run: `auto`, `notify` or `off`. |
 | `doctor` | `ready`, and `items`: each `{check, ready}`, plus `error` and `fix` when not ready. |
 | `service` | `null` when skipped or not installed after a failed `state` check, else the [`service install` result](#service-commands). |
 
@@ -248,7 +252,7 @@ Progress and the check summary go to stderr. stdout carries one result object, o
 | 0 | Setup finished. `doctor` items that are not ready are listed in the result. |
 | 2 | Invalid input; a required flag missing without prompts; an invalid account name; conflicting key flags, or key flags with `--provider fake`; a key tool not on `PATH`; a tool store without a terminal; setup aborted; the service on an unsupported platform. |
 | 3 | Himalaya missing or not v2.1.0 with IMAP; `account check` failed; the folders could not be listed; a key tool or key command failed; the config could not be written; `launchctl` or `systemctl` failed. |
-| 5 | The config exists and `--update` was not given (without prompts); the account is bound to another mailbox (its identity, Himalaya account or IMAP server would change); a service file exists that mailtriage did not write. |
+| 5 | The config exists and `--update` was not given (without prompts); the account is bound to another mailbox (its identity, Himalaya account or IMAP server would change); a service file exists that mailtriage did not write; another command is editing the config (`config_busy`), or it changed since setup read it (`config_changed`). |
 
 Every error except the two abort messages (`setup aborted; nothing was changed`, `setup aborted: input ended`) starts with `step N (name): ` and names the flag or command that fixes it, for example `step 2 (Himalaya): --himalaya-account is required without prompts`. Step 10 errors (`step 10 (service): `) happen after the config is written; they name the `mailtriage service install` command, with `--config` and this run's `--interval-seconds` and `--limit`, to run once the cause is fixed. On a platform without launchd or systemd the fix is to drop `--service install` instead.
 
@@ -335,6 +339,7 @@ Run it in the same environment as the command you are checking. `doctor` exits 0
 | `transport.ready` | `true` | The Himalaya configuration file was read and `himalaya --version` reported v2.1.0 with `+imap`. Otherwise `transport.error` is set. |
 | `transport.version` | `himalaya v2.1.0 ...` | The first line of `himalaya --version`. |
 | `live_checks_performed` | `false` | Always `false`. |
+| `update.ready` | `true` | `update` is the block [`service status`](#service-commands) shows, plus `ready`: `false` only when `updates` is `auto` and the binary may not be replaced, and then `fix` says what to do. The top-level `ready` ignores it. |
 
 `doctor` runs the key command to check it, so on macOS the first run may show a Keychain access dialog. It makes no provider request. It logs in to the IMAP server only when filing is on, to add a `filing` block with the server's capabilities, folders and problems. The first `sync` is therefore the first full test of the IMAP login and the API key.
 
@@ -385,7 +390,8 @@ A configuration for one account:
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
+  "updates": "auto",
   "state_dir": "state",
   "provider": {
     "kind": "openrouter",
@@ -475,13 +481,14 @@ A configuration for one account:
 }
 ```
 
-Each command that opens the configuration checks the whole file. A file that breaks a rule below is refused with exit code 2 and `invalid configuration; check required fields, categories and provider settings`; the message does not name the field. Relative paths in `state_dir`, `engine.config` and `engine.binary` resolve against the directory that holds `mailtriage.json`.
+Each command that opens the configuration checks the whole file. A file that breaks a rule below is refused with exit code 2 and `invalid configuration; check required fields, categories and provider settings`; the message does not name the field, except for an invalid `updates`, which exits 2 with `updates must be auto, notify or off`. Relative paths in `state_dir`, `engine.config` and `engine.binary` resolve against the directory that holds `mailtriage.json`.
 
 Top level:
 
 | Field | What to set |
 | --- | --- |
-| `schema_version` | `2`, as written by `init` and `setup`. |
+| `schema_version` | `3`, as written by `init`, `setup` and every command that edits the file. mailtriage reads schemas 1 to 3. Releases before automatic updates read only 1 and 2, so they refuse a schema 3 file instead of rewriting it without `updates`. |
+| `updates` | What `watch` does about new releases: `"auto"` installs them, `"notify"` only reports them, `"off"` makes no network call. A config without the key means `"auto"`. See [Updates](#updates). |
 | `state_dir` | Directory for the SQLite database and normalized message text. mailtriage creates it with mode 0700. Keep it on a local filesystem. |
 | `provider` | The classification provider, below. |
 | `policy` | Thresholds and limits, below. The `init` values are a reasonable start. |
@@ -594,10 +601,10 @@ A store that is locked, such as a GPG agent without a cached passphrase or a key
 
 ### Environment variable
 
-`api_key_env` holds the name of the variable, for example `OPENROUTER_API_KEY`. mailtriage reads the key from its own process environment when it sends a request. In an interactive shell:
+`api_key_env` holds the name of the variable, for example `OPENROUTER_API_KEY`. mailtriage reads the key from its own process environment when it sends a request. In an interactive shell, run the lines below; at `read`, paste the key and press Enter (nothing is echoed):
 
 ```sh
-read -rs OPENROUTER_API_KEY    # paste the key and press Enter; nothing is echoed
+read -rs OPENROUTER_API_KEY
 export OPENROUTER_API_KEY
 mailtriage doctor --account work --json
 ```
@@ -638,6 +645,7 @@ mailtriage service uninstall --account work
 `<label>` is `digital.wirdrei.mailtriage.<account>`. With the home config, the log directory is `~/.config/mailtriage/logs`.
 
 - **Repeating `install`** rewrites the file and reloads the job. Run it again after you move the executable or the config, or change your `PATH`.
+- **A replaced binary.** A running service switches to a new binary at the same path by itself, between passes; see [How a running service switches](#how-a-running-service-switches). Moving the binary to another path still needs `service install`.
 - **Marked files.** mailtriage marks the files it writes. It replaces or removes only marked files. An unmarked file at the path exits 5 with `PATH exists and was not written by mailtriage; move it away first`.
 - **Accounts.** `install` and `status` need the account to be in the config (exit 2, `unknown account`). `uninstall` also works for an account you have removed.
 - **PATH.** launchd and systemd start jobs with a short `PATH`. The service file therefore records the `PATH` of the shell that runs `install`, so key tools such as `pass` and `gpg` find their helpers.
@@ -674,7 +682,7 @@ mailtriage service start --account work --json
 `status` reports:
 
 ```json
-{"schema_version":1,"service":{"account":"work","installed":true,"last_exit_status":0,"last_pass":{"exit_code":0,"finished_at":"2026-10-05T08:00:00.000000+00:00","mode":"dry_run","partial":false},"loaded":true,"log_paths":["/Users/alice/.config/mailtriage/logs/work.log","/Users/alice/.config/mailtriage/logs/work.err"],"manager":"launchd","pid":4242,"running":true,"unit_path":"/Users/alice/Library/LaunchAgents/digital.wirdrei.mailtriage.work.plist"}}
+{"schema_version":1,"service":{"account":"work","installed":true,"last_exit_status":0,"last_pass":{"exit_code":0,"finished_at":"2026-10-05T08:00:00.000000+00:00","mode":"dry_run","partial":false,"version":"0.2.0"},"loaded":true,"log_paths":["/Users/alice/.config/mailtriage/logs/work.log","/Users/alice/.config/mailtriage/logs/work.err"],"manager":"launchd","pid":4242,"running":true,"unit_path":"/Users/alice/Library/LaunchAgents/digital.wirdrei.mailtriage.work.plist","update":{"mode":"auto","executable":"/Users/alice/.local/bin/mailtriage","installed":"0.2.0","latest":"0.3.0","available":true,"checked_at":"2026-11-03T08:12:40Z","last_error":null,"replaceable":true,"reason":null}}}
 ```
 
 | Field | Content |
@@ -686,7 +694,8 @@ mailtriage service start --account work --json
 | `pid` | Its process ID, or `null`. |
 | `last_exit_status` | The last exit status the manager reports, or `null`. |
 | `unit_path`, `log_paths` | The service file and the launchd log files (`log_paths` is empty for systemd). |
-| `last_pass` | The account's latest `sync` or `watch` pass, from the state database: `finished_at`, `partial`, `exit_code` (0, 4 for partial, or the error's exit code) and `mode` (`off`, `dry_run` or `live`). `null` before the first pass. |
+| `last_pass` | The account's latest `sync` or `watch` pass, from the state database: `finished_at`, `partial`, `exit_code` (0, 4 for partial, or the error's exit code), `mode` (`off`, `dry_run` or `live`) and `version`, the mailtriage version that ran it (`null` for passes recorded before schema 7). `null` before the first pass. |
+| `update` | The binary the service runs, and whether it is current: `mode` (the config's `updates`); `executable`, decoded from the service file (`null` without one, and then `installed` and `replaceable` describe the binary that runs `service status`); `installed`, its `--version` (`null` when it does not run); `latest`, `available` and `checked_at` from the last release check (`null`, `false` and `null` before the first one); `last_error`, the last failed install of that binary, else the last failed check (`{at, message}` or `null`); `replaceable` and `reason` (see [Binaries mailtriage does not replace](#binaries-mailtriage-does-not-replace)). It reads the update cache and makes no network call. |
 
 `last_pass` comes from the state database and works without any service. Every `sync` and every `watch` pass that holds the account lock records it. A healthy service shows `running: true` and a `last_pass.finished_at` no older than a few intervals.
 
@@ -748,6 +757,186 @@ sudo systemctl enable --now mailtriage-work.service
 - `mailtriage service` does not manage this unit. `service status` reports it as not installed, but its `last_pass` still shows the latest pass.
 - The user named in `User=` needs write access to `state_dir` and to the directory that holds `mailtriage.json`. mailtriage creates `mailtriage.lock` there and rewrites the file for `filing enable`, `filing disable` and `categories apply`.
 - Supervisors start jobs with a short default `PATH` (launchd: `/usr/bin:/bin:/usr/sbin:/sbin`), which is why `engine.binary` should be an absolute path.
+
+## Updates
+
+mailtriage installs new releases of itself from [GitHub Releases](https://github.com/wir-drei-digital/mailtriage/releases). The background service installs a new stable release within about a day and switches to it between passes. `mailtriage update` installs one at once.
+
+### Modes
+
+`updates` in `mailtriage.json` decides what `watch` does:
+
+| Value | `watch` |
+| --- | --- |
+| `auto` (default) | Checks for a new release about once a day and installs it. |
+| `notify` | Checks about once a day and prints an `available` event; installs nothing. |
+| `off` | Makes no network call. |
+
+Set it with `mailtriage setup --update --updates notify`, or edit the file. The mode governs only `watch`: `mailtriage update` works in every mode and needs no config.
+
+### `mailtriage update`
+
+`--check` reports and changes nothing but the cache; without it, `update` installs the newest stable release:
+
+```sh
+mailtriage update --check --json
+mailtriage update --json
+```
+
+Both read the release list of `wir-drei-digital/mailtriage` from the GitHub API, every page, without a token. The candidate is the highest release whose tag is exactly `vX.Y.Z`: drafts, prereleases such as `v0.4.0-rc.1` and other tags are ignored, and GitHub's "Latest" flag is not used. Versions compare by SemVer, so `0.3.0-rc.1 < 0.3.0 < 0.3.1`. A release is installed only when it is newer than the installed binary. mailtriage never downgrades, and a release candidate you installed by hand stays until a higher stable release appears.
+
+`update` replaces the binary that runs it (its path with symlinks resolved). In order, it:
+
+1. reads the installed version with `<binary> --version` (when that fails, it compares with the version that is running), and stops with `action: current` when the release is not newer;
+2. checks that this binary may be replaced (see [Binaries mailtriage does not replace](#binaries-mailtriage-does-not-replace));
+3. takes the installation lock, `.mailtriage-update.lock` next to the binary, waiting up to 60 seconds for another update, and reads the installed version again under it: when another update installed the release meanwhile, it stops with `action: current`;
+4. downloads `mailtriage-vX.Y.Z-PLATFORM.tar.gz` and `SHA256SUMS` over HTTPS from `github.com` and GitHub's download hosts only, with at most 10 redirects and 200 MB; `PLATFORM` is `macos-arm64`, `linux-amd64` or `linux-arm64`;
+5. checks the archive's SHA-256 against its line in `SHA256SUMS`;
+6. unpacks the `mailtriage` executable next to the binary and runs `--version` on it, which must print the release's version. This catches a wrong architecture, a glibc older than the release needs, and macOS refusing to run the binary;
+7. checks that the installed binary did not change meanwhile, keeps it as `<binary>.previous`, and moves the new binary into place with a rename. Running processes keep the old file open, so nothing running is disturbed.
+
+When a step before the rename fails, the binary and `<binary>.previous` are unchanged and the temporary files are removed. After the rename the update counts as done; a later problem, such as keeping the backup or recording the update, is a warning. Releases are verified by HTTPS and `SHA256SUMS`, not by signatures. `update` starts and stops nothing: each running `watch` switches to the new binary by itself (see [How a running service switches](#how-a-running-service-switches)).
+
+`--check` reports:
+
+```json
+{"schema_version":1,"update":{"current":"0.2.0","installed":"0.2.0","latest":"0.3.0","available":true,"release_url":"https://github.com/wir-drei-digital/mailtriage/releases/tag/v0.3.0","published_at":"2026-11-02T09:00:00Z","checked_at":"2026-11-03T08:12:40Z","install":{"path":"/Users/alice/.local/bin/mailtriage","replaceable":true,"reason":null,"fix":null},"warnings":[]}}
+```
+
+| Field | Content |
+| --- | --- |
+| `current` | The version of the process that ran the command. |
+| `installed` | What the binary at `install.path` prints for `--version` now; `null` when it does not run. |
+| `latest` | The highest stable release, or `null` when there is none. |
+| `available` | `true` when `latest` is newer than `installed`. |
+| `release_url`, `published_at` | The release's GitHub page and publication time. |
+| `checked_at` | When this check ran. |
+| `install` | `path`: the binary `update` would replace. `replaceable`, `reason` and `fix`: see [Binaries mailtriage does not replace](#binaries-mailtriage-does-not-replace). |
+| `warnings` | Problems that did not stop the command, such as a cache that could not be written. |
+
+Without `--check`:
+
+```json
+{"schema_version":1,"update":{"action":"updated","from":"0.2.0","to":"0.3.0","path":"/Users/alice/.local/bin/mailtriage","previous_path":"/Users/alice/.local/bin/mailtriage.previous","warnings":[],"services":[{"account":"work","manager":"launchd","unit_path":"/Users/alice/Library/LaunchAgents/digital.wirdrei.mailtriage.work.plist","executable":"/Users/alice/.local/bin/mailtriage","same_binary":true}]}}
+```
+
+| Field | Content |
+| --- | --- |
+| `action` | `updated`, or `current` when the release is not newer. With `current`, `from` and `to` are both the installed version, and `previous_path` and `services` are absent. |
+| `from`, `to` | The installed version before and after. |
+| `path` | The binary that was replaced. |
+| `previous_path` | Where the previous binary is: `<binary>.previous`, or, with a warning, a `.mailtriage-update-*.prev` file next to it. |
+| `warnings` | Problems after the rename, for example `installed; recording the update failed: …`. The update still counts as done. |
+| `services` | Every service file mailtriage wrote in this user's LaunchAgents or systemd user directory: `account`, `manager`, `unit_path`, the `executable` it runs (`null` when the file cannot be decoded), and `same_binary`, true when that is the binary just replaced. Those services switch before their next pass; the others are left alone. `update` runs no `launchctl` or `systemctl` command. |
+
+| Code | Cause |
+| --- | --- |
+| 0 | Updated (also with `warnings`), already current, or `--check` done. |
+| 2 | Invalid flags. |
+| 3 | GitHub could not be reached or answered with an error, including its rate limit; there is no stable release; the release has no archive for this platform or no `SHA256SUMS` line for it; a checksum mismatch; a bad archive; the new binary did not run; the installed binary changed during the update; no cache directory can be found (see [Files](#files)); or, without `--check`, the binary may not be replaced: the message names the reason and its fix. |
+| 5 | Another update held the installation lock for 60 seconds (`another update is running`). |
+
+### In the background
+
+All of this happens in `watch`; no other command checks for updates by itself. Each pass runs, in order, the restart check (see [How a running service switches](#how-a-running-service-switches)), the update step, and then the pass. The update step never fails, ends or changes a pass. Its problems are printed as `{"schema_version":1,"update":{"event":"error","message":"…"}}`, one JSON line with `--json`, else one text line.
+
+The update step:
+
+1. Reads `updates` from the config at every pass. When the file cannot be read or its `updates` is invalid, `watch` uses the mode it last stored for this config; with none, it skips the step.
+2. With `off`, it stops there. With `notify` or `auto`, it refreshes the release information when the next check is due, about once a day: 24 hours after a successful check, plus up to an hour. Before the request it records the next check one hour ahead, so a `watch` that crashes or is killed during the request does not ask again sooner. A failed check is retried after 1 hour, doubling up to 24 hours (±10 %), or later when GitHub's `Retry-After` or rate-limit reset says so.
+3. With `auto`, when the cached release is newer than the installed binary, was checked at most 48 hours ago, and no earlier attempt waits for its retry, it installs the release as `mailtriage update` does. It tries the installation lock once; when another update holds it, it tries again at the next pass. It records the next attempt one hour ahead before it downloads, and a failed install waits 1 hour, doubling up to 24 hours. After an install, the restart check switches `watch` to the new binary before the pass.
+4. With `notify`, or with `auto` when the binary may not be replaced, it prints once per release and config `{"schema_version":1,"update":{"event":"available","current":"0.2.0","latest":"0.3.0","release_url":"…"}}`. For `auto`, the event adds `install` with `reason` and `fix`.
+
+The release information is shared by every `watch` of the same user: a `notify` watcher's check serves an `auto` watcher's install. A cache that cannot be written stops the network work, and `watch` prints one event about it.
+
+### Status
+
+`mailtriage service status --account NAME` and `mailtriage doctor --account NAME` include an `update` block for the binary the account's service runs (see [Service commands](#service-commands)); `doctor` adds `ready` and `fix`. Both read the cache and make no network call. `mailtriage update --check --json` asks GitHub now.
+
+### How a running service switches
+
+`watch` records which file it runs when it starts. Before each pass, and every 5 seconds while it waits, it compares that file with the binary at the same path (device, inode, size, modification and change time, mode). When the binary was replaced, by `mailtriage update`, by another account's service, or by `cargo install` over the same path, `watch`:
+
+1. runs `<binary> --version`, which must print `mailtriage <version>`;
+2. checks that the file did not change again meanwhile;
+3. prints `{"schema_version":1,"update":{"event":"restarting","pid":1234,"from":"0.2.0","to":"0.3.0"}}`;
+4. replaces itself with the new binary, with the same arguments and environment. The process ID stays the same, so launchd and systemd see no change, and the account lock is free while this happens.
+
+It never does this during a pass, and after Ctrl-C or SIGTERM it stops instead. It works in every `updates` mode and needs no `service install`; moving the binary to another path does need `service install`.
+
+When the new binary does not run, or the switch fails, `watch` prints one `{"schema_version":1,"update":{"event":"error","message":"…"}}` per file and kind of failure, keeps running the old code, and tries again after 1 minute, doubling up to 1 hour, or at once when the file changes again (for example after `chmod +x`). On Linux, a process whose binary file was replaced uses its absolute `argv[0]` to find the path; when that does not exist either, `watch` prints one error event and does not switch.
+
+Without `--json`, events are one line of text, for example `update: restarting onto 0.3.0 (was 0.2.0, pid 1234)`.
+
+### Binaries mailtriage does not replace
+
+| `install.reason` | When | `install.fix` |
+| --- | --- | --- |
+| `unsupported_platform` | No release archive is built for this system: only macOS arm64 and Linux amd64 and arm64 with glibc have one. | Build from source, or set `updates` to `off`. |
+| `managed_by_homebrew` | The path has a `Cellar` directory followed by `mailtriage`. | `brew upgrade mailtriage` |
+| `managed_by_nix` | The path starts with `/nix/store/`. | Update it through nix. |
+| `unsafe_permissions` | The binary or its directory is not owned by you, or is writable by group or others. | Install mailtriage into a directory only you own and can write, such as `~/.local/bin`, or set `updates` to `notify`. |
+| `not_writable` | You cannot create files in the binary's directory. | Make the directory writable for you, or set `updates` to `notify`. |
+
+A binary installed with `sudo install … /usr/local/bin/mailtriage` belongs to root, so it is `unsafe_permissions`: mailtriage reports new releases for it but does not replace it. For automatic updates, install it as your own user and put `~/.local/bin` on your `PATH` (see [Install](#install)):
+
+```sh
+install -d ~/.local/bin &&
+  install -m 0755 mailtriage ~/.local/bin/mailtriage
+```
+
+Run `mailtriage service install` again after you move the binary.
+
+### Files
+
+| File | Purpose |
+| --- | --- |
+| `update.json` in `~/Library/Caches/mailtriage` (macOS), or in `$XDG_CACHE_HOME/mailtriage` when `XDG_CACHE_HOME` is an absolute path, else `~/.cache/mailtriage` (Linux) | The last release check and when the next one is due, each config's mode and the last `available` event, and each installed binary's version and last install error. `update.lock` beside it guards it. Deleting it is safe; it is rebuilt. |
+| `.mailtriage-update.lock` next to the binary | The installation lock. It is never deleted. |
+| `.mailtriage-update-*` next to the binary | Temporary files of an update; the next update removes leftovers. |
+| `<binary>.previous` | The binary before the last update. |
+
+Without the cache directory (no `HOME`, and on Linux no absolute `XDG_CACHE_HOME`), `update` exits 3 and `watch` skips its update work.
+
+### The first release with automatic updates
+
+Copies older than the release that brought automatic updates cannot update themselves. Once:
+
+1. Install the first release with automatic updates by hand into a directory you own: from its archive into `~/.local/bin` (see [Binaries mailtriage does not replace](#binaries-mailtriage-does-not-replace)), or with `cargo install` into `~/.cargo/bin`. Remove an older copy that you installed with `sudo` and no longer use, for example `sudo rm /usr/local/bin/mailtriage`, so it does not come first on your `PATH`: `service install` records the binary that runs it, and a root-owned binary is never updated. `command -v mailtriage` must show the new path.
+2. Run `mailtriage service install --account NAME` once for every account, so each service runs the new binary. The old processes have no restart rule and would keep running the old code.
+3. After the next pass, check that `mailtriage service status --account NAME --json` shows the new version in `last_pass.version` and `update.replaceable: true`. When `replaceable` is `false`, `update.reason` says why.
+
+From then on, mailtriage updates itself.
+
+### When a release breaks `watch`
+
+A release that fails before `watch` reaches its update step cannot repair itself. Install a newer release by hand:
+
+1. Run `mailtriage update`. It needs no config, so it may work when `watch` does not.
+2. If it does not run either, download and check the archive yourself, then move the binary into place. Set `VERSION` to the release to install and `PLATFORM` to `macos-arm64`, `linux-amd64` or `linux-arm64`. On Linux, use `sha256sum` in place of `shasum -a 256`. Replace `~/.local/bin/mailtriage` with the path of your installed binary:
+
+   ```sh
+   VERSION=0.3.1 PLATFORM=macos-arm64
+   base="https://github.com/wir-drei-digital/mailtriage/releases/download/v$VERSION"
+   curl -fLO "$base/mailtriage-v$VERSION-$PLATFORM.tar.gz" &&
+     curl -fLO "$base/SHA256SUMS" &&
+     shasum -a 256 --check --ignore-missing SHA256SUMS &&
+     tar -xzf "mailtriage-v$VERSION-$PLATFORM.tar.gz" mailtriage &&
+     mv mailtriage ~/.local/bin/mailtriage
+   ```
+
+   Running services switch to it before their next pass.
+
+### Rolling back by hand
+
+There is no rollback command; a bad release is normally fixed by a newer one. To go back to the binary before the last update:
+
+1. Set `updates` to `off` in every config (`mailtriage setup --update --updates off`, or edit the file), so the services do not install the newer release again.
+2. Stop the services: `mailtriage service uninstall --account NAME` for each account.
+3. `mv <binary>.previous <binary>`
+4. Start them again: `mailtriage service install --account NAME`.
+
+This works only when the newer release did not migrate the state database. An older binary refuses a newer database (`database schema is newer than this binary`); then roll forward to a fixed release instead.
 
 ## Daily use
 
@@ -934,6 +1123,55 @@ Check the mailbox before you lift a block or a pause.
 | `duplicate_copy` | The message is in two folders. | Delete one copy in your mail client, run `sync` so mailtriage observes it, then run `filing retry --id ID`. While both copies are recorded, the retry is refused with exit code 5 (`remove one copy first, then sync and retry`). Lifting `duplicate_copy` does not make the message eligible once. If the copy you kept is in a source folder and the message is still new mail, the next pass files it again; `filing pin --id ID` keeps it in the source folder instead. `filing pin` and `correct --category` do not lift this block. |
 | `merge_conflict` | An unresolved arrival duplicates this message. `filing log --id ID` shows the arrival in `detail.arrival_id`. | `filing retry --id ID` does not lift this block. `filing dismiss --arrival N` marks the arrival reviewed and lifts it. `filing retry --arrival N` fetches the arrival again instead; a repeated conflict blocks again. |
 | Unresolved arrival | Mail that mailtriage could not identify. | `filing retry --arrival N` fetches it again; `filing dismiss --arrival N` marks it reviewed. |
+
+### Refiling after category changes
+
+Automatic filing moves mail only out of the source folders. When you add, remove or re-point categories, the mail that mailtriage already filed stays where it is until you refile it. `filing refile` shows which filed mail would follow its new category, and `--apply` lets the next passes move it:
+
+```sh
+mailtriage filing refile --account work --json
+mailtriage filing refile --account work --category updates --json
+mailtriage filing refile --account work --folder Promotions --apply --json
+```
+
+Refiling moves only mail that is still exactly where a mailtriage move put it, as the server confirmed when the move ran. Mail you moved (even back into the same folder), corrected, pinned or marked done stays where it is, and nothing is ever refiled into `INBOX` or another source folder. Mail filed before this version without a server-reported destination (COPYUID) cannot be refiled.
+
+| Change | What to do |
+| --- | --- |
+| Add a category | `categories apply`, let a few passes classify open mail again, then preview with `filing refile --category NEW` and move with `--apply`. |
+| Rename a category (`name` only) | Nothing moves; its folder stays. |
+| Re-point its `folder` | `categories apply`. The next live pass creates the new folder and retires the old one. `filing refile --folder OLD --apply` moves the old folder's mail, including mail still being classified again. |
+| Remove a category | `categories apply` retires its folder and classifies its open mail again. `filing refile --folder OLD --apply` moves that mail into the remaining categories' folders once it is classified. |
+
+With filing on, `categories apply` returns a `hint` naming the command. The preview makes no mailbox calls and reports:
+
+| Field | Content |
+| --- | --- |
+| `candidates` | Messages that would move, by folder and UID, at most `--limit` (1 to 500, default 50): `id`, `folder` and `target` (server folder names), `category` (the new category) and `reason` (`category_changed`, or `folder_retired` when no category uses the folder any more). |
+| `total` | All candidates, without the limit. |
+| `folders` | One entry per folder holding candidates or waiting mail: `folder` (the configured name, `null` when unknown), `native` (the server name; pass it to `--folder`), `retired`, `candidates`, `waiting`. |
+| `waiting` | Messages still to be classified again; whether they move is decided then. Mail whose classification failed also counts, and a mark on it stays pending, until it is classified again (`reclassify` queues it again). |
+| `skipped` | What stays, counted by reason (below). |
+
+`--folder NAME` takes a folder's server name or its configured name; a configured name two folders share exits 2 and lists their server names. `--category ID` limits the candidates to one new category; waiting mail is reported but not marked, so run the command again once it is classified. With `--folder` and no `--category`, `--apply` also marks the waiting mail, which then moves once classified. `--apply` needs `live`, marks the whole matching set whatever `--limit` says, and is safe to repeat: `marked` and `waiting_marked` count only new marks. The moves happen over the following passes, at most `filing.max_actions_per_pass` per pass, with every safeguard of other moves; a refile adds no flag.
+
+| `skipped` reason | Meaning |
+| --- | --- |
+| `not_filed_by_mailtriage` | The message is not where a mailtriage move put it: you moved it, a rescan or recovery placed it, or it was filed without COPYUID. |
+| `corrected`, `pinned`, `done` | Your correction, pin or Done wins. |
+| `blocked`, `open_intent` | A block or an unfinished move; see `filing status`. |
+| `explicit_target` | An explicit move request is pending; if its category was removed, `correct --account NAME --id ID --category NEW` replaces it. |
+| `multiple_copies` | It is in more than one folder. |
+| `incomplete_input` | It was classified from incomplete content. |
+| `retired_frozen` | It is in a retired folder mailtriage no longer watches. |
+| `target_unusable` | Its new folder is paused, missing or awaiting `filing adopt`. A marked message waits for it. |
+| `target_inbox_or_source` | Its new category keeps mail in `INBOX` or a source folder. |
+
+A retired folder stays watched while it holds mail that mailtriage filed there and you have not moved, corrected, pinned or marked done, including mail you never refiled and mail that would not move; refile its mail to let it stop being watched. When none is left, it stays watched until mailtriage has scanned everything moved into it before then. After that it is no longer watched and the mail in it is not refiled. mailtriage never renames or deletes it; delete the emptied folder in your mail client when you like.
+
+A mark is dropped, with a `refile_cleared` event naming the reason, when the message is corrected, pinned, marked done, moved, copied, or classified into its own folder, into `INBOX` or a source folder, or from incomplete content. `filing status` reports `refile_marked` and `refile_candidates`. `filing log` shows `refile_marked`, `refile_cleared`, `refile_cancelled` and `moved` events with `"reason": "refile"`.
+
+Exit codes: 2 for `--apply` outside `live`, an unknown `--category`, a `--folder` that names no category or retired folder (or two of them), a `--limit` outside 1 to 500, or an unknown account; 3 when the state database is unavailable; 5 when `mailtriage.json` changed during `--apply` or the placements kept changing.
 
 ### Provider check
 

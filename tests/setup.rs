@@ -155,9 +155,9 @@ impl Fixture {
         serde_json::from_slice(&fs::read(self.config_path()).unwrap()).unwrap()
     }
 
-    /// Runs mailtriage with this fixture's HOME, PATH and time zone, extra
-    /// environment `env`, and `stdin` piped in; prompted runs without
-    /// `--service` get `--service skip`.
+    /// Runs mailtriage with this fixture's HOME (and XDG_CACHE_HOME inside
+    /// it), PATH and time zone, extra environment `env`, and `stdin` piped
+    /// in; prompted runs without `--service` get `--service skip`.
     fn run_with(&self, args: &[&str], stdin: &str, env: &[(&str, &str)]) -> (Output, Value) {
         let mut args = args.to_vec();
         if args.contains(&"--interactive") && !args.contains(&"--service") {
@@ -173,6 +173,7 @@ impl Fixture {
             .current_dir(&self.cwd)
             .args(args)
             .env("HOME", &self.home)
+            .env("XDG_CACHE_HOME", self.home.join(".cache"))
             .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()))
             .env("TZ", "Europe/Berlin")
             .env_remove("MAILTRIAGE_CONFIG")
@@ -1565,4 +1566,259 @@ fn service_errors_name_step_10_and_keep_their_exit_code() {
     let (out, v) = f.run(&install, "");
     assert_eq!(out.status.code(), Some(3), "{v}");
     assert!(message(&v).starts_with("step 10 (service): "), "{v}");
+}
+
+#[test]
+fn setup_writes_updates_and_every_path_keeps_an_existing_value() {
+    let f = Fixture::new();
+    let (out, v) = f.run(&WORK_ENV, "");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(v["setup"]["updates"], "auto");
+    assert_eq!(f.config()["updates"], "auto");
+    assert_eq!(f.config()["schema_version"], 3);
+
+    let (out, v) = f.run(
+        &[
+            "setup",
+            "--yes",
+            "--update",
+            "--json",
+            "--himalaya-account",
+            "work",
+            "--updates",
+            "off",
+        ],
+        "",
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(v["setup"]["updates"], "off");
+    assert_eq!(f.config()["updates"], "off");
+
+    // Adding an account interactively: Himalaya account 1 (home), then
+    // Enter for identity, time zone, brief, folders, classifier, filing.
+    let add = format!("1\n{}", "\n".repeat(6));
+    // Updating from the menu: Update (1), home (1), then seven Enters.
+    let menu = format!("1\n1\n{}", "\n".repeat(7));
+    let runs: [(&[&str], &str); 4] = [
+        (
+            &["setup", "--interactive", "--json", "--account", "home"],
+            &add,
+        ),
+        (&["setup", "--interactive", "--json"], &menu),
+        (
+            &[
+                "setup",
+                "--yes",
+                "--update",
+                "--json",
+                "--himalaya-account",
+                "work",
+            ],
+            "",
+        ),
+        (
+            &[
+                "setup",
+                "--yes",
+                "--update",
+                "--json",
+                "--account",
+                "home",
+                "--himalaya-account",
+                "home",
+            ],
+            "",
+        ),
+    ];
+    for (args, input) in runs {
+        let (out, v) = f.run(args, input);
+        assert_eq!(out.status.code(), Some(0), "{args:?}: {}", stderr(&out));
+        assert_eq!(v["setup"]["updates"], "off", "{args:?}");
+        assert_eq!(f.config()["updates"], "off", "{args:?}");
+    }
+
+    let (out, _) = f.run(
+        &[
+            "setup",
+            "--yes",
+            "--update",
+            "--json",
+            "--himalaya-account",
+            "work",
+            "--updates",
+            "notify",
+        ],
+        "",
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(f.config()["updates"], "notify");
+}
+
+/// The key command runs in step 5, between reading the config (step 1)
+/// and writing it (step 8); here it rewrites the config, as another
+/// command would.
+#[test]
+fn setup_refuses_to_save_over_a_config_changed_since_it_read_it() {
+    let f = Fixture::new();
+    assert_eq!(f.run(&WORK_ENV, "").0.status.code(), Some(0));
+    let mut altered = f.config();
+    altered["accounts"]["work"]["brief"] = json!("Changed by another command");
+    let altered_path = f.home.join("altered.json");
+    fs::write(&altered_path, serde_json::to_vec_pretty(&altered).unwrap()).unwrap();
+    let command = format!(
+        "cp '{}' '{}' && echo sk-or-fixture",
+        altered_path.display(),
+        f.config_path().display()
+    );
+    let (out, v) = f.run(
+        &[
+            "setup",
+            "--yes",
+            "--update",
+            "--json",
+            "--himalaya-account",
+            "work",
+            "--key-command",
+            &command,
+        ],
+        "",
+    );
+    assert_eq!(out.status.code(), Some(5), "{}", stderr(&out));
+    assert_eq!(v["error"]["reason"], "config_changed", "{v}");
+    assert!(message(&v).starts_with("step 8 (write): "), "{v}");
+    assert_eq!(f.config(), altered);
+}
+
+#[test]
+fn setup_refuses_while_another_command_holds_the_config_lock() {
+    use fs2::FileExt;
+    let f = Fixture::new();
+    assert_eq!(f.run(&WORK_ENV, "").0.status.code(), Some(0));
+    let before = f.config();
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(f.config_path().with_extension("lock"))
+        .unwrap();
+    lock.lock_exclusive().unwrap();
+    let (out, v) = f.run(
+        &[
+            "setup",
+            "--yes",
+            "--update",
+            "--json",
+            "--himalaya-account",
+            "work",
+            "--brief",
+            "Runs a bakery",
+        ],
+        "",
+    );
+    assert_eq!(out.status.code(), Some(5), "{}", stderr(&out));
+    assert_eq!(v["error"]["reason"], "config_busy", "{v}");
+    assert_eq!(f.config(), before);
+}
+
+/// A config path that is a symlink locks next to the file it names, as
+/// `Service` does, so setup and the other config writers share one lock.
+#[test]
+fn setup_takes_the_config_lock_next_to_the_file_a_symlink_names() {
+    use fs2::FileExt;
+    let f = Fixture::new();
+    assert_eq!(f.run(&WORK_ENV, "").0.status.code(), Some(0));
+    let before = f.config();
+    let link = f.home.join("links").join("mailtriage.json");
+    fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(f.config_path(), &link).unwrap();
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(f.config_path().with_extension("lock"))
+        .unwrap();
+    lock.lock_exclusive().unwrap();
+    let (out, v) = f.run(
+        &[
+            "setup",
+            "--yes",
+            "--update",
+            "--json",
+            "--config",
+            link.to_str().unwrap(),
+            "--himalaya-account",
+            "work",
+            "--brief",
+            "Runs a bakery",
+        ],
+        "",
+    );
+    assert_eq!(out.status.code(), Some(5), "{}", stderr(&out));
+    assert_eq!(v["error"]["reason"], "config_busy", "{v}");
+    assert_eq!(f.config(), before);
+    assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
+}
+
+#[test]
+fn setup_names_the_update_fix_when_auto_cannot_replace_the_service_binary() {
+    let f = Fixture::new();
+    write_tool(&f.bin, "launchctl", LAUNCHCTL);
+    write_tool(&f.bin, "systemctl", SYSTEMCTL);
+    let cellar = f.home.join("brew/Cellar/mailtriage/0.0.1/bin");
+    fs::create_dir_all(&cellar).unwrap();
+    write_tool(
+        &cellar,
+        "mailtriage",
+        "#!/bin/sh\necho 'mailtriage 0.0.1'\n",
+    );
+    let unit = mailtriage::system_service::Unit {
+        account: "work".into(),
+        exe: cellar.join("mailtriage"),
+        config: f.config_path(),
+        interval_seconds: 60,
+        limit: 100,
+        log_dir: f.home.join("logs"),
+        path_env: None,
+    };
+    let (manager, name, text) = if cfg!(target_os = "macos") {
+        (
+            mailtriage::system_service::Manager::Launchd,
+            "digital.wirdrei.mailtriage.work.plist",
+            mailtriage::system_service::plist(&unit),
+        )
+    } else {
+        (
+            mailtriage::system_service::Manager::Systemd,
+            "mailtriage-work.service",
+            mailtriage::system_service::systemd_unit(&unit),
+        )
+    };
+    let dir = mailtriage::system_service::unit_dir(manager, &f.home);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join(name), text).unwrap();
+
+    let (out, v) = f.run_with(&WORK_ENV, "", &[("OPENROUTER_API_KEY", "sk-or-fixture")]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let doctor = &v["setup"]["doctor"];
+    let item = doctor["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["check"] == "update")
+        .cloned()
+        .unwrap_or_else(|| panic!("no update item: {doctor}"));
+    assert_eq!(
+        item,
+        json!({"check":"update","ready":false,"error":"managed_by_homebrew","fix":"run `brew upgrade mailtriage`"})
+    );
+    assert_eq!(doctor["ready"], true, "{doctor}");
+
+    let (out, v) = f.run_with(
+        &[&WORK_ENV[..], &["--update", "--updates", "notify"]].concat(),
+        "",
+        &[("OPENROUTER_API_KEY", "sk-or-fixture")],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let items = v["setup"]["doctor"]["items"].as_array().unwrap();
+    assert!(items.iter().all(|i| i["check"] != "update"), "{items:?}");
 }

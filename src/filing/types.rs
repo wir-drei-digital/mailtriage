@@ -50,6 +50,28 @@ pub struct Placement {
     pub done_inferred: bool,
     /// `move_failed`, `duplicate_copy`, `quarantined` or `merge_conflict`.
     pub blocked_reason: Option<String>,
+    /// Refile spec: set by `filing refile --apply`, consumed by the refile
+    /// move, cleared by mark upkeep.
+    pub refile_once: bool,
+    /// Refile spec "Filed home": the occurrence a COPYUID-proven mailtriage
+    /// move produced. Stored only while it is the known home.
+    pub filed_home_folder: Option<String>,
+    pub filed_home_epoch: Option<u64>,
+    pub filed_home_uid: Option<u64>,
+}
+
+impl Placement {
+    /// Refile spec "Filed home": the location is known and the home is
+    /// exactly the occurrence a proven mailtriage move produced.
+    pub fn at_filed_home(&self) -> bool {
+        self.location_state == LocationState::Known
+            && self.filed_home_folder.is_some()
+            && self.home_folder == self.filed_home_folder
+            && self.home_epoch.is_some()
+            && self.home_epoch == self.filed_home_epoch
+            && self.home_uid.is_some()
+            && self.home_uid == self.filed_home_uid
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -124,6 +146,9 @@ pub struct Intent {
     /// quarantine window is `target_uid_next <= uid < race_until_uid` in
     /// `target_epoch` (open-ended until it is recorded).
     pub race_until_uid: Option<u64>,
+    /// A refile move: applying it with a current `desired_rev` clears the
+    /// placement's refile mark.
+    pub consumes_refile: bool,
 }
 pub const OPEN_INTENT_STATES: [&str; 4] = ["in_flight", "sent", "uncertain", "awaiting_rescan"];
 

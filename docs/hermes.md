@@ -20,7 +20,7 @@ Hermes, or any other agent, calls `mailtriage` as an ordinary process. It needs 
      - `--key-command 'COMMAND'`: a shell command that prints the key. Setup runs it once to check it.
      - `--key-store env`, with `--key-env NAME` when the variable is not `OPENROUTER_API_KEY`: mailtriage reads the key from the variable in its own environment.
    - `--service install` also installs `watch` as a launchd agent or systemd user unit (see [Background service](guide.md#background-service)). The default is `skip`. Setup installs no service when `doctor` reports a not-ready `state` item.
-   - Optional: `--account`, `--identity`, `--timezone`, `--brief`, `--mailbox` (repeat for several folders), `--filing off|dry-run`, `--interval-seconds`, `--limit`.
+   - Optional: `--account`, `--identity`, `--timezone`, `--brief`, `--mailbox` (repeat for several folders), `--filing off|dry-run`, `--interval-seconds`, `--limit`, `--updates auto|notify|off` (what `watch` does about new releases; see [Updates](guide.md#updates)).
    - To change an existing config, add `--update`. A classifier flag such as `--model` keeps where the key comes from; only a key flag (`--key-store`, `--key-command`, `--key-env`, `--key-stored`) changes it. Key flags with `--provider fake` exit 2.
    - To write the configuration by hand instead, follow [Manual setup](guide.md#manual-setup). Use absolute paths in `engine.binary` and `engine.config`: the agent's `PATH` may not contain Himalaya, and `~` is not expanded.
 
@@ -75,6 +75,15 @@ The result is `{"schema_version":1,"service":{...}}` (fields in [Service command
   - `finished_at`: when the pass ended. Older than a few intervals means `watch` is not running or is stuck.
   - `exit_code`: 0 is a complete pass; 4 is partial (some folders or messages failed, and `list --view all` shows each message's `error`; or the key was unavailable, which `doctor` shows); any other code is the error's exit code from the table below.
   - `mode`: the filing mode of that pass (`off`, `dry_run` or `live`).
+  - `version`: the mailtriage version that ran that pass (`null` for passes recorded before schema 7). After an update it shows the new version once the switched service has finished its first pass, not as soon as it switches.
+
+### Updates
+
+`setup` writes `updates: auto`, so the background service installs every stable release within about a day and switches to it between passes (see [Updates](guide.md#updates)). On a host where provisioning owns the binary, pass `--updates off` (no network calls) or `--updates notify` (report only) to `setup`.
+
+- `mailtriage update --check --json` asks GitHub now and reports `available` and whether the binary may be replaced (`install.replaceable`, `install.reason`, `install.fix`). It exits 0 either way, and 3 when GitHub cannot be reached.
+- `service status --json` carries `service.update`: `installed` for the binary the service runs, `latest`, `available`, `last_error` and `replaceable`. It reads the cache and makes no network call.
+- `mailtriage update --json` installs the newest release. Exit 5 means another update is running: try again later. Exit 3 names the cause; report it to the user. Do not restart the service afterwards; it switches by itself.
 
 `service status --json` without `--account` checks every account at once: `{"schema_version":1,"config":"…","services":[…]}`, one object per account, sorted by name (fields in [Status of every account](guide.md#status-of-every-account)). Read `config_matches` before acting on a service: `false` means it runs another config (`service_config` names it), and `null` means its config cannot be told. When `service start` or `service stop` exits 5 with reason `service_config_mismatch`, report the config named in the message to the user instead of passing it yourself.
 
@@ -179,3 +188,20 @@ To move a message to another category, call `correct --category`. With filing on
 - A folder in `folders` with a `pause_reason` takes no writes until `filing retry --folder NAME`. A folder in state `needs_confirmation` waits for `filing adopt --folder NAME`. Both need the user's confirmation first.
 
 Never loop on `filing retry`. A block, a folder pause or an unresolved arrival means mailtriage could not prove what happened in the mailbox, and retrying without knowing why repeats the problem. Report the item from `filing status` to the user and retry once after they have checked it. Exit code 5 from a filing command means something changed concurrently or the message is not identified yet: let the next pass run, re-read the item, then decide again.
+
+### Refiling after category changes
+
+After the user adds, removes or re-points categories, mail that mailtriage already filed stays in its old folder until it is refiled. `filing refile` previews which filed mail would follow its new category. It reads local state only and is safe to repeat.
+
+```sh
+/opt/mailtriage/mailtriage filing refile --account work --json
+/opt/mailtriage/mailtriage filing refile --account work --folder INBOX.Promotions --json
+/opt/mailtriage/mailtriage filing refile --account work --folder INBOX.Promotions --apply --json
+```
+
+- `categories apply` returns a `hint`; run the preview once the next passes have classified open mail again.
+- Report `total`, the `folders` entries (`retired: true`: no category uses the folder any more) and `waiting` (mail still being classified again; it also counts mail whose classification failed, which `reclassify` queues again) to the user.
+- Run `--apply` only when the user asked to move the mail. It needs filing `live` (exit 2 otherwise) and marks the whole matching set; the following passes move it. Repeating it is harmless: `marked` and `waiting_marked` count only new marks.
+- Pass a folder's `native` name to `--folder`. A configured name that two folders share exits 2 and lists their native names.
+- `skipped` explains what stays. Mail the user corrected, pinned, marked done or moved (`not_filed_by_mailtriage`) is never refiled; do not try to move it. `explicit_target`: an explicit move request is pending; if its category was removed, `correct --category NEW` replaces it. `target_unusable`: the new category's folder is not usable yet; it may not exist yet (a live pass creates it, so in `dry_run` such mail always shows here), or it is paused or awaiting `filing adopt`; a marked message waits for it. `retired_frozen`: the mail sits in a retired folder mailtriage no longer watches.
+- `filing status` reports `refile_marked` and `refile_candidates`; `filing log` shows `refile_marked`, `refile_cleared` and `refile_cancelled` events, and `moved` events with `"reason": "refile"`.
