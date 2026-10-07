@@ -992,6 +992,26 @@ mailtriage gives `--mailbox` only to `message read`, which fetches a message's t
 
 A watched folder or category folder whose result is another mailbox (with `INBOX` compared case-insensitively) is an alias conflict. mailtriage never reads mail from it, in every filing mode; its mail stays queued without using a retry attempt. With filing on, the pass also reports `alias_conflict:FOLDER`, stops scanning the folder and makes no filing writes. Two alias keys that differ only in case and name different mailboxes count as a conflict too. When the Himalaya configuration cannot be parsed, mailtriage reads no folder at all, and `doctor` reports why in `transport.error`.
 
+### A private Himalaya
+
+```sh
+mailtriage himalaya install [--version X.Y.Z] [--json]
+```
+
+installs a tested Himalaya release for mailtriage alone; it never touches another `himalaya`.
+
+- It installs the newest tested version, or `--version`, which must be tested (else exit 2), into `DATA/mailtriage/himalaya/VERSION/himalaya`. `DATA` is `$XDG_DATA_HOME` when that is an absolute path, else `~/.local/share`, on macOS too.
+- It downloads that version's `himalaya.PLATFORM.tgz` from pimalaya's GitHub releases over HTTPS, with the same URL rules as `mailtriage update`, and checks it against the SHA-256 compiled into mailtriage. It unpacks only the `himalaya` executable into a new file, checks that it runs and prints that version with `+imap`, and moves it into place with a rename.
+- The directories are created with mode 0755. Before anything is written there, the version's directory and each of its parents must be safe: no symlink, owned by you or root, and not writable by group or others; a world-writable directory with the sticky bit, such as `/tmp`, is fine above one of yours. Otherwise it exits 3 with the reason `unsafe_permissions`, the directory and the fix, such as `chmod go-w DIR`.
+- Run again, it reports `current` and downloads nothing.
+- Point an account at it with `mailtriage setup --update --himalaya-binary PATH`, using the path it printed.
+
+```json
+{"schema_version":1,"himalaya":{"action":"installed","version":"2.2.1","path":"/Users/alice/.local/share/mailtriage/himalaya/2.2.1/himalaya"}}
+```
+
+`action` is `installed` or `current`. Exit codes: 0; 2 for a version that is not tested, or a platform for which pimalaya has no build mailtriage can use; 3 for a network error, a checksum mismatch, a bad archive, a binary that does not run, an unsafe directory, or another `himalaya install` that held its directory's lock for 60 seconds.
+
 ## Daily use
 
 The commands below omit `--config`; see [Where mailtriage finds the config](#where-mailtriage-finds-the-config). Pass it explicitly in scripts and supervised jobs.
@@ -1442,7 +1462,7 @@ The summary line, and the categories window, show these:
 
 With `--json`, every result is one line of JSON on stdout, and so is every error: `{"schema_version":1,"error":{"code":N,"message":"..."}}`. Without `--json`, results are pretty-printed JSON and errors go to stderr as `mailtriage: MESSAGE`. Every result has a `schema_version`. Error messages omit message bodies and credentials.
 
-Some errors also carry a machine-readable `reason` in the error object, for scripts that react to a class of error rather than to its message: `config_changed` (`mailtriage.json` or the Himalaya configuration changed during the command), `config_busy` (another command is editing `mailtriage.json`), `account_busy` (another worker for the account is running), `binding_conflict` (the account binding changed, see [Account binding](#account-binding)), `categories_changed` (`categories apply --expect-digest` found other categories), `service_config_mismatch` (the account's service runs another config, see [Service commands](#service-commands)), `service_config_unknown` (the config of the account's service cannot be told) and `service_busy` (another service command for the account held the service lock for 30 s). An error without a reason has no `reason` key.
+Some errors also carry a machine-readable `reason` in the error object, for scripts that react to a class of error rather than to its message: `config_changed` (`mailtriage.json` or the Himalaya configuration changed during the command), `config_busy` (another command is editing `mailtriage.json`), `account_busy` (another worker for the account is running), `binding_conflict` (the account binding changed, see [Account binding](#account-binding)), `categories_changed` (`categories apply --expect-digest` found other categories), `service_config_mismatch` (the account's service runs another config, see [Service commands](#service-commands)), `service_config_unknown` (the config of the account's service cannot be told), `service_busy` (another service command for the account held the service lock for 30 s) and `unsafe_permissions` (a directory mailtriage would install a program into is not safe; see [A private Himalaya](#a-private-himalaya)). An error without a reason has no `reason` key.
 
 | Code | Meaning |
 | --- | --- |

@@ -334,14 +334,17 @@ pub fn previous_path(path: &Path) -> PathBuf {
 }
 
 /// This attempt's temporary files, removed unless kept.
-struct Scratch(Vec<PathBuf>);
+#[derive(Default)]
+pub struct Scratch(Vec<PathBuf>);
 
 impl Scratch {
-    fn add(&mut self, path: PathBuf) -> PathBuf {
+    /// Removes `path` when this is dropped, unless `keep` was called.
+    pub fn add(&mut self, path: PathBuf) -> PathBuf {
         self.0.push(path.clone());
         path
     }
-    fn keep(&mut self) {
+    /// The files are kept: the commit point was reached.
+    pub fn keep(&mut self) {
         self.0.clear();
     }
 }
@@ -356,7 +359,7 @@ impl Drop for Scratch {
 
 /// Created exclusively with mode 0600 (never following an existing link),
 /// fsynced and closed, then made executable.
-fn write_staged(path: &Path, contents: &[u8]) -> io::Result<()> {
+pub fn write_staged(path: &Path, contents: &[u8]) -> io::Result<()> {
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -385,7 +388,7 @@ fn copy_or_link(path: &Path, backup: &Path) -> io::Result<()> {
     fs::set_permissions(backup, fs::metadata(path)?.permissions())
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 

@@ -51,6 +51,9 @@ pub enum ErrorKind {
     ServiceConfigUnknown,
     /// Another service command for the account held the service lock.
     ServiceBusy,
+    /// A directory mailtriage would install a program into fails the
+    /// protected path rule.
+    UnsafePermissions,
 }
 
 impl ErrorKind {
@@ -67,6 +70,7 @@ impl ErrorKind {
             Self::ServiceConfigMismatch => Some("service_config_mismatch"),
             Self::ServiceConfigUnknown => Some("service_config_unknown"),
             Self::ServiceBusy => Some("service_busy"),
+            Self::UnsafePermissions => Some("unsafe_permissions"),
         }
     }
 }
@@ -2237,6 +2241,10 @@ mod error_reasons {
             Some("service_config_unknown")
         );
         assert_eq!(ErrorKind::ServiceBusy.reason(), Some("service_busy"));
+        assert_eq!(
+            ErrorKind::UnsafePermissions.reason(),
+            Some("unsafe_permissions")
+        );
     }
 
     /// A mailbox identity that changed mid-operation is a binding conflict.

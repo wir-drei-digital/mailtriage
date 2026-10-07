@@ -1,6 +1,6 @@
 use clap::{ArgGroup, Args, Parser, Subcommand};
 use mailtriage::{
-    config,
+    config, distribution,
     domain::{Category, FilingMode, UpdateMode},
     engine::ConfigChanged,
     prompt::{self, Prompter},
@@ -90,6 +90,25 @@ enum Command {
     },
     /// Install the newest stable release from GitHub; needs no config.
     Update(UpdateArg),
+    /// The Himalaya mailtriage runs.
+    Himalaya {
+        #[command(subcommand)]
+        command: HimalayaCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum HimalayaCommand {
+    /// Install a tested Himalaya release for mailtriage only, under
+    /// ~/.local/share/mailtriage/himalaya; needs no config.
+    Install(HimalayaInstallArg),
+}
+
+#[derive(Args)]
+struct HimalayaInstallArg {
+    /// A tested version (default: the newest tested one).
+    #[arg(long = "version", value_name = "X.Y.Z")]
+    version: Option<String>,
 }
 
 #[derive(Args)]
@@ -709,6 +728,9 @@ fn execute(cli: &Cli) -> Result<Value, CliError> {
         Command::Update(arg) => {
             update::command::run(arg.check, &update::install::EnvHooks).map_err(service_error)
         }
+        Command::Himalaya {
+            command: HimalayaCommand::Install(arg),
+        } => distribution::himalaya::run(arg.version.as_deref()).map_err(service_error),
     }
 }
 
