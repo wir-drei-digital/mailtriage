@@ -90,7 +90,7 @@ The result is `{"schema_version":1,"service":{...}}` (fields in [Service command
 
 ### The tray app
 
-Agents never need the tray app. Each of its actions is one `mailtriage` command ([Tray](guide.md#tray) lists them), so an agent runs those directly.
+Agents never need the tray app. Every action is one documented command; the guide's [Tray](guide.md#tray) section lists them, so an agent runs the `mailtriage` commands directly.
 
 ## Reading mail
 

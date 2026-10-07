@@ -1257,23 +1257,27 @@ Every command ends with `--config CONFIG`, the absolute path of the tray's confi
 
 ### Install the tray
 
-Each release also carries `mailtriage-tray-vVERSION-macos-arm64.tar.gz`, `-linux-amd64.tar.gz` and `-linux-arm64.tar.gz`, each with a `.sha256` file and listed in `SHA256SUMS`. The archive holds `mailtriage-tray` and the license. Use the same release as `mailtriage`, verify the archive like the CLI's, and install the tray in the same directory as `mailtriage`:
+Each release also carries `mailtriage-tray-vVERSION-macos-arm64.tar.gz`, `-linux-amd64.tar.gz` and `-linux-arm64.tar.gz`, each with a `.sha256` file and listed in `SHA256SUMS`. The archive holds `mailtriage-tray` and the license. Use the same release as `mailtriage`, verify the archive like the CLI's, and install the tray in the same directory as `mailtriage` (`~/.local/bin` in [Install](#install)). On Linux, set `PLATFORM` to `linux-amd64` or `linux-arm64` and use `sha256sum --check` in place of `shasum -a 256 --check`:
 
 ```sh
-VERSION=0.1.0
-gh release download "v$VERSION" --repo wir-drei-digital/mailtriage --pattern "mailtriage-tray-v$VERSION-macos-arm64.tar.gz*"
-shasum -a 256 --check "mailtriage-tray-v$VERSION-macos-arm64.tar.gz.sha256"   # Linux: sha256sum --check
-tar -xzf "mailtriage-tray-v$VERSION-macos-arm64.tar.gz"
-sudo install -m 0755 mailtriage-tray /usr/local/bin/mailtriage-tray
+VERSION=0.1.0 PLATFORM=macos-arm64
+gh release download "v$VERSION" --repo wir-drei-digital/mailtriage --pattern "mailtriage-tray-v$VERSION-$PLATFORM.tar.gz*" &&
+  shasum -a 256 --check "mailtriage-tray-v$VERSION-$PLATFORM.tar.gz.sha256" &&
+  tar -xzf "mailtriage-tray-v$VERSION-$PLATFORM.tar.gz" &&
+  install -d ~/.local/bin &&
+  install -m 0755 mailtriage-tray ~/.local/bin/mailtriage-tray
 ```
 
 The macOS executable is unsigned and not notarized, like the CLI. From source, with a stable Rust toolchain (on Linux, install the build packages from [Linux requirements](#linux-requirements) first):
 
 ```sh
-cargo build --release --locked -p mailtriage-tray
-sudo install -m 0755 target/release/mailtriage-tray /usr/local/bin/mailtriage-tray
-mailtriage-tray --version
+cargo build --release --locked -p mailtriage-tray &&
+  install -d ~/.local/bin &&
+  install -m 0755 target/release/mailtriage-tray ~/.local/bin/mailtriage-tray &&
+  mailtriage-tray --version
 ```
+
+From then on `mailtriage update`, and the background service with `updates: auto`, keep a `mailtriage-tray` next to the CLI current: they update it after the CLI, to the same release (see [The tray next to the CLI](#the-tray-next-to-the-cli)). That needs both in a directory you own, as above. A root-owned copy, for example one installed with `sudo` into `/usr/local/bin`, is not replaced (see [Binaries mailtriage does not replace](#binaries-mailtriage-does-not-replace)).
 
 Start it:
 
@@ -1357,7 +1361,7 @@ Each account shows its name, its identity when that differs, a mark (● running
 - **The icon** shows the worst state across accounts: an envelope with a `!` badge for a warning, a problem or "Status unknown"; else a plain envelope when a service runs, starts or restarts; else an outline (every account stopped, not installed, running another config, or without a service manager). On macOS it follows the menu bar's light or dark look, so a warning and a problem look the same. Linux uses the same shapes in green, amber, red and grey.
 - **Times** are local `HH:MM`, with the date when not today ("Oct 5, 23:59").
 - **"(stale)"** after the summary: the last refresh failed. The menu keeps the last good state for up to 2 minutes, then shows the failure.
-- **"mailtriage X and tray Y differ; run mailtriage update"** appears when the CLI's version differs from the tray's. Install both from the same release.
+- **"mailtriage X and tray Y differ; run mailtriage update"** appears when the CLI's version differs from the tray's. `mailtriage update` brings a CLI and the tray next to it to the same release; otherwise install both from the same release.
 - **Notices.** A failed action, or a line from the categories window such as "the categories window is already open", shows under the summary for 60 s, with "Show details" when there is more.
 
 ### The categories window
@@ -1408,7 +1412,7 @@ The summary line, and the categories window, show these:
 | mailtriage not found (looked in …) | Install `mailtriage` in the same directory as `mailtriage-tray` or on your `PATH`, or start the tray with `--mailtriage PATH`. |
 | Not set up. Run mailtriage setup in a terminal. | No config was found. Run `mailtriage setup`; the tray finds the config at its next refresh. The tray never runs setup itself. |
 | Not set up: no config at PATH. Run mailtriage setup --config PATH in a terminal. | `--config` names a file that does not exist. That command creates it there (plain `mailtriage setup` would write the default config instead); the tray finds it at its next refresh. |
-| mailtriage is older than the tray; run mailtriage update. | The CLI lacks a field or a command this tray needs; "Show details" names the missing field, or shows the CLI's own complaint about the tray's arguments. Install `mailtriage` from the tray's release. |
+| mailtriage is older than the tray; run mailtriage update. | The CLI lacks a field or a command this tray needs; "Show details" names the missing field, or shows the CLI's own complaint about the tray's arguments. Run `mailtriage update`, or install `mailtriage` from the tray's release. |
 | Any other message | The failed command's error. In the menu, "Show details" copies the command, its exit code and its output; in the window, it shows them with "Copy". Run the command in a terminal to see more. |
 
 ## Reference

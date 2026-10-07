@@ -2,6 +2,10 @@
 
 Date: 2026-10-06
 Status: Design approved in conversation; written spec revised after three Codex review rounds.
+Amended 2026-10-07 to match decided behaviour: commands on screen as plain text, the
+summary for accounts that run another config, the refile panel's "Close", the "Not set
+up" text that names a missing `--config` file, the heartbeat reason's trust rule and the
+tray's update path.
 Builds on: [guided setup](2026-10-05-guided-setup-design.md) (background service),
 [refiling](2026-10-06-filing-refile-design.md) and [automatic updates](2026-10-06-auto-update-design.md).
 Implementation order: refile, automatic updates, then this.
@@ -252,12 +256,19 @@ reasons:
 
 Health must tell a configuration change that `watch` survives from a binding
 conflict that ends it; both exit 5. Each heartbeat therefore records the error's
-`reason`: a new nullable column `pass_heartbeats.reason` (schema **v8**, after the
-update spec's v7, additive as its migration rule requires), set on error heartbeats
-and `null` otherwise. `service status` reports it as `last_pass.reason`. The errors
-that `watch` treats as configuration changes carry `config_changed`; the worker lock
-carries `account_busy`; the binding error carries `binding_conflict`. This migration
-lands only after refile's v6 and the update spec's v7.
+`reason`. Migration **8** (after the update spec's v7, additive as its migration rule
+requires) adds two nullable columns, `pass_heartbeats.reason` and
+`pass_heartbeats.reason_at`. A v8 heartbeat sets `reason` (the error's reason, `null`
+on success or for an error without one) and sets `reason_at` to the `finished_at` it
+writes, in the same write. `service status` reports `last_pass.reason` only when
+`reason_at` equals `finished_at`, else `null`: rows from before migration 8 read
+`null`, and so does a row that a process of an older release rewrote after the
+migration (it updates `finished_at` but neither column), so a stale reason is never
+shown. The tray treats exit 5 with a `null` reason as an error, the conservative
+reading. The errors that `watch` treats as configuration changes carry
+`config_changed`; the worker lock carries `account_busy` (it ends `watch`, and the
+service manager restarts it); the binding error carries `binding_conflict`. This
+migration lands only after refile's v6 and the update spec's v7.
 
 ## Tray menu and health
 
@@ -324,8 +335,12 @@ Quit
     `unavailable`.
 - `error` adds "Open error log" (the `.err` file) on launchd.
 - Times are local `HH:MM`, with the date when not today.
-- The summary line reads "All accounts running", "daniel needs attention",
-  "Stopped", or the failure below.
+- The summary line reads "All accounts running", "N of M accounts running",
+  "daniel needs attention", "No background service on this system", "Stopped", or the
+  failure below. When no account runs for this config and some run another config,
+  it names them instead of "Stopped" (the icon still shows "off"): "Runs another
+  config" for a single account, "Every account runs another config", "daniel runs
+  another config" when one of several does, and "N accounts run another config".
 - A mismatch between the CLI's version (`update.installed` for the binary the tray
   runs, else `mailtriage --version`) and the tray's own version adds the line
   "mailtriage X and tray Y differ; run mailtriage update".
@@ -335,7 +350,7 @@ Quit
 | Situation | Summary line |
 | --- | --- |
 | No `mailtriage` found | "mailtriage not found" plus where the tray looked. |
-| No config | "Not set up. Run `mailtriage setup` in a terminal." The tray never runs `setup`. |
+| No config | When `--config` names a file that does not exist, the summary names that file and the command that creates it: "Not set up: no config at PATH. Run mailtriage setup --config PATH in a terminal." (PATH shell-quoted in the command). Otherwise "Not set up. Run mailtriage setup in a terminal." The tray never runs `setup`. |
 | Any other failure | The command's error message; "Show details" (copy) gives the command and its output. |
 
 A failed refresh keeps the last good menu for up to two minutes, marked "(stale)",
@@ -475,7 +490,11 @@ supplies the server folder names.
   calls for it."
   - When the account's state is not `ok`, `starting`, `restarting` or `warning`, it
     adds: "The background service is not running. Start it, or run
-    `mailtriage sync`, to move them."
+    mailtriage sync, to move them."
+- **Close.** The panel's heading row has a "Close" button. It hides the panel,
+  giving the form its room back. While a move runs it is disabled, with a tooltip
+  saying why, because the move reports into the panel. Opening the panel again with
+  "Move filed mail…" shows a fresh preview.
 - **Filing in `dry_run`:** the panel shows the preview only, with "Moving filed mail
   needs filing set to live."
 
@@ -486,7 +505,9 @@ checks every screen against these.
 
 - **Plain words.** No internal names on screen: no `catch_all`, `taxonomy`, `digest`,
   exit codes or JSON. Technical detail lives behind "Show details", which shows the
-  exact command, its exit code and output, and has "Copy".
+  exact command, its exit code and output, and has "Copy". On-screen text names
+  commands as plain text, without Markdown formatting such as backticks; the backticks
+  around commands in this spec are formatting, not on-screen text.
 - **Calm layout.** List on the left, form on the right, one primary button (Apply)
   bottom right with Revert beside it. Destructive actions ask first and say what
   happens to mail.
@@ -555,16 +576,18 @@ resolved paths.
       extension, which Ubuntu ships);
     - OpenGL for the window.
 - **Updating (extends the update spec).** The tray is a second component next to the
-  CLI. A regular file `mailtriage-tray` in the same directory as the CLI's canonical
-  path is its installation path, with its own entry in the cache's `installs`, keyed
-  by that path.
+  CLI. A regular file `mailtriage-tray` (not a symlink) in the same directory as the
+  CLI's canonical path is its installation path, with its own entry in the cache's
+  `installs`, keyed by that path.
   1. **Does it run here?** Run `mailtriage-tray --version` with the bounded runner.
      If it does not run, skip the tray, with
      `tray: {"action":"skipped","error":"mailtriage-tray does not run here: …"}`, and
      download nothing. A skipped tray is not a failure.
   2. **Install** the tray archive when the release is newer than the tray's installed
-     version. It goes through steps 4 to 10 of the update spec, under the same
-     installation lock, URL rules, limits and `SHA256SUMS`.
+     version. It goes through steps 3 to 10 of the update spec, under the same
+     installation lock, URL rules, limits and `SHA256SUMS`. Step 3, the replaceability
+     check, applies to the tray's own path: a tray it refuses fails the tray part like
+     any other tray failure (below).
      - It unpacks the top-level `mailtriage-tray`.
      - The smoke test expects `mailtriage-tray X.Y.Z`.
      - The backup is `mailtriage-tray.previous`.
@@ -572,17 +595,19 @@ resolved paths.
   The cached release information holds the tray archive too: the update spec's
   `release.archives` map gains `mailtriage-tray` (`{name, url, size}` for this
   platform, or `null` when the release has none). A tray retry in `watch` uses only
-  this cache. A release without a tray archive gives the tray
-  `{"action":"failed","error":"release vX.Y.Z has no tray archive for PLATFORM"}`.
+  this cache. A release without a tray archive gives an older tray
+  `{"action":"failed","error":"release vX.Y.Z has no tray archive for PLATFORM"}`; a
+  current tray is left alone.
   3. **Report** `tray: {"action":"updated"|"current"|"skipped"|"failed","from","to","error"}`
      in `update`'s result, and `tray: {"path","installed","available"}` in
-     `update --check` and in `service status`'s `update` block. Without a tray file,
-     `tray` is absent. The CLI's `available` keeps meaning the CLI alone.
+     `update --check` and in the `update` block of `service status` and `doctor`.
+     Without a tray file, `tray` is absent. The CLI's `available` keeps meaning the
+     CLI alone.
   - **Order.** `update` handles the CLI first, then the tray, in one run.
-  - **Tray failures.** A failed tray leaves the old tray in place, records
-    `installs[tray].last_error` with the update spec's backoff, and does not undo the
-    CLI. `update` then exits **4**: the CLI part succeeded or was current, the tray
-    part failed.
+  - **Tray failures.** A failed tray, including one the replaceability check
+    refuses, leaves the old tray in place, records `installs[tray].last_error` with
+    the update spec's backoff, and does not undo the CLI. `update` then exits **4**:
+    the CLI part succeeded or was current, the tray part failed.
   - **In `watch`.** Background installation runs when either component is older than
     the cached release and its own `next_attempt_at` has passed. After a re-exec onto
     a current CLI, an older tray is therefore still installed at a later pass. A tray
@@ -705,7 +730,8 @@ labels:
   are each reported with their `reason`.
 - **Heartbeat reason:** migration 7 → 8 and a database at 9 refused; error
   heartbeats carry `config_changed`, `account_busy` and `binding_conflict`;
-  `last_pass.reason` in `service status`.
+  `last_pass.reason` in `service status`; a row whose `finished_at` a pre-v8 write
+  replaced, and a row from before migration 8, report `reason: null`.
 - **`changes`:** each kind; a rename with filing on keeps the folder; `reclassifies`
   matches whether `apply` advances `taxonomy_revision`.
 

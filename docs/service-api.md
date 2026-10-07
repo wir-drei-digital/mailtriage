@@ -219,9 +219,10 @@ The updater installs `update::COMPONENTS`: `CLI` (`mailtriage`) and `TRAY`
 `update::installed_tray(cli)` finds a regular file there). Both go through
 `install::install` with their own `Job { component, path, fallback }`; the
 tray's fallback is its own probed version. `run` handles the CLI first and
-then the tray under the same installation lock. A failed tray part keeps the
-CLI's result and sets top-level `"partial": true` (exit 4); a failed CLI part
-never reaches the tray. Every check records `release.archives` for each
+then the tray under the same installation lock. A failed tray part, including
+a tray the replaceability check (`platform::blocker`) refuses, keeps the CLI's
+result and sets top-level `"partial": true` (exit 4); a failed CLI part never
+reaches the tray. Every check records `release.archives` for each
 component (`null` when the release lacks it); a missing key was written by an
 older version and counts as unknown (`CachedRelease::knows`), so `watch`
 refreshes early once (`check::due`) and status reports the tray's `available`
