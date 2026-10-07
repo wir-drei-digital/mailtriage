@@ -4,12 +4,14 @@
 use super::{
     cache::{self, Cache},
     platform::{self, Blocker},
-    release, service_files, version, CLI,
+    release::{self, CachedRelease},
+    service_files, version, CLI, TRAY,
 };
 use crate::{
     domain::UpdateMode,
     system_service::{self, Context, Manager},
 };
+use semver::Version;
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -89,6 +91,28 @@ fn describe(
         "reason": blocker.map(Blocker::reason),
     });
     (block, target.zip(blocker))
+}
+
+/// `tray` of `update --check`, `service status` and `doctor`: the tray's
+/// path, its `--version` (`installed`, `null` when it does not run here)
+/// and whether `release` is newer. `available` is also false without a
+/// release, and when the release was recorded by a version that did not
+/// know the tray (no `mailtriage-tray` key: unknown).
+pub fn tray_block(
+    path: &Path,
+    installed: Option<&Version>,
+    release: Option<&CachedRelease>,
+) -> Value {
+    let available = match (installed, release) {
+        (Some(installed), Some(release)) if release.knows(TRAY) => Version::parse(&release.version)
+            .is_ok_and(|latest| version::is_newer(&latest, installed)),
+        _ => false,
+    };
+    json!({
+        "path": path,
+        "installed": installed.map(ToString::to_string),
+        "available": available,
+    })
 }
 
 /// The executable of a service file mailtriage wrote; `None` when there is

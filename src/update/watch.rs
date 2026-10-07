@@ -3,15 +3,16 @@
 //! between passes, the restart check every 5 s. Update errors are printed
 //! as events and never fail or end a pass.
 use super::{
-    cache::{install_key, Cache, ConfigEntry, ErrorRecord},
+    cache::{install_key, Cache, CacheFile, ConfigEntry},
     check::{self, Reservation},
     events,
     github::{Endpoint, Net},
     install::{self, EnvHooks, Hooks, Job, Outcome},
+    installed_tray,
     platform::{self, Blocker, FileIdentity},
     release::{self, CachedRelease},
     restart::{Image, Restarter},
-    schedule, version, CLI,
+    schedule, version, Component, CLI, TRAY,
 };
 use crate::{config, domain::UpdateMode};
 use anyhow::anyhow;
@@ -95,7 +96,9 @@ impl WatchUpdates {
         self.restarter.check(stopped, &*self.hooks);
     }
 
-    /// Returns whether a release was installed.
+    /// Returns whether the CLI was installed: the restart rule then
+    /// re-executes `watch` before its pass, and the new binary handles the
+    /// tray at a later pass.
     fn update_step(&mut self, config: &Path) -> bool {
         let Some(cache) = self.cache.clone() else {
             return false;
@@ -115,7 +118,7 @@ impl WatchUpdates {
         if mode == UpdateMode::Off {
             return false;
         }
-        if schedule::due(cache.read().next_check_at.as_deref(), Utc::now()) {
+        if check::due(&cache.read(), Utc::now()) {
             let refreshed = Net::new(self.endpoint.clone())
                 .and_then(|net| check::refresh(&net, &cache, Reservation::Required));
             match refreshed {
@@ -135,37 +138,71 @@ impl WatchUpdates {
         let Ok(candidate) = Version::parse(&release.version) else {
             return false;
         };
+        let now = Utc::now();
+        let fresh = file
+            .checked_at
+            .as_deref()
+            .and_then(schedule::parse)
+            .is_some_and(|at| now - at <= Age::hours(MAX_RELEASE_AGE_HOURS));
         let path = self.restarter.image().map(|image| image.path.clone());
         let installed = path
             .as_deref()
             .and_then(|p| self.installed_version(&cache, p));
-        if !version::is_newer(&candidate, &installed.unwrap_or_else(version::running)) {
-            return false;
-        }
-        let blocker = path
-            .as_deref()
-            .and_then(|p| platform::blocker(p, release::platform()));
-        if let (UpdateMode::Auto, Some(path), None) = (mode, &path, blocker) {
-            let now = Utc::now();
-            let fresh = file
-                .checked_at
+        let running = version::running();
+        if version::is_newer(&candidate, installed.as_ref().unwrap_or(&running)) {
+            let blocker = path
                 .as_deref()
-                .and_then(schedule::parse)
-                .is_some_and(|at| now - at <= Age::hours(MAX_RELEASE_AGE_HOURS));
-            let attempt_due = schedule::due(
-                file.installs
-                    .get(&install_key(path))
-                    .and_then(|e| e.next_attempt_at.as_deref()),
-                now,
-            );
-            return fresh && attempt_due && self.install(&cache, path, &release);
+                .and_then(|p| platform::blocker(p, release::platform()));
+            if let (UpdateMode::Auto, Some(path), None) = (mode, &path, blocker) {
+                if fresh
+                    && attempt_due(&file, path)
+                    && self.install(&cache, CLI, path, &release, &running)
+                {
+                    return true;
+                }
+            } else {
+                // Only `auto` says why it does not install; `notify` never would.
+                let not_replaceable = path
+                    .as_deref()
+                    .zip(blocker.filter(|_| mode == UpdateMode::Auto));
+                self.notify(&cache, &key, mode, &release, not_replaceable);
+            }
         }
-        // Only `auto` says why it does not install; `notify` never would.
-        let not_replaceable = path
-            .as_deref()
-            .zip(blocker.filter(|_| mode == UpdateMode::Auto));
-        self.notify(&cache, &key, mode, &release, not_replaceable);
+        // The tray after the CLI, in `auto` only.
+        if let (UpdateMode::Auto, Some(tray)) = (mode, path.as_deref().and_then(installed_tray)) {
+            self.tray_step(&cache, &file, &release, &candidate, &tray, fresh);
+        }
         false
+    }
+
+    /// The tray's background install, from the cached release alone. A
+    /// release recorded by a version that did not know the tray waits for
+    /// the refresh (`check::due`); a tray that does not run here is skipped;
+    /// a tray that may not be replaced, like any failure, is an `error`
+    /// event with the tray's own backoff.
+    fn tray_step(
+        &mut self,
+        cache: &Cache,
+        file: &CacheFile,
+        release: &CachedRelease,
+        candidate: &Version,
+        tray: &Path,
+        fresh: bool,
+    ) {
+        if !release.knows(TRAY) {
+            return;
+        }
+        let Some(installed) = self.tray_version(cache, tray) else {
+            return;
+        };
+        if !version::is_newer(candidate, &installed) || !fresh || !attempt_due(file, tray) {
+            return;
+        }
+        if let Some(blocker) = platform::blocker(tray, release::platform()) {
+            self.install_failed(cache, &install_key(tray), TRAY, &blocker.refusal(tray));
+            return;
+        }
+        self.install(cache, TRAY, tray, release, &installed);
     }
 
     /// Stores `mode` for the config `key` when it changed.
@@ -188,9 +225,18 @@ impl WatchUpdates {
         }
     }
 
-    /// Steps 2 to 10 for the binary at `path`, trying the installation lock
-    /// once. Returns whether the release was installed.
-    fn install(&mut self, cache: &Cache, path: &Path, release: &CachedRelease) -> bool {
+    /// Steps 2 to 10 for `component` at `path`, trying the installation
+    /// lock once; `fallback` is the baseline when the installed version
+    /// cannot be read under the lock. Returns whether the release was
+    /// installed.
+    fn install(
+        &mut self,
+        cache: &Cache,
+        component: Component,
+        path: &Path,
+        release: &CachedRelease,
+        fallback: &Version,
+    ) -> bool {
         let key = install_key(path);
         let Some(dir) = path.parent() else {
             return false;
@@ -200,24 +246,23 @@ impl WatchUpdates {
             // Another updater is at work: try again at the next pass.
             Ok(None) => return false,
             Err(e) => {
-                self.install_failed(cache, &key, &format!("{e:#}"));
+                self.install_failed(cache, &key, component, &format!("{e:#}"));
                 return false;
             }
         };
         let net = match Net::new(self.endpoint.clone()) {
             Ok(net) => net,
             Err(e) => {
-                self.install_failed(cache, &key, &e.to_string());
+                self.install_failed(cache, &key, component, &e.to_string());
                 return false;
             }
         };
-        let running = version::running();
         let job = Job {
             net: &net,
-            component: CLI,
+            component,
             path,
             release,
-            fallback: &running,
+            fallback,
             cache: Some(cache),
             hooks: &*self.hooks,
         };
@@ -234,7 +279,10 @@ impl WatchUpdates {
         match outcome {
             Ok(Outcome::Installed(done)) => {
                 for warning in done.warnings {
-                    self.report(warning);
+                    self.report(match component {
+                        CLI => warning,
+                        _ => format!("{}: {warning}", component.name),
+                    });
                 }
                 true
             }
@@ -246,29 +294,21 @@ impl WatchUpdates {
                 if message.starts_with(CACHE_UNWRITABLE) {
                     self.report(message);
                 } else {
-                    self.install_failed(cache, &key, &message);
+                    self.install_failed(cache, &key, component, &message);
                 }
                 false
             }
         }
     }
 
-    /// Records a failed install with its backoff and prints it.
-    fn install_failed(&mut self, cache: &Cache, key: &str, message: &str) {
-        let now = Utc::now();
-        let recorded = cache.update(|c| {
-            let entry = c.installs.entry(key.to_owned()).or_default();
-            entry.failures = entry.failures.saturating_add(1);
-            entry.last_error = Some(ErrorRecord {
-                at: schedule::stamp(now),
-                message: message.to_owned(),
-            });
-            entry.next_attempt_at = Some(schedule::stamp(schedule::install_backoff(
-                now,
-                entry.failures,
-            )));
+    /// Records a failed install with its backoff (the recorder `update`
+    /// uses too) and prints it.
+    fn install_failed(&mut self, cache: &Cache, key: &str, component: Component, message: &str) {
+        let recorded = cache.record_install_failure(key, message);
+        self.report(match component {
+            CLI => format!("installing the update failed: {message}"),
+            _ => format!("installing the {} update failed: {message}", component.name),
         });
-        self.report(format!("installing the update failed: {message}"));
         if let Err(e) = recorded {
             self.report(format!("{CACHE_UNWRITABLE}: {e:#}"));
         }
@@ -336,11 +376,48 @@ impl WatchUpdates {
             }
         }
         let found = platform::probe(path, CLI).ok();
-        let recorded = cache.update(|c| {
-            let entry = c.installs.entry(key).or_default();
-            entry.version = found.as_ref().map(ToString::to_string);
-            entry.identity = Some(identity);
-        });
+        if let Err(e) = cache.record_version(&key, found.as_ref(), Some(identity)) {
+            self.report(format!("{CACHE_UNWRITABLE}: {e:#}"));
+        }
+        found
+    }
+
+    /// The tray's installed version, read like the CLI's (`--version` only
+    /// when the file's identity changed since the last reading) but read
+    /// again while it is unknown: a missing library can be installed
+    /// without touching the file. `None` when the tray does not run here:
+    /// it is skipped, and its entry records why, without a backoff, when
+    /// that is news.
+    fn tray_version(&mut self, cache: &Cache, tray: &Path) -> Option<Version> {
+        let identity = FileIdentity::read(tray).ok()?;
+        let key = install_key(tray);
+        let entry = cache.read().installs.get(&key).cloned().unwrap_or_default();
+        let known = entry
+            .version
+            .as_deref()
+            .and_then(|v| Version::parse(v).ok())
+            .filter(|_| entry.identity == Some(identity));
+        if known.is_some() {
+            return known;
+        }
+        let (found, recorded) = match platform::probe(tray, TRAY) {
+            Ok(found) => {
+                let recorded = cache.record_version(&key, Some(&found), Some(identity));
+                (Some(found), recorded)
+            }
+            Err(cause) => {
+                let message = TRAY.does_not_run(&cause);
+                let news = entry.identity != Some(identity)
+                    || entry.version.is_some()
+                    || entry.last_error.map(|e| e.message) != Some(message.clone());
+                let recorded = if news {
+                    cache.record_skip(&key, &message, Some(identity))
+                } else {
+                    Ok(())
+                };
+                (None, recorded)
+            }
+        };
         if let Err(e) = recorded {
             self.report(format!("{CACHE_UNWRITABLE}: {e:#}"));
         }
@@ -357,6 +434,16 @@ impl WatchUpdates {
         }
         (self.emit)(&events::error(&message));
     }
+}
+
+/// Whether the installation at `path` has no `next_attempt_at` in the future.
+fn attempt_due(file: &CacheFile, path: &Path) -> bool {
+    schedule::due(
+        file.installs
+            .get(&install_key(path))
+            .and_then(|e| e.next_attempt_at.as_deref()),
+        Utc::now(),
+    )
 }
 
 /// The cache key of a config: its canonical path, else its absolute path.

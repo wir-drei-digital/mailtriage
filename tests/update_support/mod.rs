@@ -236,15 +236,10 @@ fn serve(stream: TcpStream, state: &Mutex<State>) {
     let _ = out.flush();
 }
 
-/// This host's platform name in archive names.
+/// This host's platform name in archive names, as mailtriage computes it;
+/// the update tests need a host that releases have archives for.
 pub fn platform() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "macos-arm64"
-    } else if cfg!(target_arch = "aarch64") {
-        "linux-arm64"
-    } else {
-        "linux-amd64"
-    }
+    mailtriage::update::release::platform().expect("releases have no archive for this host")
 }
 
 pub fn sha256_hex(data: &[u8]) -> String {

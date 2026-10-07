@@ -48,6 +48,11 @@ impl Component {
         format!("{}-v{version}-{platform}.tar.gz", self.name)
     }
 
+    /// Why this component is skipped: its `--version` failed with `cause`.
+    pub fn does_not_run(self, cause: &str) -> String {
+        format!("{} does not run here: {cause}", self.name)
+    }
+
     /// Why release `version` cannot be installed for this component: it has
     /// no archive for `platform`. The tray says which archive is missing.
     pub fn missing_archive(self, version: &semver::Version, platform: &str) -> String {
@@ -113,6 +118,10 @@ mod tests {
         assert_eq!(
             CLI.missing_archive(&v, "linux-amd64"),
             "release v9.9.9 has no linux-amd64 archive"
+        );
+        assert_eq!(
+            TRAY.does_not_run("exited with 1"),
+            "mailtriage-tray does not run here: exited with 1"
         );
     }
 }

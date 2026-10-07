@@ -87,6 +87,16 @@ impl Blocker {
         }
     }
 
+    /// Why `update` refuses to replace the binary at `path`, with the fix.
+    pub fn refusal(self, path: &Path) -> String {
+        format!(
+            "{} cannot be replaced ({}): {}",
+            path.display(),
+            self.reason(),
+            self.fix(path)
+        )
+    }
+
     /// `install.fix`: one sentence for the binary at `path`.
     pub fn fix(self, path: &Path) -> String {
         let dir = path.parent().unwrap_or(Path::new("/")).display();

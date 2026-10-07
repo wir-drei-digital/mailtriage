@@ -1,6 +1,6 @@
 //! The per-user update cache: `update.json`, read and written under
 //! `update.lock`, replaced atomically.
-use super::{install::try_until, release::CachedRelease};
+use super::{install::try_until, platform::FileIdentity, release::CachedRelease, schedule};
 use crate::domain::UpdateMode;
 use anyhow::{anyhow, Context, Result};
 use fs2::FileExt;
@@ -251,6 +251,65 @@ impl Cache {
     }
 }
 
+/// The writes every updater shares on an `installs` entry, keyed by the
+/// installation's canonical path.
+impl Cache {
+    /// A failed install (spec "Failure"): `last_error`, `failures + 1`,
+    /// and `next_attempt_at` backing off from 1 h, doubling, up to 24 h.
+    /// `update` and `watch` both record failures through this.
+    pub fn record_install_failure(&self, key: &str, message: &str) -> Result<()> {
+        let now = chrono::Utc::now();
+        self.update(|c| {
+            let entry = c.installs.entry(key.to_owned()).or_default();
+            entry.failures = entry.failures.saturating_add(1);
+            entry.last_error = Some(ErrorRecord {
+                at: schedule::stamp(now),
+                message: message.to_owned(),
+            });
+            entry.next_attempt_at = Some(schedule::stamp(schedule::install_backoff(
+                now,
+                entry.failures,
+            )));
+        })
+    }
+
+    /// A binary that does not run here, so nothing was installed: no
+    /// version, why in `last_error`, and no backoff (`failures` and
+    /// `next_attempt_at` stay as they are).
+    pub fn record_skip(
+        &self,
+        key: &str,
+        message: &str,
+        identity: Option<FileIdentity>,
+    ) -> Result<()> {
+        let now = chrono::Utc::now();
+        self.update(|c| {
+            let entry = c.installs.entry(key.to_owned()).or_default();
+            entry.version = None;
+            entry.identity = identity;
+            entry.last_error = Some(ErrorRecord {
+                at: schedule::stamp(now),
+                message: message.to_owned(),
+            });
+        })
+    }
+
+    /// A reading of the installed version (`None`: it could not be read)
+    /// and the identity of the file it was read from.
+    pub fn record_version(
+        &self,
+        key: &str,
+        version: Option<&semver::Version>,
+        identity: Option<FileIdentity>,
+    ) -> Result<()> {
+        self.update(|c| {
+            let entry = c.installs.entry(key.to_owned()).or_default();
+            entry.version = version.map(ToString::to_string);
+            entry.identity = identity;
+        })
+    }
+}
+
 fn create_private_dir(dir: &Path) -> Result<()> {
     if dir.is_dir() {
         return Ok(());
@@ -270,6 +329,7 @@ fn create_private_dir(dir: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
     use std::{cell::Cell, time::Instant};
 
     #[test]
@@ -418,6 +478,58 @@ mod tests {
         fs::write(dir.path().join("file"), "").unwrap();
         let cache = Cache::new(dir.path().join("file").join("c"));
         assert!(cache.update(|c| c.check_failures = 1).is_err());
+    }
+
+    /// R11-5: one failure recorder for `update` and `watch` (backoff from
+    /// 1 h, doubling, at most 24 h); a skip and a reading leave the backoff
+    /// alone.
+    #[test]
+    fn failures_back_off_while_skips_and_readings_do_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path().join("c"));
+        let before = Utc::now();
+        cache
+            .record_install_failure("/b/t", "checksum mismatch")
+            .unwrap();
+        cache
+            .record_install_failure("/b/t", "checksum mismatch")
+            .unwrap();
+        let entry = cache.read().installs["/b/t"].clone();
+        assert_eq!(entry.failures, 2);
+        assert_eq!(entry.last_error.unwrap().message, "checksum mismatch");
+        let next = schedule::parse(entry.next_attempt_at.as_deref().unwrap()).unwrap();
+        assert!(next >= before + chrono::Duration::hours(2) - chrono::Duration::seconds(1));
+        assert!(next <= Utc::now() + chrono::Duration::hours(2));
+
+        let identity = FileIdentity::read(dir.path()).unwrap();
+        cache
+            .record_skip(
+                "/b/t",
+                "mailtriage-tray does not run here: x",
+                Some(identity),
+            )
+            .unwrap();
+        let entry = cache.read().installs["/b/t"].clone();
+        assert_eq!(
+            (entry.version, entry.failures, entry.identity),
+            (None, 2, Some(identity))
+        );
+        assert_eq!(
+            entry.last_error.unwrap().message,
+            "mailtriage-tray does not run here: x"
+        );
+        assert_eq!(
+            entry.next_attempt_at.as_deref(),
+            Some(&*schedule::stamp(next))
+        );
+
+        let version = semver::Version::new(0, 3, 0);
+        cache
+            .record_version("/b/t", Some(&version), Some(identity))
+            .unwrap();
+        let entry = cache.read().installs["/b/t"].clone();
+        assert_eq!(entry.version.as_deref(), Some("0.3.0"));
+        assert_eq!((entry.failures, entry.identity), (2, Some(identity)));
     }
 
     fn no_locks() -> io::Error {
