@@ -600,10 +600,10 @@ A store that is locked, such as a GPG agent without a cached passphrase or a key
 
 ### Environment variable
 
-`api_key_env` holds the name of the variable, for example `OPENROUTER_API_KEY`. mailtriage reads the key from its own process environment when it sends a request. In an interactive shell:
+`api_key_env` holds the name of the variable, for example `OPENROUTER_API_KEY`. mailtriage reads the key from its own process environment when it sends a request. In an interactive shell, run the lines below; at `read`, paste the key and press Enter (nothing is echoed):
 
 ```sh
-read -rs OPENROUTER_API_KEY    # paste the key and press Enter; nothing is echoed
+read -rs OPENROUTER_API_KEY
 export OPENROUTER_API_KEY
 mailtriage doctor --account work --json
 ```
