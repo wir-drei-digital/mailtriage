@@ -17,7 +17,7 @@ use crate::{config, domain::UpdateMode};
 use anyhow::anyhow;
 use chrono::{Duration as Age, Utc};
 use semver::Version;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
@@ -180,6 +180,7 @@ impl WatchUpdates {
                 .or_insert(ConfigEntry {
                     mode,
                     notified_version: None,
+                    extra: Map::new(),
                 });
         });
         if let Err(e) = stored {
@@ -311,6 +312,7 @@ impl WatchUpdates {
                 .or_insert(ConfigEntry {
                     mode,
                     notified_version: None,
+                    extra: Map::new(),
                 })
                 .notified_version = Some(release.version.clone());
         });

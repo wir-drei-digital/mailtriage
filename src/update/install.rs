@@ -116,7 +116,10 @@ pub fn lock(dir: &Path, wait: Duration) -> Result<Option<InstallLock>> {
 /// Runs `attempt` until it succeeds or `wait` is over (zero: once).
 /// `false` when every attempt met lock contention; any other error is
 /// returned at once.
-fn try_until(wait: Duration, mut attempt: impl FnMut() -> io::Result<()>) -> io::Result<bool> {
+pub(super) fn try_until(
+    wait: Duration,
+    mut attempt: impl FnMut() -> io::Result<()>,
+) -> io::Result<bool> {
     let deadline = Instant::now() + wait;
     loop {
         match attempt() {

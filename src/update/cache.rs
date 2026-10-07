@@ -1,18 +1,18 @@
 //! The per-user update cache: `update.json`, read and written under
 //! `update.lock`, replaced atomically.
-use super::release::CachedRelease;
+use super::{install::try_until, release::CachedRelease};
 use crate::domain::UpdateMode;
 use anyhow::{anyhow, Context, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use std::{
     collections::BTreeMap,
     ffi::OsStr,
     fs::{self, File, OpenOptions},
-    io::Write,
+    io::{self, Write},
     path::{Path, PathBuf},
-    thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 pub const FILE: &str = "update.json";
@@ -48,7 +48,9 @@ pub fn default_dir() -> Option<PathBuf> {
     )
 }
 
-/// `update.json`. Unknown fields are dropped on the next write.
+/// `update.json`. Keys this version does not know (from other versions, or
+/// the tray's) are kept on every rewrite, here and in each `configs` and
+/// `installs` entry.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CacheFile {
     #[serde(default)]
@@ -72,6 +74,9 @@ pub struct CacheFile {
     /// By canonical installation path.
     #[serde(default)]
     pub installs: BTreeMap<String, InstallEntry>,
+    /// Keys this version does not know, kept as they are.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,6 +90,9 @@ pub struct ConfigEntry {
     pub mode: UpdateMode,
     #[serde(default)]
     pub notified_version: Option<String>,
+    /// Keys this version does not know, kept as they are.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,6 +113,9 @@ pub struct InstallEntry {
     /// means `--version` must run again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<super::platform::FileIdentity>,
+    /// Keys this version does not know, kept as they are.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
 /// The key of the installation at `path` (canonical) in `installs`.
@@ -134,12 +145,24 @@ impl Cache {
 
     /// `update.json`; a missing or unreadable file counts as empty. Takes
     /// the cache lock shared when its file exists, and creates nothing.
+    /// Reads without the lock when another process holds it for longer than
+    /// `LOCK_WAIT`, or at once when locking fails for another reason.
     pub fn read(&self) -> CacheFile {
+        self.read_with(LOCK_WAIT, FileExt::try_lock_shared)
+    }
+
+    /// `read`, locking with `attempt` and waiting out contention for up to
+    /// `wait`.
+    fn read_with(
+        &self,
+        wait: Duration,
+        mut attempt: impl FnMut(&File) -> io::Result<()>,
+    ) -> CacheFile {
         let _lock = OpenOptions::new()
             .read(true)
             .open(self.dir.join(LOCK))
             .ok()
-            .filter(|lock| wait_for(|| lock.try_lock_shared().is_ok()));
+            .filter(|lock| try_until(wait, || attempt(lock)).unwrap_or(false));
         self.read_unlocked()
     }
 
@@ -153,16 +176,32 @@ impl Cache {
     /// Applies `change` to the current contents under the exclusive cache
     /// lock and replaces the file atomically (an exclusively created
     /// temporary file, fsync, rename). Creates the directory (mode 0700).
+    /// Waits up to `LOCK_WAIT` while another process holds the lock; any
+    /// other lock error fails at once, naming the lock file.
     pub fn update<T>(&self, change: impl FnOnce(&mut CacheFile) -> T) -> Result<T> {
+        self.update_with(LOCK_WAIT, FileExt::try_lock_exclusive, change)
+    }
+
+    /// `update`, locking with `attempt` and waiting out contention for up
+    /// to `wait`.
+    fn update_with<T>(
+        &self,
+        wait: Duration,
+        mut attempt: impl FnMut(&File) -> io::Result<()>,
+        change: impl FnOnce(&mut CacheFile) -> T,
+    ) -> Result<T> {
         create_private_dir(&self.dir)?;
+        let path = self.dir.join(LOCK);
         let lock = OpenOptions::new()
             .create(true)
             .truncate(false)
             .read(true)
             .write(true)
-            .open(self.dir.join(LOCK))
-            .with_context(|| format!("open {}", self.dir.join(LOCK).display()))?;
-        if !wait_for(|| lock.try_lock_exclusive().is_ok()) {
+            .open(&path)
+            .with_context(|| format!("open {}", path.display()))?;
+        let locked = try_until(wait, || attempt(&lock))
+            .with_context(|| format!("cannot lock {}", path.display()))?;
+        if !locked {
             return Err(anyhow!("the update cache is locked by another process"));
         }
         let mut file = self.read_unlocked();
@@ -218,23 +257,10 @@ fn create_private_dir(dir: &Path) -> Result<()> {
         .with_context(|| format!("create {}", dir.display()))
 }
 
-/// Polls `try_lock` until it succeeds or `LOCK_WAIT` passes.
-fn wait_for(mut try_lock: impl FnMut() -> bool) -> bool {
-    let deadline = Instant::now() + LOCK_WAIT;
-    loop {
-        if try_lock() {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{cell::Cell, time::Instant};
 
     #[test]
     fn the_cache_directory_follows_the_platform_rules() {
@@ -304,11 +330,165 @@ mod tests {
         assert!(leftovers.is_empty(), "{leftovers:?}");
     }
 
+    /// Other versions (and the tray) write keys this one does not know; a
+    /// rewrite keeps them, at the top level and inside `configs` and
+    /// `installs` entries.
+    #[test]
+    fn a_rewrite_keeps_keys_it_does_not_know() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path().join("c"));
+        fs::create_dir_all(cache.dir()).unwrap();
+        let before = serde_json::json!({
+            "schema_version": 1,
+            "checked_at": "2026-11-02T09:00:00Z",
+            "check_failures": 0,
+            "future_top": {"tray": {"seen": ["0.3.0", "0.4.0"]}, "n": 7},
+            "configs": {"/c/mailtriage.json": {
+                "mode": "notify",
+                "notified_version": "0.3.0",
+                "future_config": {"shown_at": "2026-11-01T08:00:00Z", "times": [1, 2]}
+            }},
+            "installs": {"/b/mailtriage": {
+                "version": "0.2.0",
+                "failures": 2,
+                "future_install": {"component": "mailtriage-tray", "args": ["--quiet"]}
+            }}
+        });
+        fs::write(cache.dir().join(FILE), before.to_string()).unwrap();
+
+        cache
+            .update(|c| {
+                c.installs.get_mut("/b/mailtriage").unwrap().version = Some("0.3.0".into());
+            })
+            .unwrap();
+
+        let text = fs::read_to_string(cache.dir().join(FILE)).unwrap();
+        let after: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let install = &after["installs"]["/b/mailtriage"];
+        let config = &after["configs"]["/c/mailtriage.json"];
+        assert_eq!(install["version"], "0.3.0", "{text}");
+        assert_eq!(install["failures"], 2, "{text}");
+        assert_eq!(after["checked_at"], before["checked_at"], "{text}");
+        assert_eq!(config["mode"], "notify", "{text}");
+        assert_eq!(config["notified_version"], "0.3.0", "{text}");
+        assert_eq!(after["future_top"], before["future_top"], "{text}");
+        assert_eq!(
+            config["future_config"], before["configs"]["/c/mailtriage.json"]["future_config"],
+            "{text}"
+        );
+        assert_eq!(
+            install["future_install"], before["installs"]["/b/mailtriage"]["future_install"],
+            "{text}"
+        );
+    }
+
     #[test]
     fn an_unwritable_cache_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("file"), "").unwrap();
         let cache = Cache::new(dir.path().join("file").join("c"));
         assert!(cache.update(|c| c.check_failures = 1).is_err());
+    }
+
+    fn no_locks() -> io::Error {
+        io::Error::other("No locks available")
+    }
+
+    /// Only contention means another process holds the lock; any other
+    /// error (ENOLCK on a filesystem without locks, say) is not waited out.
+    #[test]
+    fn a_lock_error_other_than_contention_fails_an_update_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path().join("c"));
+        let start = Instant::now();
+        let error = cache
+            .update_with(LOCK_WAIT, |_| Err(no_locks()), |c| c.check_failures = 1)
+            .unwrap_err();
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            start.elapsed()
+        );
+        assert_eq!(
+            format!("{error:#}"),
+            format!(
+                "cannot lock {}: No locks available",
+                cache.dir().join(LOCK).display()
+            )
+        );
+        assert!(!cache.dir().join(FILE).exists(), "wrote without the lock");
+    }
+
+    #[test]
+    fn contention_makes_an_update_wait_then_fail_as_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path().join("c"));
+        let tries = Cell::new(0);
+        let start = Instant::now();
+        let error = cache
+            .update_with(
+                Duration::from_millis(250),
+                |_| {
+                    tries.set(tries.get() + 1);
+                    Err(fs2::lock_contended_error())
+                },
+                |c| c.check_failures = 1,
+            )
+            .unwrap_err();
+        assert!(start.elapsed() >= Duration::from_millis(250));
+        assert!(tries.get() >= 2, "{}", tries.get());
+        assert_eq!(
+            format!("{error:#}"),
+            "the update cache is locked by another process"
+        );
+        assert!(!cache.dir().join(FILE).exists(), "wrote without the lock");
+    }
+
+    #[test]
+    fn a_held_lock_makes_an_update_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path().join("c"));
+        cache.update(|c| c.check_failures = 1).unwrap();
+        let holder = File::open(cache.dir().join(LOCK)).unwrap();
+        holder.lock_exclusive().unwrap();
+        let error = cache
+            .update_with(
+                Duration::from_millis(250),
+                |lock| lock.try_lock_exclusive(),
+                |c| c.check_failures = 2,
+            )
+            .unwrap_err();
+        assert_eq!(
+            format!("{error:#}"),
+            "the update cache is locked by another process"
+        );
+        drop(holder);
+        cache.update(|c| c.check_failures = 3).unwrap();
+        assert_eq!(cache.read().check_failures, 3);
+    }
+
+    /// `read` cannot fail: a lock error other than contention makes it read
+    /// without the lock at once; contention is waited out first.
+    #[test]
+    fn a_read_goes_on_without_the_lock_at_once_on_other_lock_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path().join("c"));
+        cache.update(|c| c.check_failures = 4).unwrap();
+
+        let start = Instant::now();
+        let file = cache.read_with(LOCK_WAIT, |_| Err(no_locks()));
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            start.elapsed()
+        );
+        assert_eq!(file.check_failures, 4);
+
+        let start = Instant::now();
+        let file = cache.read_with(Duration::from_millis(250), |_| {
+            Err(fs2::lock_contended_error())
+        });
+        assert!(start.elapsed() >= Duration::from_millis(250));
+        assert_eq!(file.check_failures, 4);
     }
 }
