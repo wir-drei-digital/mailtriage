@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
 };
 
 fn context(manager: Manager, dir: &Path) -> Context {
@@ -170,6 +170,95 @@ fn systemd_compares_the_running_process_too() {
     assert_eq!(matches(&ctx, &proc_root, &b), None);
 }
 
+/// launchd has no job (`print` exits 113) while the plist is there: the
+/// service would start with the file's config.
+#[test]
+fn launchd_without_a_loaded_job_names_the_file_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = context(Manager::Launchd, dir.path());
+    let (a, b) = (
+        config_file(dir.path(), "a.json"),
+        config_file(dir.path(), "b.json"),
+    );
+    system_service::install(&ctx, &unit_for(dir.path(), &a)).unwrap();
+    fs::remove_file(dir.path().join("loaded")).unwrap();
+    let none = Path::new("/nonexistent");
+    let found = inspect(&ctx, none);
+    assert_eq!(found.loaded, Some(false));
+    assert!(!found.running);
+    assert_eq!(found.service_config.as_deref(), Some(a.as_path()));
+    assert_eq!(found.file_config.as_deref(), Some(a.as_path()));
+    assert_eq!(found.named, [Some(a.clone())]);
+    assert_eq!(matches(&ctx, none, &a), Some(true));
+    assert_eq!(matches(&ctx, none, &b), Some(false));
+}
+
+/// systemd: the unit is loaded but its start failed (`start-fails`). The
+/// service would start with the loaded `ExecStart`'s config, here A, while
+/// the file was rewritten for B without a reload.
+#[test]
+fn systemd_loaded_but_not_running_names_the_loaded_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = context(Manager::Systemd, dir.path());
+    let (a, b) = (
+        config_file(dir.path(), "a.json"),
+        config_file(dir.path(), "b.json"),
+    );
+    fs::write(dir.path().join("start-fails"), "").unwrap();
+    system_service::install(&ctx, &unit_for(dir.path(), &a)).unwrap();
+    fs::write(
+        ctx.unit_path("work"),
+        system_service::systemd_unit(&unit_for(dir.path(), &b)),
+    )
+    .unwrap();
+    fs::write(dir.path().join("needs-reload"), "").unwrap();
+    let none = Path::new("/nonexistent");
+    let found = inspect(&ctx, none);
+    assert_eq!(found.loaded, Some(true));
+    assert!(!found.running);
+    assert_eq!(found.pid, None);
+    assert_eq!(found.service_config.as_deref(), Some(a.as_path()));
+    assert_eq!(found.file_config.as_deref(), Some(b.as_path()));
+    assert_eq!(found.named, [Some(a.clone()), Some(b.clone())]);
+    assert_eq!(matches(&ctx, none, &a), Some(false));
+    assert_eq!(matches(&ctx, none, &b), Some(false));
+    assert_eq!(
+        service_control::other_config(&found, &b).as_deref(),
+        Some(a.as_path())
+    );
+}
+
+/// systemd: the unit file is there but not loaded (`LoadState=not-found`
+/// until a daemon-reload): the service would start with the file's config.
+#[test]
+fn systemd_not_loaded_names_the_file_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = context(Manager::Systemd, dir.path());
+    let (a, b) = (
+        config_file(dir.path(), "a.json"),
+        config_file(dir.path(), "b.json"),
+    );
+    system_service::install(&ctx, &unit_for(dir.path(), &a)).unwrap();
+    // Nothing loaded any more, and the file now names B.
+    fs::remove_file(dir.path().join("exec_start")).unwrap();
+    fs::remove_file(dir.path().join("active")).unwrap();
+    fs::write(
+        ctx.unit_path("work"),
+        system_service::systemd_unit(&unit_for(dir.path(), &b)),
+    )
+    .unwrap();
+    let none = Path::new("/nonexistent");
+    let found = inspect(&ctx, none);
+    assert_eq!(found.loaded, Some(false));
+    assert!(!found.running);
+    assert_eq!(found.service_config.as_deref(), Some(b.as_path()));
+    assert_eq!(found.file_config.as_deref(), Some(b.as_path()));
+    assert_eq!(found.named, [Some(b.clone())]);
+    assert_eq!(found.needs_daemon_reload, Some(false));
+    assert_eq!(matches(&ctx, none, &b), Some(true));
+    assert_eq!(matches(&ctx, none, &a), Some(false));
+}
+
 #[test]
 fn failed_queries_and_pending_reloads_are_unknown() {
     let dir = tempfile::tempdir().unwrap();
@@ -317,6 +406,8 @@ fn status_reports_every_account_through_the_cli() {
     let mut watch = None;
     if cfg!(target_os = "linux") {
         write_tool(&bin, "fake-watch", "#!/bin/sh\nsleep 30\n");
+        // Its `sleep` outlives the kill below: with no stream of the test
+        // inherited, it cannot hold the test's output open.
         let child = Command::new(bin.join("fake-watch"))
             .args(["watch", "--config"])
             .arg(&config)
@@ -329,6 +420,9 @@ fn status_reports_every_account_through_the_cli() {
                 "100",
                 "--json",
             ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .spawn()
             .unwrap();
         fs::write(bin.join("mainpid"), child.id().to_string()).unwrap();
