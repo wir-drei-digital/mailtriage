@@ -1,7 +1,7 @@
 # Installing mailtriage: install script, Homebrew tap, tested Himalaya versions
 
 Date: 2026-10-07
-Status: Design approved in conversation; written spec revised after Codex review round 1.
+Status: Design approved in conversation; written spec revised after Codex review round 2.
 Builds on: [automatic updates](2026-10-06-auto-update-design.md) and [tray app](2026-10-06-tray-design.md).
 
 ## Goal
@@ -110,6 +110,11 @@ mailtriage himalaya install [--version X.Y.Z] [--json]
   `assets` digest, unpacks only the top-level `himalaya` regular file with the
   updater's bounded archive reader, stages it exclusively, probes `--version`
   (listed version, `+imap`), then renames it into place.
+- The directory chain `<data>/mailtriage/himalaya/<version>/` is created with mode
+  0755 regardless of the umask. Before staging, every directory from
+  `<data>/mailtriage` down must be owned by the user, not group- or world-writable,
+  and not a symlink; otherwise exit 3 with `unsafe_permissions` and the directory.
+  The staged file's identity is revalidated before the rename, as in the updater.
 - Idempotent: an existing, matching copy is reported as `current`.
 - Output: `{"schema_version":1,"himalaya":{"action":"installed"|"current","version","path"}}`.
   Exit codes: 0; 2 invalid or unlisted version, unsupported platform; 3 network,
@@ -154,7 +159,8 @@ the literal name. mailtriage passes `--mailbox` only to `message read`.
      fail closed when one is missing, and `roles` copied from the previous entry.
      Then build and run the Dovecot suite against the candidate in both layouts.
      Upload the edited data file as an artifact.
-  2. **propose** (needs test; `contents: write`, `pull-requests: write`): commit the
+  2. **propose** (needs test; `contents: write`, `pull-requests: write`,
+     `actions: write` for the dispatches): commit the
      artifact to branch `himalaya/VERSION`, push, and open the pull request
      `Test Himalaya VERSION`. Its body links the run and asks the reviewer to check
      the version's resolver for role changes. Then it dispatches `ci.yml` and
@@ -228,8 +234,13 @@ unsupported platform, or a refused downgrade.
    the temporary directory.
    - `SHA256SUMS` must have exactly one line for each archive, and the hashes must
      match; else exit 1.
-   - Only the member `mailtriage` (and `mailtriage-tray`) is extracted, into the
-     temporary directory: `tar -xzf ARCHIVE -C "$tmp" mailtriage`.
+   - Before extracting, `tar -tzvf ARCHIVE` must list exactly the release layout:
+     `mailtriage`, `LICENSE` and `README.md` (tray archive: `mailtriage-tray` and
+     `LICENSE`), each a regular file (a leading `-` in the mode column) at the top
+     level, each name once. Anything else exits 1.
+   - Only the member `mailtriage` (or `mailtriage-tray`) is extracted, into the
+     temporary directory (`tar -xzf ARCHIVE -C "$tmp" mailtriage`). It must then be a
+     regular file, not a link, of at most 200 MB.
 3. **Hand over.** Run
    `"$tmp/mailtriage" self install --dir DIR [--tray-file "$tmp/mailtriage-tray"] [--no-setup] [--yes]`.
    - Its stdin is `/dev/tty` when that can be opened and `--yes` is not given,
@@ -296,9 +307,12 @@ mailtriage self install --dir DIR [--tray-file PATH] [--no-setup] [--yes] [--jso
    - If another `mailtriage` comes first on `PATH`, name it, and say that it stays
      in use and is not updated by this install.
 7. **Setup.** Unless `--no-setup` or `--yes`, and stdin is a terminal: ask
-   `Run mailtriage setup now? [Y/n]`, then run the setup flow in this process with
-   this terminal. Its step 2 offers the private Himalaya. Otherwise print
-   `DIR/mailtriage setup`.
+   `Run mailtriage setup now? [Y/n]`, then run the **installed** binary as a child,
+   `DIR/mailtriage setup --json`, with this terminal as its stdin and stderr. Its
+   prompts go to stderr and its result object to stdout, which `self install` reads
+   for the config path. Running the installed binary, never the temporary one,
+   matters: setup's service install records the executable that runs it. Its step 2
+   offers the private Himalaya. Otherwise print `DIR/mailtriage setup`.
 8. **Login item.** When the tray was installed and setup succeeded in step 7: ask
    `Start the tray at login? [Y/n]` and run
    `DIR/mailtriage-tray autostart enable --config <the config setup wrote> --mailtriage DIR/mailtriage`.
@@ -327,26 +341,32 @@ installation in `DIR`:
 1. **Refusals.** A Homebrew keg (the canonical path contains `/Cellar/mailtriage/`)
    exits 2 with `installed by Homebrew; run brew uninstall mailtriage`. Without
    `--yes`, it asks for confirmation (default no).
-2. **Services.** Every service file with mailtriage's marker whose decoded
+2. **Lock.** Take the installation lock `DIR/.mailtriage-update.lock` (waiting up
+   to 60 s, else exit 5) and hold it until step 5 ends, so no update or install
+   can recreate the binaries meanwhile. The lock file is never deleted.
+3. **Services.** Every service file with mailtriage's marker whose decoded
    executable canonicalizes to `DIR/mailtriage` is uninstalled as
    `service uninstall` does, under that account's service lock.
    - Under the lock, it re-reads the file and skips it if it now names another
      executable.
    - Services of other installations, Homebrew included, are left alone.
    - Without a service manager there are no services, and that is not an error.
-3. **Tray.**
-   - If the login item names `DIR/mailtriage-tray`, run
-     `DIR/mailtriage-tray autostart disable`. On macOS, also boot out its login job
-     when it is loaded.
-   - Then run `DIR/mailtriage-tray quit` (new, below).
-4. **Files.** Only when steps 2 and 3 fully succeeded, remove:
+4. **Tray.**
+   - **Login item.** If the tray login item (its marker present) names
+     `DIR/mailtriage-tray`, `self uninstall` removes it itself, the same way
+     `autostart disable` does. On macOS it also boots out the loaded login job. The
+     tray binary is not needed for this.
+   - **Running tray.** If `DIR/mailtriage-tray` exists, run
+     `DIR/mailtriage-tray quit` (below). Without a tray binary and without a login
+     item naming it, the tray is `not_installed`, which is not a failure.
+5. **Files.** Only when steps 3 and 4 fully succeeded, remove:
    - `DIR/mailtriage` and `DIR/mailtriage-tray` and their `.previous` copies;
-   - `DIR/.mailtriage-update.lock`;
-   - those paths' `installs` entries in the update cache;
-   - the private Himalaya directory `<data>/mailtriage/himalaya/` when no remaining
-     config names a binary inside it.
-5. **Kept.** It removes nothing else. It prints where the config, state and logs are
-   (`~/.config/mailtriage/` by default) and that no mail was touched.
+   - those paths' `installs` entries in the update cache.
+6. **Kept.** It removes nothing else. The installation lock file stays. The private
+   Himalaya under `<data>/mailtriage/himalaya/` stays too, because other configs
+   may use it; the command prints its path and how to delete it. It also prints
+   where the config, state and logs are (`~/.config/mailtriage/` by default) and
+   that no mail was touched.
 
 - **Output:**
   `{"schema_version":1,"self_uninstall":{"dir","services":[{"account","unit_path","action","error"}],"tray":"…","removed":[…],"kept":[…]}}`.
@@ -355,16 +375,24 @@ installation in `DIR`:
   - 2 for a Homebrew install, a refused confirmation, or no terminal without
     `--yes`;
   - 3 for any failed service or tray step, in which case no file is removed and the
-    output lists the failures.
+    output lists the failures;
+  - 5 when the installation lock is held.
 
 ### `mailtriage-tray quit`
 
-The tray writes its PID to `tray.pid` next to `tray.lock`, as the windows do.
-`mailtriage-tray quit [--json]` reads it. When that process is running and its
-executable is this tray (`/proc/<pid>/exe` on Linux, `proc_pidpath` on macOS), it
-sends `SIGTERM` and waits up to 5 s for the lock to be released.
+The running tray listens on a Unix socket, `tray.sock`, next to `tray.lock` in the
+cache directory, which is mode 0700. The tray creates the socket after taking the
+lock; any old socket file is removed first, since the lock proves no other tray owns
+it.
 
-- The tray treats `SIGTERM` like Quit.
+- `mailtriage-tray quit [--json]` connects, sends `quit`, and waits up to 5 s for the
+  tray to answer and release `tray.lock`.
+- No PID is ever signalled, so a reused PID, a categories window included, can
+  never be hit.
+- When nothing listens and `tray.lock` is free, the result is `not_running`.
+- When the lock is held but the socket does not answer, exit 3:
+  `the tray does not respond; quit it from its menu`.
+- The tray handles `quit` like the menu's Quit.
 - Open categories windows are separate processes and keep running; `self uninstall`
   prints `close any open categories window`.
 - Result: `quit`, `not_running`, or exit 3 when the tray did not stop.
@@ -496,7 +524,8 @@ own concurrency group `homebrew-tap` (queued, never cancelled):
   - an unreadable Himalaya config reads nothing.
 - **`himalaya install`** with the update tests' loopback server and a test-only
   digest table: installed, current, checksum mismatch, a missing `himalaya` entry, a
-  failed probe, an unlisted `--version`.
+  failed probe, an unlisted `--version`, a group-writable `<data>/mailtriage`, a
+  symlinked version directory.
 - **Setup:** offers the private Himalaya when none is tested; `--himalaya-install`;
   the Homebrew note only for a keg path.
 - **`self install`:**
@@ -508,7 +537,9 @@ own concurrency group `homebrew-tap` (queued, never cancelled):
   - tray installed, or skipped with the existing one kept when its probe fails;
   - cache entries cleared of a previous failure;
   - PATH and shadowing reports;
-  - setup offered only with a terminal;
+  - setup offered only with a terminal, run through `DIR/mailtriage`, so the
+    installed service names `DIR/mailtriage` and still works after the temporary
+    directory is gone;
   - the login item after setup with setup's config.
 - **`self uninstall`:**
   - services of this installation removed, another installation's and Homebrew's
@@ -517,9 +548,12 @@ own concurrency group `homebrew-tap` (queued, never cancelled):
   - a failing service removal keeps every file (exit 3);
   - no service manager;
   - Homebrew refused;
-  - the tray quit and its login item disabled.
-- **`mailtriage-tray quit`:** a running tray stops; a stale PID or another process is
-  left alone.
+  - the tray quit and its login item removed; a CLI-only install (no tray binary)
+    uninstalls cleanly;
+  - an update holding the installation lock delays uninstall (exit 5 after the
+    wait), and the lock file survives.
+- **`mailtriage-tray quit`:** a running tray stops; a stale socket file with a free
+  lock gives `not_running`; a categories window is never affected.
 - **Brew paths,** with a fake `<prefix>/Cellar/mailtriage/1.2.3/bin/` and `opt` link:
   - `service install` and autostart record the `opt` path;
   - the updater still reports `managed_by_homebrew`;
@@ -543,6 +577,7 @@ own concurrency group `homebrew-tap` (queued, never cancelled):
     - an unexpected latest URL (exit 1);
     - a checksum mismatch and a duplicate `SHA256SUMS` line (exit 1, nothing
       installed);
+    - an archive with an extra member, a link, or a duplicate `mailtriage` (exit 1);
     - an unsupported platform (exit 2);
     - the tray archive fetched only when the tray is wanted;
     - `--uninstall` runs `self uninstall`;
