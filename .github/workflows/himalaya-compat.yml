@@ -64,6 +64,7 @@ jobs:
         if: steps.newest.outputs.listed == 'false'
         with:
           key: e2e
+          save-if: false
       - name: Install the candidate, pinned by its digest
         if: steps.newest.outputs.listed == 'false'
         env:
