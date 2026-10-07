@@ -232,3 +232,39 @@ message content.
 | `pass` store: `pass insert mailtriage/openrouter` prompts; under the user unit `pass show` reaches the GPG agent (test message classified) | | | |
 | `service install --account work` a second time restarts the unit with the same file | | | |
 | `service uninstall`: the unit file is gone, `systemctl --user status mailtriage-work.service` reports it not found, `service status` shows `installed`, `loaded` and `running` false | | | |
+
+## Tray app on a real desktop (human check)
+
+The tray's automated tests use a fake `mailtriage`, render the window headless and print the menu as text. A person runs these checks once per desktop before relying on the tray. Record `pass`, `fail` or `differs` (with a note) and the date; attach screenshots to the review, not to the repository.
+
+Setup: build both binaries (`cargo build --release --locked --workspace`), install `mailtriage-tray` next to `mailtriage`, and use a throwaway account with the background service installed.
+
+| Check | macOS light | macOS dark | Ubuntu GNOME + AppIndicator | KDE Plasma |
+| --- | --- | --- | --- | --- |
+| `mailtriage-tray` starts, no Dock icon (macOS), the icon is crisp and its shape matches the state (plain, `!` badge, outline) | | | | |
+| The menu shows every account, its state line, "Last check …", the service item and "Edit categories…"; wording matches the spec | | | | |
+| Stop service, then log out and in: the service stays stopped; Start service: it runs again | | | | |
+| Install service for a not-installed account from the menu | | | | |
+| Open log opens the `.log` file (macOS); Copy log command puts `journalctl --user -u mailtriage-NAME.service -e` on the clipboard (Linux) | | | | |
+| After at least four hours idle, including sleep and wake, the menu still opens and its times advance | | | | |
+| Start at login: enable from the menu, log out and in: one tray starts; Quit stays quit until the next login; `kill -SEGV` restarts it (macOS) | | | | |
+| A second `mailtriage-tray` prints `mailtriage-tray is already running` and exits 0 | | | | |
+| Restart onto an update: replace `mailtriage-tray` on disk with a newer build while the tray runs; within about 15 s it re-executes itself, keeps its menu, and an open categories window keeps running | | | | |
+| Edit categories… opens the window; a second click shows "the categories window is already open" as a notice in the menu, and on macOS also brings the window to the front | | | | |
+| The window follows the system's light or dark mode; edit, check, Apply, refile panel; closing with edits asks | | | | |
+| The window's close button and ⌘/Ctrl+W ask about unsaved edits (Cancel keeps the window); after closing, the window's private drafts directory (`$TMPDIR/mailtriage-tray-*`) is gone | | | | |
+
+| Screen reader check | VoiceOver (macOS) | Orca (Linux) |
+| --- | --- | --- |
+| Every control in the window is announced with its label; Tab follows the visual order | | |
+| Editing a category name and description | | |
+| A validation error is announced in the footer and Apply's disabled reason is reachable | | |
+| The apply confirmation reads its title, each change and the OpenRouter warning | | |
+| Cancelling a close with unsaved edits | | |
+
+### Design review
+
+The automated review renders every window screen in light and dark mode (`cargo test --locked -p mailtriage-tray --test screens -- --ignored`, files in `target/tray-screens/`) and prints the menus for every state. The table records the outcome per screen against the spec's UI principles.
+
+| Screen | Plain words | Calm layout | Look (light/dark, 8 px, 14/18 pt) | Feedback | Empty and first-run states | Keyboard and accessibility | Date |
+| --- | --- | --- | --- | --- | --- | --- | --- |

@@ -78,6 +78,10 @@ The result is `{"schema_version":1,"service":{...}}` (fields in [Service command
 
 `service status --json` without `--account` checks every account at once: `{"schema_version":1,"config":"…","services":[…]}`, one object per account, sorted by name (fields in [Status of every account](guide.md#status-of-every-account)). Read `config_matches` before acting on a service: `false` means it runs another config (`service_config` names it), and `null` means its config cannot be told. When `service start` or `service stop` exits 5 with reason `service_config_mismatch`, report the config named in the message to the user instead of passing it yourself.
 
+### The tray app
+
+Agents never need the tray app. Each of its actions is one `mailtriage` command ([Tray](guide.md#tray) lists them), so an agent runs those directly.
+
 ## Reading mail
 
 Use `list` to decide what to inspect, then `read` only the messages you need:

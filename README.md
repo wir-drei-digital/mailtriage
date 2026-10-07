@@ -84,6 +84,8 @@ mailtriage setup --yes --himalaya-account work --key-store env
 
 Add `--json` to any command for one line of JSON.
 
+A tray app, `mailtriage-tray`, shows each account's state in the menu bar and edits categories; see [Tray](docs/guide.md#tray).
+
 ## Try it offline
 
 The `fake` provider classifies with fixed keyword rules and needs no key and no mailbox. Run this in an empty directory with `MAILTRIAGE_CONFIG` unset, and delete the directory afterwards:
