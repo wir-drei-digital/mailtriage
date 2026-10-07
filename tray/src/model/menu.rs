@@ -250,7 +250,7 @@ fn account(s: &ServiceInfo, h: &Health, input: &Input, config: &Path) -> Entry {
         State::OtherConfigUnknown => {
             entries.push(Entry::Text(if s.needs_daemon_reload == Some(true) {
                 format!(
-                    "The service file changed; run `mailtriage service install --account {}`",
+                    "The service file changed; run mailtriage service install --account {}",
                     s.account
                 )
             } else {
@@ -606,7 +606,7 @@ mod tests {
         );
         assert_eq!(
             rows[2][2],
-            "The service file changed; run `mailtriage service install --account c`"
+            "The service file changed; run mailtriage service install --account c"
         );
         assert!(!rows[2].iter().any(|l| l.ends_with("service")));
         assert_eq!(

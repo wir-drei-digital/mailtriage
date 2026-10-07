@@ -68,13 +68,13 @@ impl Problem {
             Problem::CliMissing(looked) => {
                 format!("mailtriage not found (looked in {})", looked.join(", "))
             }
-            Problem::NotSetUp(None) => "Not set up. Run `mailtriage setup` in a terminal.".into(),
+            Problem::NotSetUp(None) => "Not set up. Run mailtriage setup in a terminal.".into(),
             // `mailtriage setup` alone would write the default config.
             Problem::NotSetUp(Some(path)) => {
                 let shown = path.display();
                 let quoted = cli::quote(&path.to_string_lossy());
                 format!(
-                    "Not set up: no config at {shown}. Run `mailtriage setup --config {quoted}` in a terminal."
+                    "Not set up: no config at {shown}. Run mailtriage setup --config {quoted} in a terminal."
                 )
             }
             Problem::Status(failure) => failure.message.clone(),

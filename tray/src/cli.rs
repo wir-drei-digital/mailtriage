@@ -340,7 +340,7 @@ impl Failure {
 }
 
 /// The text shown when the CLI lacks a field or a command the tray needs.
-pub const OUTDATED: &str = "mailtriage is older than the tray; run `mailtriage update`.";
+pub const OUTDATED: &str = "mailtriage is older than the tray; run mailtriage update.";
 
 /// How mailtriage's argument parser (clap) starts the message of a usage
 /// error, which `--json` prints as an error object with code and exit 2.

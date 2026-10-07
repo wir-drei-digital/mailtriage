@@ -338,7 +338,7 @@ pub fn enable(env: &Env, cli: &Path, config: &Path) -> Result<Entry, Error> {
     if env.platform == Platform::MacOs {
         let target = format!("gui/{}/{LABEL}", env.uid);
         launchctl(env, &["enable", &target])
-            .ok_or_else(|| error(3, format!("`launchctl enable {target}` failed")))?;
+            .ok_or_else(|| error(3, format!("launchctl enable {target} failed")))?;
     }
     status(env)
 }

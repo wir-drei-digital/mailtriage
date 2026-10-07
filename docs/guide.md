@@ -1353,7 +1353,7 @@ Each account shows its name, its identity when that differs, a mark (● running
 | No background service on this system | Neither launchd nor systemd is available. | Run `watch` under [your own supervisor](#your-own-supervisor). "Edit categories…" still works. |
 
 - **The submenu** shows whether the job runs and the filing mode, then the last check, for example "Last check 12:03, some mail skipped · v0.3.0" (the version of mailtriage that ran it). A job that runs although its manager would not start it again adds "Disabled: won't start again after logout" and keeps "Stop service". While a service command runs, its item reads "Starting…", "Stopping…" or "Installing…".
-- **The summary line** reads "All accounts running", "NAME needs attention", "N of M accounts running", "Stopped", "No background service on this system", or a problem from [When the tray shows a problem](#when-the-tray-shows-a-problem). It is also the icon's tooltip.
+- **The summary line** reads "All accounts running", "NAME needs attention", "N of M accounts running", "Stopped", "No background service on this system", or a problem from [When the tray shows a problem](#when-the-tray-shows-a-problem). When no account runs for this config but some run another one, it says so instead of "Stopped": "Runs another config" (the only account), "Every account runs another config", "NAME runs another config" or "N accounts run another config". It is also the icon's tooltip.
 - **The icon** shows the worst state across accounts: an envelope with a `!` badge for a warning, a problem or "Status unknown"; else a plain envelope when a service runs, starts or restarts; else an outline (every account stopped, not installed, running another config, or without a service manager). On macOS it follows the menu bar's light or dark look, so a warning and a problem look the same. Linux uses the same shapes in green, amber, red and grey.
 - **Times** are local `HH:MM`, with the date when not today ("Oct 5, 23:59").
 - **"(stale)"** after the summary: the last refresh failed. The menu keeps the last good state for up to 2 minutes, then shows the failure.
@@ -1389,7 +1389,7 @@ The window shows the account selector and Reload at the top, the categories on t
 - "Move all N" for every message whose folder no longer matches its category, including those in folders no longer used;
 - how many messages are still being sorted again, and "Not moved" with each reason and its count.
 
-After a move, the panel says how many messages were marked, for example "Marked 30 messages; 12 more will move if their new category calls for it." The background service moves them at its next pass; when it does not run, the panel says to start it or run `mailtriage sync`. With filing in `dry_run`, the panel only previews and says "Moving filed mail needs filing set to live." "Close" in the panel's heading row closes it; it waits while a move runs.
+After a move, the panel says how many messages were marked, for example "Marked 30 messages; 12 more will move if their new category calls for it." The background service moves them at its next pass; when it does not run, the panel says to start it or run `mailtriage sync`. With filing in `dry_run`, the panel only previews and says "Moving filed mail needs filing set to live." "Close" in the panel's heading row hides the panel and gives the form its room back; while a move runs it is disabled, and its tooltip says why. "Move filed mail…" opens the panel again with a fresh preview.
 
 **Keyboard.** ⌘N (Ctrl+N on Linux) adds a category, ⌘S (Ctrl+S) opens the apply confirmation, Esc closes a dialog, and ⌘W (Ctrl+W) closes the window, asking about unsaved edits. Tab follows the visual order. Every control has a label that screen readers announce.
 
@@ -1406,9 +1406,9 @@ The summary line, and the categories window, show these:
 | Message | What to do |
 | --- | --- |
 | mailtriage not found (looked in …) | Install `mailtriage` in the same directory as `mailtriage-tray` or on your `PATH`, or start the tray with `--mailtriage PATH`. |
-| Not set up. Run `mailtriage setup` in a terminal. | No config was found. Run `mailtriage setup`; the tray finds the config at its next refresh. The tray never runs setup itself. |
-| Not set up: no config at PATH. Run `mailtriage setup --config PATH` in a terminal. | `--config` names a file that does not exist. That command creates it there (plain `mailtriage setup` would write the default config instead); the tray finds it at its next refresh. |
-| mailtriage is older than the tray; run `mailtriage update`. | The CLI lacks a field or a command this tray needs; "Show details" names the missing field, or shows the CLI's own complaint about the tray's arguments. Install `mailtriage` from the tray's release. |
+| Not set up. Run mailtriage setup in a terminal. | No config was found. Run `mailtriage setup`; the tray finds the config at its next refresh. The tray never runs setup itself. |
+| Not set up: no config at PATH. Run mailtriage setup --config PATH in a terminal. | `--config` names a file that does not exist. That command creates it there (plain `mailtriage setup` would write the default config instead); the tray finds it at its next refresh. |
+| mailtriage is older than the tray; run mailtriage update. | The CLI lacks a field or a command this tray needs; "Show details" names the missing field, or shows the CLI's own complaint about the tray's arguments. Install `mailtriage` from the tray's release. |
 | Any other message | The failed command's error. In the menu, "Show details" copies the command, its exit code and its output; in the window, it shows them with "Copy". Run the command in a terminal to see more. |
 
 ## Reference

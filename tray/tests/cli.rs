@@ -115,6 +115,11 @@ fn a_cli_without_the_new_fields_asks_for_an_update() {
     fake.respond_fixture("service-status", "status-old.json");
     let failure = cli::status(&cli(&fake).run(&Request::Status)).unwrap_err();
     assert_eq!(failure.message, cli::OUTDATED);
+    // On-screen text names the command plainly, without Markdown.
+    assert_eq!(
+        cli::OUTDATED,
+        "mailtriage is older than the tray; run mailtriage update."
+    );
     assert!(failure
         .details
         .output
@@ -370,18 +375,18 @@ fn the_config_comes_from_the_first_status_when_not_given() {
     assert_eq!(
         missing.text(),
         format!(
-            "Not set up: no config at {path}. Run `mailtriage setup --config {path}` in a terminal.",
+            "Not set up: no config at {path}. Run mailtriage setup --config {path} in a terminal.",
             path = fake.dir.path().join("nope.json").display()
         )
     );
     assert_eq!(
         Problem::NotSetUp(None).text(),
-        "Not set up. Run `mailtriage setup` in a terminal."
+        "Not set up. Run mailtriage setup in a terminal."
     );
     // A path a shell would split is quoted in the command.
     assert_eq!(
         Problem::NotSetUp(Some(PathBuf::from("/home/a b/mailtriage.json"))).text(),
-        "Not set up: no config at /home/a b/mailtriage.json. Run `mailtriage setup --config '/home/a b/mailtriage.json'` in a terminal."
+        "Not set up: no config at /home/a b/mailtriage.json. Run mailtriage setup --config '/home/a b/mailtriage.json' in a terminal."
     );
 }
 

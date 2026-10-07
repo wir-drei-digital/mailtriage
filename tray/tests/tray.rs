@@ -313,7 +313,7 @@ fn missing_cli_and_missing_config_are_explained() {
     settle(&mut c, vec![Work::Refresh], now());
     assert_eq!(
         c.menu(now(), local()).summary,
-        "mailtriage: Not set up. Run `mailtriage setup` in a terminal."
+        "mailtriage: Not set up. Run mailtriage setup in a terminal."
     );
     // Once set up, the next refresh resolves the config and shows it.
     fake.respond_fixture("service-status", "status.json");

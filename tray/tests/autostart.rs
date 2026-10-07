@@ -123,6 +123,23 @@ fn enable_clears_a_disabled_label_and_status_follows_it() {
     assert!(!entry.path.exists());
 }
 
+/// The "Start at login" item shows this error as a notice: it names the
+/// command plainly, without Markdown.
+#[test]
+fn a_failed_launchctl_enable_exits_3_and_names_the_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(Platform::MacOs, dir.path());
+    write_script(&env.launchctl, "#!/bin/sh\nexit 1\n");
+    let e = autostart::enable(&env, Path::new(CLI), Path::new(CONFIG)).unwrap_err();
+    assert_eq!(
+        (e.code, e.message.as_str()),
+        (
+            3,
+            "launchctl enable gui/501/digital.wirdrei.mailtriage-tray failed"
+        )
+    );
+}
+
 #[test]
 fn linux_uses_xdg_config_home_when_absolute() {
     let dir = tempfile::tempdir().unwrap();

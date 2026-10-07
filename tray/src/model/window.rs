@@ -2007,7 +2007,7 @@ mod tests {
         );
         assert_eq!(
             w.refile.as_ref().unwrap().result.as_deref(),
-            Some("Marked 30 messages; 12 more will move if their new category calls for it. The background service is not running. Start it, or run `mailtriage sync`, to move them.")
+            Some("Marked 30 messages; 12 more will move if their new category calls for it. The background service is not running. Start it, or run mailtriage sync, to move them.")
         );
     }
 

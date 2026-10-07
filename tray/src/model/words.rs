@@ -7,7 +7,7 @@ pub const RECLASSIFY_WARNING: &str = "All open mail in this account will be sort
 pub const NOTHING_TO_MOVE: &str = "No filed mail needs moving.";
 pub const DRY_RUN: &str = "Moving filed mail needs filing set to live.";
 pub const SERVICE_NOT_RUNNING: &str =
-    "The background service is not running. Start it, or run `mailtriage sync`, to move them.";
+    "The background service is not running. Start it, or run mailtriage sync, to move them.";
 pub const EMPTY: &str = "Add categories for the kinds of mail you get.";
 pub const CATEGORIES_CHANGED: &str = "These categories were changed somewhere else.";
 pub const BUSY_RETRYING: &str = "mailtriage is busy; trying again…";

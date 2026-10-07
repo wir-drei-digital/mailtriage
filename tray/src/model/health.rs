@@ -223,7 +223,9 @@ pub fn icon(states: &[State]) -> IconState {
     }
 }
 
-/// The summary line after "mailtriage: ".
+/// The summary line after "mailtriage: ": who needs attention; else that
+/// no service manager exists; else, when nothing runs for this config but
+/// accounts run another one, which; else how many accounts run.
 pub fn summary(accounts: &[(String, State)]) -> String {
     let attention: Vec<&str> = accounts
         .iter()
@@ -243,6 +245,20 @@ pub fn summary(accounts: &[(String, State)]) -> String {
         .iter()
         .filter(|(_, s)| severity(*s) == Severity::Fine)
         .count();
+    // Their jobs run, for another config: not "Stopped".
+    let other: Vec<&str> = accounts
+        .iter()
+        .filter(|(_, s)| *s == State::OtherConfig)
+        .map(|(name, _)| name.as_str())
+        .collect();
+    if running == 0 && !other.is_empty() {
+        return match other.as_slice() {
+            [_] if accounts.len() == 1 => "Runs another config".into(),
+            _ if other.len() == accounts.len() => "Every account runs another config".into(),
+            [one] => format!("{one} runs another config"),
+            many => format!("{} accounts run another config", many.len()),
+        };
+    }
     match running {
         0 => "Stopped".into(),
         n if n == accounts.len() => "All accounts running".into(),
@@ -550,5 +566,49 @@ mod tests {
             named(&[("daniel", Unavailable)]),
             "No background service on this system"
         );
+    }
+
+    /// An account whose job runs for another config is not "Stopped": when
+    /// nothing runs for this config, the summary says which accounts run
+    /// another one. The icon stays "off".
+    #[test]
+    fn the_summary_names_accounts_that_run_another_config() {
+        use State::*;
+        let named = |list: &[(&str, State)]| {
+            summary(
+                &list
+                    .iter()
+                    .map(|(n, s)| (n.to_string(), *s))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(named(&[("daniel", OtherConfig)]), "Runs another config");
+        assert_eq!(
+            named(&[("daniel", OtherConfig), ("info", OtherConfig)]),
+            "Every account runs another config"
+        );
+        assert_eq!(
+            named(&[("daniel", OtherConfig), ("info", Stopped)]),
+            "daniel runs another config"
+        );
+        assert_eq!(
+            named(&[("daniel", OtherConfig), ("info", NotInstalled)]),
+            "daniel runs another config"
+        );
+        assert_eq!(
+            named(&[("a", OtherConfig), ("b", OtherConfig), ("c", Stopped)]),
+            "2 accounts run another config"
+        );
+        // A running account, attention and no service manager keep their lines.
+        assert_eq!(
+            named(&[("daniel", OtherConfig), ("info", Ok)]),
+            "1 of 2 accounts running"
+        );
+        assert_eq!(
+            named(&[("daniel", OtherConfig), ("info", Error)]),
+            "info needs attention"
+        );
+        assert_eq!(icon(&[OtherConfig]), IconState::Off);
+        assert_eq!(icon(&[OtherConfig, Stopped]), IconState::Off);
     }
 }
