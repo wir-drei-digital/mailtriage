@@ -1,13 +1,15 @@
 //! Restarting `watch` onto a replaced binary: the installation path and
 //! the identity of the running image are recorded at start; between
 //! passes a changed file is probed and re-executed with the original
-//! arguments and environment, keeping the PID.
+//! arguments and environment, keeping the PID. A binary in a Homebrew keg
+//! also follows its `opt` path, which `brew upgrade` retargets to a new keg.
 use super::{
     events,
     install::Hooks,
     platform::{self, FileIdentity},
     version, CLI,
 };
+use crate::distribution::brew;
 use serde_json::{json, Value};
 use std::{
     io::Write,
@@ -29,9 +31,30 @@ pub struct Image {
     /// The file was replaced between launch and the recording: restart
     /// before the first pass.
     pub replaced_at_start: bool,
+    /// For a Homebrew keg, its `opt` path: followed when it leads to
+    /// another file than `path`, and always the path re-executed.
+    pub launch: Option<PathBuf>,
 }
 
 impl Image {
+    /// The file to watch: the `opt` path when it leads to another file than
+    /// the running one (after `brew upgrade`, or when the old keg is gone),
+    /// else the installation path; and whether it was retargeted.
+    pub fn watched(&self) -> (PathBuf, bool) {
+        match &self.launch {
+            Some(opt) if std::fs::canonicalize(opt).ok().as_deref() != Some(&*self.path) => {
+                (opt.clone(), true)
+            }
+            _ => (self.path.clone(), false),
+        }
+    }
+
+    /// The path `exec` runs: the `opt` path of a keg, else the installation
+    /// path.
+    pub fn target(&self) -> PathBuf {
+        self.launch.clone().unwrap_or_else(|| self.path.clone())
+    }
+
     /// Records the installation path and the image identity. On Linux the
     /// image is `/proc/self/exe`, which follows the loaded file even after
     /// it was replaced. On macOS it is the installation path at start, plus
@@ -46,15 +69,21 @@ impl Image {
                 path.display()
             )
         })?;
-        let replaced_at_start = if cfg!(target_os = "linux") {
-            FileIdentity::read(&path).ok() != Some(identity)
-        } else {
-            platform::probe(&path, CLI).is_ok_and(|found| found.to_string() != version::RUNNING)
-        };
+        let launch = brew::opt_path(&path).filter(|opt| opt.exists());
+        let retargeted = launch
+            .as_deref()
+            .is_some_and(|opt| std::fs::canonicalize(opt).ok().as_deref() != Some(&*path));
+        let replaced_at_start = retargeted
+            || if cfg!(target_os = "linux") {
+                FileIdentity::read(&path).ok() != Some(identity)
+            } else {
+                platform::probe(&path, CLI).is_ok_and(|found| found.to_string() != version::RUNNING)
+            };
         Ok(Self {
             path,
             identity,
             replaced_at_start,
+            launch,
         })
     }
 }
@@ -134,7 +163,7 @@ impl Restarter {
     pub fn check(&mut self, stopped: &dyn Fn() -> bool, hooks: &dyn Hooks) {
         let decision = self.decide(stopped);
         let Some(image) = &self.image else { return };
-        let path = image.path.clone();
+        let path = image.target();
         match decision {
             Decision::Stay | Decision::Stopped => {}
             Decision::Failed(kind, message) => self.fail(kind, &message),
@@ -166,8 +195,9 @@ impl Restarter {
         let Some(image) = &self.image else {
             return Decision::Stay;
         };
-        let current = FileIdentity::read(&image.path).ok();
-        if current == Some(image.identity) && !image.replaced_at_start {
+        let (file, retargeted) = image.watched();
+        let current = FileIdentity::read(&file).ok();
+        if current == Some(image.identity) && !image.replaced_at_start && !retargeted {
             return Decision::Stay;
         }
         if let Some((identity, retry_at)) = self.failed {
@@ -176,24 +206,21 @@ impl Restarter {
             }
         }
         let Some(probed) = current else {
-            return Decision::Failed(
-                Failure::Missing,
-                format!("{} is missing", image.path.display()),
-            );
+            return Decision::Failed(Failure::Missing, format!("{} is missing", file.display()));
         };
-        let to = match platform::probe(&image.path, CLI) {
+        let to = match platform::probe(&file, CLI) {
             Ok(to) => to,
             Err(cause) => {
                 return Decision::Failed(
                     Failure::Probe,
                     format!(
                         "the replaced binary at {} does not run: {cause}",
-                        image.path.display()
+                        file.display()
                     ),
                 )
             }
         };
-        if FileIdentity::read(&image.path).ok() != Some(probed) {
+        if FileIdentity::read(&file).ok() != Some(probed) {
             // Replaced again while probing: the next check probes the new file.
             return Decision::Stay;
         }
@@ -207,7 +234,7 @@ impl Restarter {
     /// retry: 1 min, doubling up to 1 h; at once for another identity.
     fn fail(&mut self, kind: Failure, message: &str) {
         let Some(image) = &self.image else { return };
-        let current = FileIdentity::read(&image.path).ok();
+        let current = FileIdentity::read(&image.watched().0).ok();
         if !self.reported.contains(&(current, kind)) {
             self.reported.push((current, kind));
             (self.emit)(&events::error(message));
@@ -261,6 +288,7 @@ mod tests {
             path: path.to_path_buf(),
             identity: FileIdentity::read(path).unwrap(),
             replaced_at_start: false,
+            launch: None,
         };
         let (emit, seen) = collector();
         (Restarter::new(Ok(image), emit), seen)
@@ -342,5 +370,49 @@ mod tests {
         r.check(&|| false, &NoHooks);
         assert!(r.image().is_none());
         assert_eq!(*seen.borrow(), vec![events::error("no image")]);
+    }
+
+    /// `<root>/Cellar/mailtriage/<version>/bin/mailtriage`, printing that
+    /// version.
+    fn keg(root: &Path, version: &str) -> std::path::PathBuf {
+        let bin = root.join("Cellar/mailtriage").join(version).join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        script(&bin.join("mailtriage"), version, 0o755);
+        bin.join("mailtriage")
+    }
+
+    /// Points `<root>/opt/mailtriage` at the keg of `version`, as brew does.
+    fn link_opt(root: &Path, version: &str) {
+        fs::create_dir_all(root.join("opt")).unwrap();
+        let opt = root.join("opt/mailtriage");
+        let _ = fs::remove_file(&opt);
+        std::os::unix::fs::symlink(root.join("Cellar/mailtriage").join(version), opt).unwrap();
+    }
+
+    #[test]
+    fn a_keg_follows_its_opt_path_when_brew_upgrade_retargets_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        let old = keg(&root, "0.1.0");
+        link_opt(&root, "0.1.0");
+        let opt = root.join("opt/mailtriage/bin/mailtriage");
+        let image = Image {
+            path: old.clone(),
+            identity: FileIdentity::read(&old).unwrap(),
+            replaced_at_start: false,
+            launch: Some(opt.clone()),
+        };
+        // The re-exec target is always the opt path.
+        assert_eq!(image.target(), opt);
+        let (emit, _) = collector();
+        let mut r = Restarter::new(Ok(image), emit);
+        assert_eq!(r.decide(&|| false), Decision::Stay);
+        keg(&root, "0.2.0");
+        link_opt(&root, "0.2.0");
+        let upgraded = Decision::Exec(semver::Version::new(0, 2, 0));
+        assert_eq!(r.decide(&|| false), upgraded);
+        // The old keg is gone too: still the new one.
+        fs::remove_dir_all(root.join("Cellar/mailtriage/0.1.0")).unwrap();
+        assert_eq!(r.decide(&|| false), upgraded);
     }
 }

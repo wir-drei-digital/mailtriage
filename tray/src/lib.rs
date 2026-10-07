@@ -3,6 +3,7 @@
 //! it and send actions back.
 pub mod args;
 pub mod autostart;
+pub mod brew;
 pub mod cli;
 pub mod controller;
 pub mod editor;

@@ -127,10 +127,12 @@ pub fn run(args: &Args) -> i32 {
     };
     let windows = Windows::from_env(std::env::var(WINDOWS_ENV).ok().as_deref());
     let restarter = Restarter::start(controller::TRAY_VERSION);
+    // Windows start from the launch path: a keg's `opt` path outlives
+    // `brew upgrade`, which deletes the keg this tray runs from.
     let tray_exe = restarter
         .as_ref()
-        .map(|r| r.path().to_path_buf())
-        .or_else(|| env.own_exe.clone())
+        .map(Restarter::launch_path)
+        .or_else(|| env.own_exe.as_deref().map(crate::brew::launch_path))
         .unwrap_or_else(|| PathBuf::from("mailtriage-tray"));
     let controller = Controller::new(
         Flags {

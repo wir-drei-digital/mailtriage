@@ -510,13 +510,24 @@ pub fn unit_for(
         .map_or_else(|| PathBuf::from("logs"), |dir| dir.join("logs"));
     Ok(Unit {
         account: account.to_owned(),
-        exe: std::env::current_exe()?,
+        exe: launch_exe()?,
         config,
         interval_seconds,
         limit,
         log_dir,
         path_env: std::env::var("PATH").ok().filter(|p| !p.is_empty()),
     })
+}
+
+/// The executable a service runs: this program, or, for a Homebrew keg,
+/// its `opt` path, which `brew upgrade` keeps pointing at the current keg.
+fn launch_exe() -> Result<PathBuf> {
+    let exe = std::env::current_exe()?;
+    let opt = fs::canonicalize(&exe)
+        .ok()
+        .and_then(|canonical| crate::distribution::brew::opt_path(&canonical))
+        .filter(|opt| opt.exists());
+    Ok(opt.unwrap_or(exe))
 }
 
 /// `service install` for an account of `service`'s config, with a note

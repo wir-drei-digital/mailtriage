@@ -60,8 +60,10 @@ impl Env {
             .filter(|h| !h.is_empty())
             .map(PathBuf::from)
             .ok_or_else(|| error(3, "HOME is not set"))?;
+        // A Homebrew keg records its `opt` path, which `brew upgrade` keeps.
         let tray = std::env::current_exe()
             .and_then(fs::canonicalize)
+            .map(|p| crate::brew::launch_path(&p))
             .map_err(|e| error(3, format!("cannot find this program: {e}")))?;
         let launchctl = std::env::var_os("PATH")
             .and_then(|path| {

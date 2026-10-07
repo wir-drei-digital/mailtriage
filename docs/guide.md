@@ -636,7 +636,7 @@ mailtriage service uninstall --account work
 /usr/local/bin/mailtriage watch --config /Users/alice/.config/mailtriage/mailtriage.json --account work --interval-seconds 60 --limit 100 --json
 ```
 
-`--interval-seconds` (1 to 86400, default 60) and `--limit` (1 to 500, default 100) are passed to `watch`. The executable is the one that ran `service install`. `mailtriage setup` runs the same install in its last step.
+`--interval-seconds` (1 to 86400, default 60) and `--limit` (1 to 500, default 100) are passed to `watch`. The executable is the one that ran `service install`; for a Homebrew install it is its `opt` path, `$(brew --prefix)/opt/mailtriage/bin/mailtriage`, which `brew upgrade` keeps pointing at the current version. `mailtriage setup` runs the same install in its last step.
 
 | | macOS (launchd) | Linux (systemd user unit) |
 | --- | --- | --- |
@@ -901,6 +901,8 @@ The release information is shared by every `watch` of the same user: a `notify` 
 4. replaces itself with the new binary, with the same arguments and environment. The process ID stays the same, so launchd and systemd see no change, and the account lock is free while this happens.
 
 It never does this during a pass, and after Ctrl-C or SIGTERM it stops instead. It works in every `updates` mode and needs no `service install`; moving the binary to another path does need `service install`.
+
+A Homebrew install keeps each version in its own directory, and `brew upgrade` deletes the old one. `watch` therefore also follows `$(brew --prefix)/opt/mailtriage/bin/mailtriage`: when that leads to another file than the running one, it runs `--version` on it and re-executes the `opt` path, between passes, as above.
 
 When the new binary does not run, or the switch fails, `watch` prints one `{"schema_version":1,"update":{"event":"error","message":"…"}}` per file and kind of failure, keeps running the old code, and tries again after 1 minute, doubling up to 1 hour, or at once when the file changes again (for example after `chmod +x`). On Linux, a process whose binary file was replaced uses its absolute `argv[0]` to find the path; when that does not exist either, `watch` prints one error event and does not switch.
 
@@ -1279,7 +1281,7 @@ mailtriage-tray autostart enable|disable|status [--config PATH] [--mailtriage PA
 
 ### What the tray runs
 
-The tray uses the `mailtriage` next to its own executable, else the first on your `PATH`; `--mailtriage PATH` overrides both. It uses the config that `mailtriage service status` finds (see [Where mailtriage finds the config](#where-mailtriage-finds-the-config)); `--config PATH` overrides it. Both are resolved once at start and made absolute. A later change of `PATH`, the working directory or a symlink therefore never redirects a running tray; restart it to follow one.
+The tray uses the `mailtriage` next to its own executable, else the first on your `PATH`; `--mailtriage PATH` overrides both. For a Homebrew install it uses the `opt` path, `$(brew --prefix)/opt/mailtriage/bin/mailtriage`, which outlives `brew upgrade`. It uses the config that `mailtriage service status` finds (see [Where mailtriage finds the config](#where-mailtriage-finds-the-config)); `--config PATH` overrides it. Both are resolved once at start and made absolute. A later change of `PATH`, the working directory or a symlink therefore never redirects a running tray; restart it to follow one.
 
 Every command ends with `--config CONFIG`, the absolute path of the tray's config:
 
@@ -1335,7 +1337,7 @@ mailtriage-tray
 The icon appears in the menu bar (macOS, without a Dock icon) or the system tray (Linux), and stays until you choose Quit.
 
 - One tray runs per user. A second start prints `mailtriage-tray is already running` and exits 0.
-- When `mailtriage-tray` is replaced on disk by a version that runs, the running tray restarts itself onto it within about 15 s, with the same config and `mailtriage`. An open categories window keeps running.
+- When `mailtriage-tray` is replaced on disk by a version that runs, the running tray restarts itself onto it within about 15 s, with the same config and `mailtriage`. An open categories window keeps running. After `brew upgrade`, a Homebrew tray restarts onto its `opt` path.
 
 ### Start at login
 
@@ -1348,7 +1350,7 @@ mailtriage-tray autostart disable
 ```
 
 - `enable` writes a login item: `~/Library/LaunchAgents/digital.wirdrei.mailtriage-tray.plist` on macOS, `$XDG_CONFIG_HOME/autostart/mailtriage-tray.desktop` on Linux (`~/.config/autostart/mailtriage-tray.desktop` when `XDG_CONFIG_HOME` is unset or not absolute).
-- The login item records the tray's absolute path with `--config` and `--mailtriage`, both absolute and resolved as above. Without `--config`, `enable` runs `mailtriage service status --json` once to learn the config. On macOS it also records your current `PATH`, as `service install` does. Run `enable` again after you move `mailtriage`, the tray or the config.
+- The login item records the tray's absolute path with `--config` and `--mailtriage`, both absolute and resolved as above. Without `--config`, `enable` runs `mailtriage service status --json` once to learn the config. On macOS it also records your current `PATH`, as `service install` does. Run `enable` again after you move `mailtriage`, the tray or the config. For a Homebrew install it records the `opt` paths of both, which survive `brew upgrade`.
 - macOS: the tray starts at login and restarts after a crash, but Quit stays quit until the next login (`RunAtLoad`, `KeepAlive` with `SuccessfulExit` false). `enable` also runs `launchctl enable gui/<uid>/digital.wirdrei.mailtriage-tray`. It does not start a second tray.
 - `disable` deletes the file and leaves the running tray alone.
 - `status` reports `enabled: true` when the file exists and, on macOS, launchd has not disabled the label.
