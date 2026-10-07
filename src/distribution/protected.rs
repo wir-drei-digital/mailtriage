@@ -8,7 +8,7 @@ use crate::setup::shell_line;
 use anyhow::{Context, Result};
 use std::{
     fmt, fs, io,
-    os::unix::fs::{MetadataExt, PermissionsExt},
+    os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
 };
 
@@ -20,7 +20,8 @@ pub enum Why {
     /// Owned by this other uid.
     Owner(u32),
     /// Owned by this uid (root included) where only the user's own will do:
-    /// `self install`'s directory.
+    /// `self install`'s directory, or the one below a sticky, world-writable
+    /// directory.
     NotYours(u32),
     /// Writable by group or others; its permission bits.
     Writable(u32),
@@ -53,9 +54,11 @@ impl fmt::Display for Unsafe {
 impl std::error::Error for Unsafe {}
 
 impl Unsafe {
-    /// What makes the directory pass.
+    /// What makes the directory pass. Never `chmod` for a sticky directory
+    /// such as `/tmp`, which is shared on purpose.
     pub fn fix(&self) -> String {
         match self.why {
+            Why::Writable(mode) if mode & 0o1000 != 0 => "use a directory you own".to_owned(),
             Why::Writable(_) => format!(
                 "run {}",
                 shell_line(&[Path::new("chmod"), Path::new("go-w"), &self.dir])
@@ -99,7 +102,9 @@ pub fn check(path: &Path) -> Result<()> {
 /// The rule for `uid`, reading each path with `stat`, from `/` down; an
 /// error reading one is returned as is. With `creating`, the caller is about
 /// to create a directory in `path`, so a sticky, world-writable `path`
-/// passes for now: its next directory down will be the user's.
+/// passes for now: its next directory down will be the user's. When the
+/// directory below a sticky, world-writable one is a symlink or not the
+/// user's, that directory is the one refused, not the shared one above it.
 pub fn check_with(
     path: &Path,
     uid: u32,
@@ -110,44 +115,56 @@ pub fn check_with(
     chain.reverse();
     for (at, dir) in chain.iter().enumerate() {
         let meta = stat(dir).with_context(|| format!("cannot read {}", dir.display()))?;
-        let fail = |why| -> Result<()> {
-            Err(Unsafe {
-                dir: dir.to_path_buf(),
-                why,
-            }
-            .into())
-        };
         if meta.symlink {
-            return fail(Why::Symlink);
+            return refuse(dir, Why::Symlink);
         }
         if !meta.dir {
-            return fail(Why::NotDirectory);
+            return refuse(dir, Why::NotDirectory);
         }
         if meta.uid != uid && meta.uid != 0 {
-            return fail(Why::Owner(meta.uid));
+            return refuse(dir, Why::Owner(meta.uid));
         }
         if meta.mode & 0o022 == 0 {
             continue;
         }
-        let sticky_world = meta.mode & 0o1002 == 0o1002;
-        let child_is_users = match chain.get(at + 1) {
-            Some(child) => stat(child).is_ok_and(|c| c.uid == uid && !c.symlink),
-            None => creating,
-        };
-        if !(sticky_world && child_is_users) {
-            return fail(Why::Writable(meta.mode & 0o7777));
+        if meta.mode & 0o1002 != 0o1002 {
+            return refuse(dir, Why::Writable(meta.mode & 0o7777));
+        }
+        match chain.get(at + 1) {
+            Some(child) => {
+                let below =
+                    stat(child).with_context(|| format!("cannot read {}", child.display()))?;
+                if below.symlink {
+                    return refuse(child, Why::Symlink);
+                }
+                if below.uid != uid {
+                    return refuse(child, Why::NotYours(below.uid));
+                }
+            }
+            None if creating => {}
+            None => return refuse(dir, Why::Writable(meta.mode & 0o7777)),
         }
     }
     Ok(())
 }
 
-/// Creates the directory `path` with mode 0755 whatever the umask; an
-/// existing entry is left as it is (the rule checks it).
+fn refuse(dir: &Path, why: Why) -> Result<()> {
+    Err(Unsafe {
+        dir: dir.to_path_buf(),
+        why,
+    }
+    .into())
+}
+
+/// Creates the directory `path`, private until it gets mode 0755 whatever
+/// the umask. An entry already there, which may have appeared since the
+/// caller looked, is left as it is and must pass the rule (read without
+/// following a symlink) before anything is created in it.
 fn make_dir(path: &Path) -> Result<()> {
-    match fs::create_dir(path) {
+    match fs::DirBuilder::new().mode(0o700).create(path) {
         Ok(()) => fs::set_permissions(path, fs::Permissions::from_mode(0o755))
             .with_context(|| format!("cannot set the mode of {}", path.display())),
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => check_with(path, uid(), lstat, true),
         Err(e) => Err(e).with_context(|| format!("cannot create {}", path.display())),
     }
 }
@@ -188,19 +205,14 @@ fn prepare_dir(dir: &Path, creating: bool) -> Result<PathBuf> {
 }
 
 /// Makes `base.join(tail…)` exist under the rule and returns it: `base`
-/// (absolute) as `prepare` does, then each component of `tail`, read
-/// without following a symlink, is checked when it exists, before anything
-/// is created in it, and created with mode 0755 when it is missing; then
-/// the whole path is checked.
+/// (absolute) as `prepare` does, then each component of `tail` is created
+/// with mode 0755, or, when it exists, checked without following a symlink
+/// before anything is created in it; then the whole path is checked.
 pub fn prepare_below(base: &Path, tail: &[&str]) -> Result<PathBuf> {
     let mut dir = prepare_dir(base, !tail.is_empty())?;
     for part in tail {
         dir.push(part);
-        if fs::symlink_metadata(&dir).is_ok() {
-            check_with(&dir, uid(), lstat, true)?;
-        } else {
-            make_dir(&dir)?;
-        }
+        make_dir(&dir)?;
     }
     check(&dir)?;
     Ok(dir)
@@ -311,7 +323,8 @@ mod tests {
             rule("/tmp/mine", &[root(), tmp, ("/tmp/mine", meta(ME, 0o755))]),
             Ok(())
         );
-        // Someone else's directory below the sticky one.
+        // Someone else's directory below the sticky one is refused, not the
+        // shared directory, which must never be told to `chmod`.
         let error = rule(
             "/tmp/theirs/x",
             &[
@@ -322,12 +335,23 @@ mod tests {
             ],
         )
         .unwrap_err();
-        assert_eq!(error.dir, PathBuf::from("/tmp"));
-        // The sticky directory itself as the target.
         assert_eq!(
-            rule("/tmp", &[root(), tmp]).unwrap_err().dir,
-            PathBuf::from("/tmp")
+            (error.dir.clone(), error.why),
+            ("/tmp/theirs".into(), Why::NotYours(0))
         );
+        assert_eq!(
+            error.to_string(),
+            "/tmp/theirs belongs to uid 0, not to you"
+        );
+        assert_eq!(error.fix(), "use a directory you own");
+        let mut link = meta(ME, 0o777);
+        link.symlink = true;
+        let error = rule("/tmp/link/x", &[root(), tmp, ("/tmp/link", link)]).unwrap_err();
+        assert_eq!((error.dir, error.why), ("/tmp/link".into(), Why::Symlink));
+        // The sticky directory itself as the target.
+        let error = rule("/tmp", &[root(), tmp]).unwrap_err();
+        assert_eq!(error.dir, PathBuf::from("/tmp"));
+        assert_eq!(error.fix(), "use a directory you own");
         // World-writable without the sticky bit, or sticky but only
         // group-writable.
         let open = ("/tmp", meta(0, 0o777));
@@ -371,5 +395,57 @@ mod tests {
         let error = prepare_below(&root, &["link", "x"]).unwrap_err();
         assert_eq!(unsafe_dir(&error).unwrap().why, Why::Symlink);
         assert!(!root.join("real/x").exists());
+    }
+
+    /// An entry already where a directory is to be made, which may have
+    /// appeared since the caller looked, must pass the rule: it is neither
+    /// changed nor used to create anything through.
+    #[test]
+    fn an_entry_found_where_a_directory_is_made_must_pass_the_rule() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        let mode = |p: &Path| fs::symlink_metadata(p).unwrap().permissions().mode() & 0o7777;
+        // A new directory gets 0755; a private one already there is kept.
+        make_dir(&root.join("new")).unwrap();
+        assert_eq!(mode(&root.join("new")), 0o755);
+        let private = root.join("private");
+        fs::create_dir(&private).unwrap();
+        fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+        make_dir(&private).unwrap();
+        assert_eq!(mode(&private), 0o700);
+        // A group-writable directory already there: refused, mode untouched.
+        let shared = root.join("shared");
+        fs::create_dir(&shared).unwrap();
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o775)).unwrap();
+        let error = make_dir(&shared).unwrap_err();
+        assert_eq!(
+            unsafe_dir(&error),
+            Some(&Unsafe {
+                dir: shared.clone(),
+                why: Why::Writable(0o775)
+            })
+        );
+        assert_eq!(mode(&shared), 0o775);
+        // A symlink to a directory: refused, its target untouched.
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&private, &link).unwrap();
+        let error = make_dir(&link).unwrap_err();
+        assert_eq!(unsafe_dir(&error).unwrap().why, Why::Symlink);
+        assert_eq!(mode(&private), 0o700);
+        assert_eq!(fs::read_dir(&private).unwrap().count(), 0);
+        // A dangling symlink looks missing to `prepare`'s scan, as an entry
+        // planted after the scan would: refused when found, nothing made.
+        let later = root.join("later");
+        std::os::unix::fs::symlink(&later, root.join("dangling")).unwrap();
+        let error = prepare(&root.join("dangling/x")).unwrap_err();
+        assert_eq!(
+            unsafe_dir(&error),
+            Some(&Unsafe {
+                dir: root.join("dangling"),
+                why: Why::Symlink
+            })
+        );
+        assert!(fs::symlink_metadata(&later).is_err());
     }
 }
