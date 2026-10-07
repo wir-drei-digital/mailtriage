@@ -505,9 +505,11 @@ checks every screen against these.
 
 - **Plain words.** No internal names on screen: no `catch_all`, `taxonomy`, `digest`,
   exit codes or JSON. Technical detail lives behind "Show details", which shows the
-  exact command, its exit code and output, and has "Copy". On-screen text names
-  commands as plain text, without Markdown formatting such as backticks; the backticks
-  around commands in this spec are formatting, not on-screen text.
+  exact command, its exit code and output, and has "Copy". The tray's and the
+  window's own strings name commands as plain text, without Markdown formatting such
+  as backticks; the backticks around commands in this spec are formatting, not
+  on-screen text. Messages the tray passes through from `mailtriage`, behind "Show
+  details" or as a failure line, keep the CLI's wording.
 - **Calm layout.** List on the left, form on the right, one primary button (Apply)
   bottom right with Revert beside it. Destructive actions ask first and say what
   happens to mail.

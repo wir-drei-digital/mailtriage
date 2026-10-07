@@ -298,6 +298,9 @@ The automated tests use a loopback server instead of GitHub and a script instead
 4. Wait one interval, read the service log, and run `mailtriage service status --account work --json`.
 5. Run `mailtriage update --json` again.
 6. Copy the older release to `/usr/local/bin/mailtriage` with `sudo install -m 0755` and run `/usr/local/bin/mailtriage update --check --json` and `/usr/local/bin/mailtriage update --json`.
+7. On a desktop where the tray runs (macOS, or Linux with GTK and the AppIndicator library): install `mailtriage-tray` from the older release's `mailtriage-tray-vVERSION-PLATFORM.tar.gz` as `~/.local/bin/mailtriage-tray` (`install -m 0755`) and run `mailtriage update --json`.
+8. Install the older `mailtriage-tray` the same way again, start it (`~/.local/bin/mailtriage-tray &`), and wait for the service's next pass (the config has `"updates": "auto"`).
+9. On a Linux host without GTK and the AppIndicator library (a server), install the older release's `mailtriage` and `mailtriage-tray` into `~/.local/bin`, note `sha256sum ~/.local/bin/mailtriage-tray`, and run `mailtriage update --json`.
 
 | Check | Result | Evidence | Date |
 | --- | --- | --- | --- |
@@ -308,3 +311,7 @@ The automated tests use a loopback server instead of GitHub and a script instead
 | The log shows `{"schema_version":1,"update":{"event":"restarting",…}}` with the service's PID, then passes; `service status` shows the same `pid` and the new version in `last_pass.version` | | | |
 | The second `update` reports `action: current` | | | |
 | The root-owned copy: `--check` reports `unsafe_permissions` with its fix; `update` exits 3 and leaves the file unchanged | | | |
+| Step 7: `update` exits 0 with `update.tray` `{"action":"updated","from":OLDER,"to":NEWER,"error":null}`; the release's real tray archive is installed next to the CLI: `~/.local/bin/mailtriage-tray --version` prints the newer version | | | |
+| Step 7: `~/.local/bin/mailtriage-tray.previous` is kept and prints the older version | | | |
+| Step 8: `watch` replaces the older tray at its next pass (no `error` event in the service log), and the running tray re-executes onto the new file within about 15 s, with its menu and without a second tray | | | |
+| Step 9: `update` exits 0 with `update.tray.action` `skipped` and an `error` starting `mailtriage-tray does not run here:` that names the missing library; nothing is downloaded for the tray: no `mailtriage-tray.previous`, and its `sha256sum` is unchanged | | | |
