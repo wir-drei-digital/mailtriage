@@ -264,3 +264,6 @@ as `version` (`null` for rows written before v7). The newer-schema guard is
 `LATEST`, the last migration's version. Like every migration of a stable
 release, it is additive, so a process of the previous release keeps
 inserting heartbeats on an open connection after another process migrated.
+A process of a release before v7 updates an existing heartbeat row without
+touching `version`, so during a rolling update a row can keep the newer
+process's version until the next pass of a v7-capable process.

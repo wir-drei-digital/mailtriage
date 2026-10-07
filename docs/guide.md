@@ -45,15 +45,15 @@ You need:
 - an OpenRouter API key,
 - for the background service: launchd (macOS) or systemd (Linux).
 
-From a GitHub release: each release carries `mailtriage-vVERSION-linux-amd64.tar.gz`, `-linux-arm64.tar.gz` and `-macos-arm64.tar.gz`, a `.sha256` file per archive and a combined `SHA256SUMS`. Each archive holds the `mailtriage` executable, the README and the license. For example, with the GitHub CLI:
+From a GitHub release: each release carries `mailtriage-vVERSION-linux-amd64.tar.gz`, `-linux-arm64.tar.gz` and `-macos-arm64.tar.gz`, a `.sha256` file per archive and a combined `SHA256SUMS`. Each archive holds the `mailtriage` executable, the README and the license. For example, with the GitHub CLI; on Linux, set `PLATFORM` to `linux-amd64` or `linux-arm64` and use `sha256sum --check` in place of `shasum -a 256 --check`:
 
 ```sh
-VERSION=0.1.0
-gh release download "v$VERSION" --repo wir-drei-digital/mailtriage --pattern "mailtriage-v$VERSION-macos-arm64.tar.gz*"
-shasum -a 256 --check "mailtriage-v$VERSION-macos-arm64.tar.gz.sha256"   # Linux: sha256sum --check
-tar -xzf "mailtriage-v$VERSION-macos-arm64.tar.gz"
-install -d ~/.local/bin
-install -m 0755 mailtriage ~/.local/bin/mailtriage
+VERSION=0.1.0 PLATFORM=macos-arm64
+gh release download "v$VERSION" --repo wir-drei-digital/mailtriage --pattern "mailtriage-v$VERSION-$PLATFORM.tar.gz*" &&
+  shasum -a 256 --check "mailtriage-v$VERSION-$PLATFORM.tar.gz.sha256" &&
+  tar -xzf "mailtriage-v$VERSION-$PLATFORM.tar.gz" &&
+  install -d ~/.local/bin &&
+  install -m 0755 mailtriage ~/.local/bin/mailtriage
 ```
 
 The macOS executable is unsigned and not notarized. See the [release guide](releases.md) for how releases are made. A root-owned or otherwise unsafe install, for example one made with `sudo` into `/usr/local/bin`, is not replaced: mailtriage only reports new releases for it (see [Binaries mailtriage does not replace](#binaries-mailtriage-does-not-replace)).
@@ -61,13 +61,13 @@ The macOS executable is unsigned and not notarized. See the [release guide](rele
 From source, with a stable Rust toolchain:
 
 ```sh
-cargo build --release --locked
-install -d ~/.local/bin
-install -m 0755 target/release/mailtriage ~/.local/bin/mailtriage
-mailtriage --version
+cargo build --release --locked &&
+  install -d ~/.local/bin &&
+  install -m 0755 target/release/mailtriage ~/.local/bin/mailtriage &&
+  mailtriage --version
 ```
 
-`~/.local/bin` must be on your `PATH`; the examples below assume `mailtriage` is. The background service records the absolute path of the executable that installs it, so install the binary in its final place first.
+`~/.local/bin` must be on your `PATH`; the examples below assume `mailtriage` is. If `command -v mailtriage` prints nothing, add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile (`~/.zprofile` on macOS, `~/.bashrc` on Linux) and open a new terminal. The background service records the absolute path of the executable that installs it, so install the binary in its final place first.
 
 ## Guided setup
 
@@ -829,11 +829,11 @@ Without `--json`, events are one line of text, for example `update: restarting o
 | `unsafe_permissions` | The binary or its directory is not owned by you, or is writable by group or others. | Install mailtriage into a directory only you own and can write, such as `~/.local/bin`, or set `updates` to `notify`. |
 | `not_writable` | You cannot create files in the binary's directory. | Make the directory writable for you, or set `updates` to `notify`. |
 
-A binary installed with `sudo install … /usr/local/bin/mailtriage` belongs to root, so it is `unsafe_permissions`: mailtriage reports new releases for it but does not replace it. For automatic updates, install it as your own user and put `~/.local/bin` on your `PATH`:
+A binary installed with `sudo install … /usr/local/bin/mailtriage` belongs to root, so it is `unsafe_permissions`: mailtriage reports new releases for it but does not replace it. For automatic updates, install it as your own user and put `~/.local/bin` on your `PATH` (see [Install](#install)):
 
 ```sh
-install -d ~/.local/bin
-install -m 0755 mailtriage ~/.local/bin/mailtriage
+install -d ~/.local/bin &&
+  install -m 0755 mailtriage ~/.local/bin/mailtriage
 ```
 
 Run `mailtriage service install` again after you move the binary.
@@ -864,13 +864,11 @@ From then on, mailtriage updates itself.
 A release that fails before `watch` reaches its update step cannot repair itself. Install a newer release by hand:
 
 1. Run `mailtriage update`. It needs no config, so it may work when `watch` does not.
-2. If it does not run either, download and check the archive yourself, then move the binary into place:
+2. If it does not run either, download and check the archive yourself, then move the binary into place. Set `VERSION` to the release to install and `PLATFORM` to `macos-arm64`, `linux-amd64` or `linux-arm64`. On Linux, use `sha256sum` in place of `shasum -a 256`. Replace `~/.local/bin/mailtriage` with the path of your installed binary:
 
    ```sh
-   VERSION=0.3.1 PLATFORM=macos-arm64   # or linux-amd64, linux-arm64
+   VERSION=0.3.1 PLATFORM=macos-arm64
    base="https://github.com/wir-drei-digital/mailtriage/releases/download/v$VERSION"
-   # Linux: sha256sum --check --ignore-missing SHA256SUMS in place of shasum -a 256 …
-   # Replace ~/.local/bin/mailtriage with the path of your installed binary.
    curl -fLO "$base/mailtriage-v$VERSION-$PLATFORM.tar.gz" &&
      curl -fLO "$base/SHA256SUMS" &&
      shasum -a 256 --check --ignore-missing SHA256SUMS &&

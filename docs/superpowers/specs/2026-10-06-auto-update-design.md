@@ -286,8 +286,11 @@ rename) under the cache lock:
   installation path. A process only uses its own entries.
 - Keys a binary does not know, at the top level and inside `configs` and `installs`
   entries, are kept on every rewrite, so binaries of different releases (and the
-  tray) do not drop each other's data. `release` is replaced whole by each successful
-  check.
+  tray) do not drop each other's data. Keys inside the nested objects it does know
+  (`release` and its assets, `identity`, error records) are not kept by a binary that
+  does not know them: any rewrite by it drops them, so newer fields there must be
+  optional. Each successful check replaces `release` as a whole; until then,
+  `release.archives` keeps every component's entry.
 - Errors are `null` or `{"at":"…","message":"…"}`.
 - A missing or unreadable file counts as empty. A file that cannot be written stops
   `watch`'s network work (see below).
