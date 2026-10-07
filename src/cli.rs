@@ -6,7 +6,7 @@ use mailtriage::{
     prompt::{self, Prompter},
     secrets::KeyStore,
     service::{
-        is_config_change, Backfill, ErrorKind, ListOptions, RefileOptions, RetryTarget, Service,
+        error_reason, is_config_change, Backfill, ListOptions, RefileOptions, RetryTarget, Service,
         ServiceError,
     },
     service_control, setup,
@@ -487,22 +487,29 @@ impl CliError {
     }
 }
 
+/// The CLI error for `error`. Its `reason` is `service::error_reason`'s,
+/// the one a failed pass's heartbeat records, so `error.reason` and
+/// `last_pass.reason` cannot drift apart.
 fn service_error(error: anyhow::Error) -> CliError {
+    let reason = error_reason(&error);
     if let Some(error) = error.downcast_ref::<ServiceError>() {
         return CliError {
             code: error.code,
             message: error.message.clone(),
-            reason: error.kind.reason(),
+            reason,
         };
     }
     if error.downcast_ref::<ConfigChanged>().is_some() {
         return CliError {
             code: 5,
             message: "mail engine configuration changed during operation".into(),
-            reason: ErrorKind::ConfigChanged.reason(),
+            reason,
         };
     }
-    CliError::operational()
+    CliError {
+        reason,
+        ..CliError::operational()
+    }
 }
 
 fn print_value(value: &Value, json_mode: bool) -> io::Result<()> {
@@ -976,6 +983,7 @@ fn watch_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mailtriage::service::ErrorKind;
     use std::cell::Cell;
 
     fn service_err(code: i32, kind: ErrorKind) -> anyhow::Error {
@@ -1098,6 +1106,31 @@ mod tests {
         assert_eq!(service_error(anyhow::anyhow!("x")).reason, None);
         assert_eq!(CliError::input("x").reason, None);
         assert_eq!(CliError::operational().reason, None);
+    }
+
+    /// The error object's `reason` is the one the heartbeat records
+    /// (`last_pass.reason`), for every kind of error.
+    #[test]
+    fn the_error_reason_is_the_heartbeats_reason() {
+        let errors: Vec<fn() -> anyhow::Error> = vec![
+            || service_err(5, ErrorKind::Other),
+            || service_err(5, ErrorKind::ConfigChanged),
+            || service_err(5, ErrorKind::ConfigBusy),
+            || service_err(5, ErrorKind::AccountBusy),
+            || service_err(5, ErrorKind::BindingConflict),
+            || service_err(5, ErrorKind::CategoriesChanged),
+            || service_err(5, ErrorKind::ServiceConfigMismatch),
+            || service_err(5, ErrorKind::ServiceConfigUnknown),
+            || service_err(5, ErrorKind::ServiceBusy),
+            || service_err(2, ErrorKind::Other),
+            || ConfigChanged.into(),
+            || anyhow::Error::from(ConfigChanged).context("during a pass"),
+            || anyhow::anyhow!("io"),
+        ];
+        for error in errors {
+            let expected = error_reason(&error());
+            assert_eq!(service_error(error()).reason, expected, "{}", error());
+        }
     }
 
     /// The JSON error object names a `reason` only when the error has one.
