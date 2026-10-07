@@ -58,6 +58,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.newest.outputs.version }}
         run: bash scripts/add-himalaya-version.sh "$VERSION"
+      # Upload the edited file before anything installs or runs the candidate,
+      # so the file `propose` commits is the one the helper wrote.
+      - uses: actions/upload-artifact@v7.0.1
+        if: steps.newest.outputs.listed == 'false'
+        with:
+          name: himalaya-versions
+          path: src/engine/himalaya-versions.json
+          if-no-files-found: error
+          retention-days: 7
       - uses: dtolnay/rust-toolchain@stable
         if: steps.newest.outputs.listed == 'false'
       - uses: Swatinem/rust-cache@v2
@@ -95,13 +104,6 @@ jobs:
           set -o pipefail
           bash tests/e2e/run.sh prefix 31144 2>&1 | tee "$RUNNER_TEMP/e2e-prefix.log"
       - uses: actions/upload-artifact@v7.0.1
-        if: steps.newest.outputs.listed == 'false'
-        with:
-          name: himalaya-versions
-          path: src/engine/himalaya-versions.json
-          if-no-files-found: error
-          retention-days: 7
-      - uses: actions/upload-artifact@v7.0.1
         if: failure()
         with:
           name: e2e-logs
@@ -128,13 +130,19 @@ jobs:
       - name: Branch, pull request and CI runs
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.test.outputs.version }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
           branch="himalaya/$VERSION"
-          if git ls-remote --exit-code --heads origin "$branch" > /dev/null; then
-            echo "::notice::$branch exists already; its pull request is open or was decided"
+          # Decided by the pull request, not the branch: a pull request from
+          # this repository's branch, open or decided, ends the job. A branch
+          # without one (an earlier run failed before creating it) is replaced.
+          prs="$(gh pr list --head "$branch" --state all --json number,isCrossRepository \
+            --jq 'map(select(.isCrossRepository | not)) | length')"
+          if [ "$prs" != 0 ]; then
+            echo "::notice::a pull request from $branch exists already; it is open or was decided"
             exit 0
           fi
           cp "$RUNNER_TEMP/candidate/himalaya-versions.json" src/engine/himalaya-versions.json
@@ -143,7 +151,11 @@ jobs:
           git -c user.name='github-actions[bot]' \
             -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
             commit -m "Test Himalaya $VERSION"
-          git push origin "$branch"
+          # Replace the branch only as it was just seen (or create it when it
+          # is absent: an empty lease means the branch must not exist).
+          current="$(git ls-remote --heads origin "refs/heads/$branch" |
+            awk -v ref="refs/heads/$branch" '$2 == ref { print $1 }')"
+          git push --force-with-lease="refs/heads/$branch:$current" origin "HEAD:refs/heads/$branch"
           cat > "$RUNNER_TEMP/body.md" <<BODY
           The weekly check passed the Dovecot end-to-end suite against Himalaya $VERSION in both namespace layouts: $RUN_URL
 
@@ -181,6 +193,12 @@ jobs:
             VERSION="$(gh api repos/pimalaya/himalaya/releases/latest --jq .tag_name)"
             VERSION="${VERSION#v}"
           fi
+          # The fallback comes from the API: it goes into the title and the
+          # search only as X.Y.Z, as in the `test` job.
+          if ! printf '%s\n' "$VERSION" | grep -Eqx '(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'; then
+            echo "::error::no X.Y.Z version to report: $VERSION"
+            exit 1
+          fi
           title="Himalaya $VERSION fails the end-to-end suite"
           {
             echo "The weekly check failed for Himalaya $VERSION: $RUN_URL"
@@ -195,8 +213,8 @@ jobs:
               echo
             done
           } > "$RUNNER_TEMP/body.md"
-          number="$(gh issue list --state open --search "\"$title\" in:title" --json number,title \
-            --jq "map(select(.title == \"$title\")) | .[0].number // empty")"
+          number="$(gh issue list --state open --search "\"$title\" in:title" --json number,title |
+            jq -r --arg title "$title" 'map(select(.title == $title)) | .[0].number // empty')"
           if [ -n "$number" ]; then
             gh issue comment "$number" --body-file "$RUNNER_TEMP/body.md"
           else

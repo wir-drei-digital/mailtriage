@@ -160,3 +160,26 @@ fn a_listed_lower_or_unstable_version_is_refused() {
     assert_eq!(out.status.code(), Some(2));
     assert_eq!(copy.text(), before);
 }
+
+#[test]
+fn a_file_that_cannot_be_written_back_is_left_unchanged() {
+    // An existing entry without one platform cannot be rendered in the
+    // file's layout; the helper must fail before it touches the file.
+    let copy = Copy::new();
+    let mut data: Value = serde_json::from_str(&copy.text()).unwrap();
+    data["versions"][0]["assets"]
+        .as_object_mut()
+        .unwrap()
+        .remove("aarch64-linux");
+    fs::write(copy.path(), data.to_string()).unwrap();
+    let before = copy.text();
+    let out = copy.add("2.3.0", &release("2.3.0", &[]));
+    assert!(!out.status.success(), "{}", stderr(&out));
+    assert_eq!(copy.text(), before);
+    let mut left: Vec<String> = fs::read_dir(copy.dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    left.sort();
+    assert_eq!(left, ["release.json", "versions.json"]);
+}

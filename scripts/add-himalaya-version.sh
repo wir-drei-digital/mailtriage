@@ -48,8 +48,10 @@ fi
 
 python3 - "$data" "$version" "$release_file" <<'PY'
 import json
+import os
 import re
 import sys
+import tempfile
 
 PLATFORMS = ['aarch64-darwin', 'x86_64-linux', 'aarch64-linux']
 DIGEST = re.compile(r'sha256:[0-9a-f]{64}')
@@ -101,7 +103,17 @@ for platform in PLATFORMS:
     assets[platform] = digest
 
 entries.append({'version': version, 'roles': dict(entries[-1]['roles']), 'assets': assets})
-with open(data_path, 'w') as f:
-    f.write(render(entries))
+# Render first, then replace the file in one step: a failure leaves it as it was.
+text = render(entries)
+target = os.path.realpath(data_path)
+fd, staged = tempfile.mkstemp(prefix='.himalaya-versions.', dir=os.path.dirname(target))
+try:
+    with os.fdopen(fd, 'w') as f:
+        f.write(text)
+    os.chmod(staged, os.stat(target).st_mode & 0o777)
+    os.replace(staged, target)
+except BaseException:
+    os.unlink(staged)
+    raise
 print(f'Added Himalaya {version}; roles copied from {entries[-2]["version"]}: {json.dumps(entries[-1]["roles"])}')
 PY

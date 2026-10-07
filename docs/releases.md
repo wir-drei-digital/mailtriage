@@ -43,8 +43,9 @@ Monday and on demand, in three jobs:
 2. `propose`, when the suite passed: pushes the edited file to the branch
    `himalaya/VERSION`, opens the pull request `Test Himalaya VERSION`, and
    starts `ci.yml` and `e2e.yml` on the branch (a branch pushed with the
-   workflow's token starts no workflow by itself). When the branch exists
-   already, it does nothing.
+   workflow's token starts no workflow by itself). When a pull request from
+   that branch exists already, open or decided, it does nothing; a branch
+   left without one (an earlier run failed before opening it) is replaced.
 3. `report`, when the suite failed: opens the issue `Himalaya VERSION fails the
    end-to-end suite`, or comments on the open one, with the end of the
    failing log.
