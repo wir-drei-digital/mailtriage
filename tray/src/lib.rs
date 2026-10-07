@@ -11,5 +11,6 @@ pub mod icons;
 pub mod instances;
 pub mod model;
 pub mod paths;
+pub mod quit;
 pub mod restart;
 pub mod tray;

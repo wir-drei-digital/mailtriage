@@ -8,11 +8,12 @@ use crate::{
     controller::{self, Controller, Done, Flags, Work},
     icons,
     instances::{self, Windows, WINDOWS_ENV},
+    model::menu::Action,
     model::{
         health::IconState,
         menu::{Entry, Menu},
     },
-    paths,
+    paths, quit,
     restart::{self, Restarter},
 };
 use chrono::{Local, Utc};
@@ -40,6 +41,8 @@ use tray_icon::{
 enum UserEvent {
     Menu(String),
     Done(Box<Done>),
+    /// `mailtriage-tray quit` from this installation.
+    Quit,
 }
 
 /// Appends `entries` through `append`; each clickable entry's id is its
@@ -134,6 +137,7 @@ pub fn run(args: &Args) -> i32 {
         .map(Restarter::launch_path)
         .or_else(|| env.own_exe.as_deref().map(crate::brew::launch_path))
         .unwrap_or_else(|| PathBuf::from("mailtriage-tray"));
+    let own = env.own_exe.clone();
     let controller = Controller::new(
         Flags {
             mailtriage: args.mailtriage.clone(),
@@ -144,7 +148,7 @@ pub fn run(args: &Args) -> i32 {
         autostart::Env::detect().ok(),
         windows,
     );
-    event_loop(controller, restarter, lock)
+    event_loop(controller, restarter, lock, cache, own)
 }
 
 fn spawn(
@@ -174,6 +178,8 @@ fn event_loop(
     mut controller: Controller,
     mut restarter: Option<Restarter>,
     lock: std::fs::File,
+    cache: PathBuf,
+    own: Option<PathBuf>,
 ) -> ! {
     // Only macOS mutates the loop (its activation policy).
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
@@ -189,6 +195,13 @@ fn event_loop(
         MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
             let _ = proxy.send_event(UserEvent::Menu(event.id.0));
         }));
+    }
+    // After the lock, which proves no other tray owns an old socket.
+    if let Some(own) = own {
+        let proxy = proxy.clone();
+        quit::listen_or_warn(&cache, own, move || {
+            let _ = proxy.send_event(UserEvent::Quit);
+        });
     }
     let running = Arc::new(AtomicUsize::new(0));
     let mut clipboard = arboard::Clipboard::new().ok();
@@ -216,6 +229,8 @@ fn event_loop(
                 }
             }
             Event::UserEvent(UserEvent::Done(done)) => work = controller.done(*done, now),
+            // As the menu's Quit.
+            Event::UserEvent(UserEvent::Quit) => work = controller.act(Action::Quit, now),
             _ => {}
         }
         if Instant::now() >= next_refresh {

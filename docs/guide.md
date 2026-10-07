@@ -1277,6 +1277,7 @@ Before you use `live` on a real mailbox, the live provider check in the [filing 
 mailtriage-tray [--config PATH] [--mailtriage PATH]
 mailtriage-tray categories [--account NAME] [--config PATH] [--mailtriage PATH]
 mailtriage-tray autostart enable|disable|status [--config PATH] [--mailtriage PATH] [--json]
+mailtriage-tray quit [--json]
 ```
 
 ### What the tray runs
@@ -1337,6 +1338,7 @@ mailtriage-tray
 The icon appears in the menu bar (macOS, without a Dock icon) or the system tray (Linux), and stays until you choose Quit.
 
 - One tray runs per user. A second start prints `mailtriage-tray is already running` and exits 0.
+- `mailtriage-tray quit` quits the running tray of this installation, as its menu's Quit does, and prints `quit`, `not_running` (no tray runs) or `other_installation` (the running tray belongs to a `mailtriage-tray` elsewhere, which keeps running); with `--json`, `{"schema_version":1,"quit":"quit"}`. It talks to the tray over `tray.sock` next to `tray.lock` in the cache directory and signals no process. It exits 3 with `the tray does not respond; quit it from its menu` when a tray holds its lock but does not answer within 5 seconds. Open categories windows keep running.
 - When `mailtriage-tray` is replaced on disk by a version that runs, the running tray restarts itself onto it within about 15 s, with the same config and `mailtriage`. An open categories window keeps running. After `brew upgrade`, a Homebrew tray restarts onto its `opt` path.
 
 ### Start at login
