@@ -430,9 +430,12 @@ fn a_second_service_command_waits_for_the_first() {
         .current_dir(&cwd)
         .args(["service", "start", "--account", "work", "--json"])
         .env("HOME", &home)
+        .env("XDG_CACHE_HOME", dir.path().join("xdg"))
         .env("MT_FAKE_HOME", &home)
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
         .env_remove("MAILTRIAGE_CONFIG")
+        .env_remove("MAILTRIAGE_UPDATE_TEST_HOOK")
+        .env_remove("MAILTRIAGE_UPDATE_TEST_LOCK_WAIT_MS")
         .output()
         .unwrap();
     release.join().unwrap();

@@ -6,6 +6,7 @@ mod common;
 use common::{config_file, unit_for, write_proc, write_tool, LAUNCHCTL, SYSTEMCTL};
 use mailtriage::{
     config,
+    service::Service,
     service_control::{self, Inspection},
     system_service::{self, Context, Manager, Unit},
 };
@@ -332,14 +333,67 @@ fn enabled_and_enablement_for_each_state() {
     }
 }
 
+/// X1: an in-process `status` with a test `Context` reads the update
+/// cache under that context's home, never this user's: `XDG_CACHE_HOME`
+/// counts only for the home in `HOME`.
+#[test]
+fn in_process_status_reads_the_update_cache_of_the_contexts_home() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(dir.path()).unwrap();
+    let manager = if cfg!(target_os = "macos") {
+        Manager::Launchd
+    } else {
+        Manager::Systemd
+    };
+    let ctx = context(manager, &root);
+    let config = config_file(&root, "a.json");
+    // The service runs a script, so no test binary is asked for `--version`.
+    let unit = unit_for(&root, &config);
+    write_tool(&root, "mailtriage", "#!/bin/sh\necho 'mailtriage 0.0.1'\n");
+    let unit_path = ctx.unit_path("work");
+    fs::create_dir_all(unit_path.parent().unwrap()).unwrap();
+    let text = match manager {
+        Manager::Launchd => system_service::plist(&unit),
+        Manager::Systemd => system_service::systemd_unit(&unit),
+    };
+    fs::write(&unit_path, text).unwrap();
+    let cache_dir = if cfg!(target_os = "macos") {
+        ctx.home.join("Library/Caches/mailtriage")
+    } else {
+        ctx.home.join(".cache/mailtriage")
+    };
+    fs::create_dir_all(&cache_dir).unwrap();
+    let release = json!({"version": "7.7.7", "release_url": "u", "published_at": null,
+        "archives": {"mailtriage": null, "mailtriage-tray": null}, "sums": null});
+    fs::write(
+        cache_dir.join("update.json"),
+        json!({"schema_version": 1, "release": release, "checked_at": "2026-11-03T07:00:00Z"})
+            .to_string(),
+    )
+    .unwrap();
+    let service = Service::open(&config).unwrap();
+    let v = service_control::status(&service, &config, Some("work"), Some(&ctx), &root).unwrap();
+    let update = &v["service"]["update"];
+    assert_eq!(update["executable"], json!(root.join("mailtriage")), "{v}");
+    assert_eq!(update["installed"], "0.0.1", "{v}");
+    assert_eq!(
+        (update["latest"].clone(), update["checked_at"].clone()),
+        (json!("7.7.7"), json!("2026-11-03T07:00:00Z")),
+        "{v}"
+    );
+}
+
 fn run(dir: &Path, bin: &Path, args: &[&str]) -> (i32, Value) {
     let out = Command::new(env!("CARGO_BIN_EXE_mailtriage"))
         .current_dir(dir.join("cwd"))
         .args(args)
         .env("HOME", dir.join("home"))
+        .env("XDG_CACHE_HOME", dir.join("xdg"))
         .env("MT_FAKE_HOME", dir.join("home"))
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
         .env_remove("MAILTRIAGE_CONFIG")
+        .env_remove("MAILTRIAGE_UPDATE_TEST_HOOK")
+        .env_remove("MAILTRIAGE_UPDATE_TEST_LOCK_WAIT_MS")
         .output()
         .unwrap();
     (

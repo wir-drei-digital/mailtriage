@@ -590,7 +590,11 @@ pub fn status_account(
     out["account"] = json!(account);
     out["last_pass"] = service.store.heartbeat(account)?.unwrap_or(Value::Null);
     let unit = ctx.map(|c| (c.manager, c.unit_path(account)));
-    out["update"] = crate::update::report::update_block(service.config.updates, unit);
+    // The cache of the context's home, so a test context never reads this user's.
+    let cache = ctx.map_or_else(crate::update::cache::Cache::for_user, |c| {
+        crate::update::cache::Cache::for_home(&c.home)
+    });
+    out["update"] = crate::update::report::update_block(service.config.updates, unit, cache);
     Ok(out)
 }
 

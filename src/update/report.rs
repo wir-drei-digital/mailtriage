@@ -25,15 +25,21 @@ pub fn unit_of(account: &str) -> Option<(Manager, PathBuf)> {
 }
 
 /// The block for the service whose file is `unit` (manager and path), or,
-/// without a decodable service file, for the binary running this command.
-pub fn update_block(mode: UpdateMode, unit: Option<(Manager, PathBuf)>) -> Value {
-    describe(mode, unit).0
+/// without a decodable service file, for the binary running this command,
+/// with what `cache` says (`None`: nothing cached).
+pub fn update_block(
+    mode: UpdateMode,
+    unit: Option<(Manager, PathBuf)>,
+    cache: Option<Cache>,
+) -> Value {
+    describe(mode, unit, cache).0
 }
 
-/// `doctor`'s block: `update_block` plus `ready`, false only when the mode
-/// is `auto` and the executable is not replaceable; then also `fix`.
+/// `doctor`'s block: `update_block` with this user's cache, plus `ready`,
+/// false only when the mode is `auto` and the executable is not
+/// replaceable; then also `fix`.
 pub fn doctor_block(mode: UpdateMode, unit: Option<(Manager, PathBuf)>) -> Value {
-    let (mut block, blocked) = describe(mode, unit);
+    let (mut block, blocked) = describe(mode, unit, Cache::for_user());
     let ready = !(mode == UpdateMode::Auto && block["replaceable"] == false);
     block["ready"] = json!(ready);
     if !ready {
@@ -49,6 +55,7 @@ pub fn doctor_block(mode: UpdateMode, unit: Option<(Manager, PathBuf)>) -> Value
 fn describe(
     mode: UpdateMode,
     unit: Option<(Manager, PathBuf)>,
+    cache: Option<Cache>,
 ) -> (Value, Option<(PathBuf, Blocker)>) {
     let executable = unit.and_then(|(manager, path)| decoded_executable(manager, &path));
     let target = match &executable {
@@ -56,7 +63,7 @@ fn describe(
         None => platform::installation_path().ok(),
     };
     let installed = target.as_deref().and_then(|p| platform::probe(p, CLI).ok());
-    let file = Cache::for_user().map(|c| c.read()).unwrap_or_default();
+    let file = cache.map(|c| c.read()).unwrap_or_default();
     let latest = file.release.as_ref().map(|r| r.version.clone());
     let available = match (latest.as_deref().map(semver::Version::parse), &installed) {
         (Some(Ok(latest)), Some(installed)) => version::is_newer(&latest, installed),

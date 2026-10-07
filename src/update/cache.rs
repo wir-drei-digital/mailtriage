@@ -139,6 +139,16 @@ impl Cache {
         default_dir().map(Self::new)
     }
 
+    /// The cache of the user whose home is `home`. `XDG_CACHE_HOME`
+    /// counts only when `home` is this process's `HOME`, so a service
+    /// `Context` built for another home (as tests build them) never
+    /// reaches this user's cache.
+    pub fn for_home(home: &Path) -> Option<Self> {
+        let own = std::env::var_os("HOME").is_some_and(|h| Path::new(&h) == home);
+        let xdg = own.then(|| std::env::var_os("XDG_CACHE_HOME")).flatten();
+        cache_dir(cfg!(target_os = "macos"), Some(home), xdg.as_deref()).map(Self::new)
+    }
+
     pub fn dir(&self) -> &Path {
         &self.dir
     }
@@ -287,6 +297,26 @@ mod tests {
             cache_dir(false, None, Some(OsStr::new("/x"))),
             Some(PathBuf::from("/x/mailtriage"))
         );
+    }
+
+    /// Only the home in `HOME` takes `XDG_CACHE_HOME` into account.
+    #[test]
+    fn another_home_has_its_own_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::for_home(dir.path()).unwrap();
+        let expected = if cfg!(target_os = "macos") {
+            dir.path().join("Library/Caches/mailtriage")
+        } else {
+            dir.path().join(".cache/mailtriage")
+        };
+        assert_eq!(cache.dir(), expected);
+        assert!(Cache::for_home(Path::new("")).is_none());
+        if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+            assert_eq!(
+                Cache::for_home(Path::new(&home)).map(|c| c.dir().to_owned()),
+                default_dir()
+            );
+        }
     }
 
     #[test]
