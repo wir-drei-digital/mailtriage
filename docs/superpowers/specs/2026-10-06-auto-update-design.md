@@ -284,6 +284,10 @@ rename) under the cache lock:
   component with `release vX.Y.Z has no PLATFORM archive`.
 - `configs` is keyed by canonical config path, and `installs` by canonical
   installation path. A process only uses its own entries.
+- Keys a binary does not know, at the top level and inside `configs` and `installs`
+  entries, are kept on every rewrite, so binaries of different releases (and the
+  tray) do not drop each other's data. `release` is replaced whole by each successful
+  check.
 - Errors are `null` or `{"at":"…","message":"…"}`.
 - A missing or unreadable file counts as empty. A file that cannot be written stops
   `watch`'s network work (see below).
