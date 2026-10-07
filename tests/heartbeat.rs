@@ -12,6 +12,7 @@ fn each_pass_records_a_heartbeat() {
     assert_eq!(beat["exit_code"], 0);
     assert_eq!(beat["partial"], false);
     assert_eq!(beat["mode"], "dry_run");
+    assert_eq!(beat["version"], env!("CARGO_PKG_VERSION"));
     assert!(chrono::DateTime::parse_from_rfc3339(beat["finished_at"].as_str().unwrap()).is_ok());
 
     h.fake.fail_with_config_changed("version");
@@ -19,6 +20,7 @@ fn each_pass_records_a_heartbeat() {
     let beat = h.service().store.heartbeat("work").unwrap().unwrap();
     assert_eq!(beat["exit_code"], 5);
     assert_eq!(beat["partial"], false);
+    assert_eq!(beat["version"], env!("CARGO_PKG_VERSION"));
 }
 
 #[test]
@@ -42,5 +44,5 @@ fn schema_5_adds_the_heartbeat_table() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 6);
+    assert_eq!(version, 7);
 }

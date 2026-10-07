@@ -181,7 +181,8 @@ The CLI wraps each in `{"schema_version":1,"service":{...}}`.
 - `system_service::status_account(&Service, config, account,
   Option<&Context>)`: `{manager:"launchd"|"systemd"|"none", account, installed,
   loaded, running, pid, last_exit_status, unit_path, log_paths, last_pass,
-  update}`. `last_pass` is `{finished_at, partial, exit_code, mode}` or `null`.
+  update}`. `last_pass` is `{finished_at, partial, exit_code, mode, version}`
+  or `null`.
   `update` is `update::report::update_block(mode, Option<(Manager, unit
   path)>)`: `{mode, executable, installed, latest, available, checked_at,
   last_error, replaceable, reason}`. `doctor` adds `update::report::doctor_block`
@@ -250,6 +251,16 @@ Apply result: `{"schema_version":1,"account":"work","marked":N,"waiting_marked":
 
 Errors: 2 for `--apply` outside `live` (`refile --apply requires filing mode live`), an unknown category, a folder that names no category or retired folder (`unknown folder: not a category or retired folder`) or several (`folder name matches several folders; pass the native name: A, B`), a limit outside 1..=500, an unknown account; 3 when the state database is unavailable; 5 when `mailtriage.json` changed (`reason: config_changed`) or the placements kept changing (`placements changed concurrently; retry`).
 
-Schema v6 (migration 6): `placements.refile_once`, `placements.filed_home_folder`/`filed_home_epoch`/`filed_home_uid` (the occurrence a COPYUID-proven mailtriage move produced; kept only while it is the known home), `filing_intents.consumes_refile`, `folders.drain_until_uid` (NULL: frozen; 0: retained in the last pass; N: draining until UID N). The newer-schema guard is 6.
+Schema v6 (migration 6): `placements.refile_once`, `placements.filed_home_folder`/`filed_home_epoch`/`filed_home_uid` (the occurrence a COPYUID-proven mailtriage move produced; kept only while it is the known home), `filing_intents.consumes_refile`, `folders.drain_until_uid` (NULL: frozen; 0: retained in the last pass; N: draining until UID N). The newer-schema guard is `LATEST` (7 since schema v7, below).
 
 Also: `filing status` gains `refile_marked` and `refile_candidates`; `categories apply` gains `hint` (null with filing `off`); `filing plan` refile moves carry `"reason":"refile"`; events `refile_marked`, `refile_cleared {reason}`, `refile_cancelled {intent_id, reason}`, and `moved` with `"reason":"refile"`.
+
+## Heartbeat version (schema v7)
+
+Migration 7 adds the nullable column `pass_heartbeats.version`.
+`Store::record_heartbeat` writes the running version (`CARGO_PKG_VERSION`) on
+every heartbeat, error heartbeats included, and `Store::heartbeat` returns it
+as `version` (`null` for rows written before v7). The newer-schema guard is
+`LATEST`, the last migration's version. Like every migration of a stable
+release, it is additive, so a process of the previous release keeps
+inserting heartbeats on an open connection after another process migrated.

@@ -73,13 +73,14 @@ fn file_home(s: &mut Store, id: &str) {
     assert!(s.save_placement(&p, None).unwrap());
 }
 
-/// Turns a fresh v6 database back into v5.
+/// Turns a fresh database back into v5.
 const DOWNGRADE_TO_V5: &str = "ALTER TABLE placements DROP COLUMN refile_once;
 ALTER TABLE placements DROP COLUMN filed_home_folder;
 ALTER TABLE placements DROP COLUMN filed_home_epoch;
 ALTER TABLE placements DROP COLUMN filed_home_uid;
 ALTER TABLE filing_intents DROP COLUMN consumes_refile;
 ALTER TABLE folders DROP COLUMN drain_until_uid;
+ALTER TABLE pass_heartbeats DROP COLUMN version;
 PRAGMA user_version=5;";
 
 /// One placement per migration case, with its move intents (ids ascend in
@@ -121,9 +122,9 @@ INSERT INTO filing_intents(account,message_id,kind,folder,epoch,uid,target,targe
  ('work','absent','move','INBOX',1,9,'News',7,12,'applied','t','t');";
 
 #[test]
-fn a_fresh_database_is_at_v6() {
+fn a_fresh_database_is_at_the_latest_schema() {
     let (_d, s) = store();
-    assert_eq!(s.schema_version().unwrap(), 6);
+    assert_eq!(s.schema_version().unwrap(), 7);
 }
 
 #[test]
@@ -136,7 +137,7 @@ fn migration_v6_fills_filed_homes_only_from_a_proven_newest_move() {
     db.execute_batch(V5_ROWS).unwrap();
     drop(db);
     let s = Store::open(&path).unwrap();
-    assert_eq!(s.schema_version().unwrap(), 6);
+    assert_eq!(s.schema_version().unwrap(), 7);
     let filed = |id: &str| {
         let p = s.placement("work", id).unwrap().unwrap();
         (p.filed_home_folder, p.filed_home_epoch, p.filed_home_uid)

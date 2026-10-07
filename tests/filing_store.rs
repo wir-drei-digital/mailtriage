@@ -38,11 +38,11 @@ fn opts<'a>(t: &'a BTreeMap<u64, (String, i64)>) -> StageOptions<'a> {
 const NOW: &str = "2026-10-04T12:00:00+00:00";
 
 #[test]
-fn migration_reaches_v5_and_is_idempotent() {
+fn migration_reaches_the_latest_schema_and_is_idempotent() {
     let d = tempfile::tempdir().unwrap();
     let p = d.path().join("db");
-    assert_eq!(Store::open(&p).unwrap().schema_version().unwrap(), 6);
-    assert_eq!(Store::open(&p).unwrap().schema_version().unwrap(), 6);
+    assert_eq!(Store::open(&p).unwrap().schema_version().unwrap(), 7);
+    assert_eq!(Store::open(&p).unwrap().schema_version().unwrap(), 7);
 }
 
 #[test]
@@ -362,7 +362,7 @@ fn newer_schema_is_rejected() {
     drop(Store::open(&p).unwrap());
     rusqlite::Connection::open(&p)
         .unwrap()
-        .pragma_update(None, "user_version", 7)
+        .pragma_update(None, "user_version", 8)
         .unwrap();
     assert!(Store::open(&p).is_err());
 }
@@ -960,7 +960,7 @@ PRAGMA user_version=2;",
 }
 
 fn assert_v2_mail_kept(s: &Store) {
-    assert_eq!(s.schema_version().unwrap(), 6);
+    assert_eq!(s.schema_version().unwrap(), 7);
     let r = s.record("work", "msg_1").unwrap().unwrap();
     assert_eq!(r.envelope["subject"], "Hello");
     assert_eq!(r.overrides["urgency"], "high");

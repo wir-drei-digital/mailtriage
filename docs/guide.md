@@ -661,7 +661,7 @@ Each command prints `{"schema_version":1,"service":{...}}`.
 `status` reports:
 
 ```json
-{"schema_version":1,"service":{"account":"work","installed":true,"last_exit_status":0,"last_pass":{"exit_code":0,"finished_at":"2026-10-05T08:00:00.000000+00:00","mode":"dry_run","partial":false},"loaded":true,"log_paths":["/Users/alice/.config/mailtriage/logs/work.log","/Users/alice/.config/mailtriage/logs/work.err"],"manager":"launchd","pid":4242,"running":true,"unit_path":"/Users/alice/Library/LaunchAgents/digital.wirdrei.mailtriage.work.plist","update":{"mode":"auto","executable":"/Users/alice/.local/bin/mailtriage","installed":"0.2.0","latest":"0.3.0","available":true,"checked_at":"2026-11-03T08:12:40Z","last_error":null,"replaceable":true,"reason":null}}}
+{"schema_version":1,"service":{"account":"work","installed":true,"last_exit_status":0,"last_pass":{"exit_code":0,"finished_at":"2026-10-05T08:00:00.000000+00:00","mode":"dry_run","partial":false,"version":"0.2.0"},"loaded":true,"log_paths":["/Users/alice/.config/mailtriage/logs/work.log","/Users/alice/.config/mailtriage/logs/work.err"],"manager":"launchd","pid":4242,"running":true,"unit_path":"/Users/alice/Library/LaunchAgents/digital.wirdrei.mailtriage.work.plist","update":{"mode":"auto","executable":"/Users/alice/.local/bin/mailtriage","installed":"0.2.0","latest":"0.3.0","available":true,"checked_at":"2026-11-03T08:12:40Z","last_error":null,"replaceable":true,"reason":null}}}
 ```
 
 | Field | Content |
@@ -673,7 +673,7 @@ Each command prints `{"schema_version":1,"service":{...}}`.
 | `pid` | Its process ID, or `null`. |
 | `last_exit_status` | The last exit status the manager reports, or `null`. |
 | `unit_path`, `log_paths` | The service file and the launchd log files (`log_paths` is empty for systemd). |
-| `last_pass` | The account's latest `sync` or `watch` pass, from the state database: `finished_at`, `partial`, `exit_code` (0, 4 for partial, or the error's exit code) and `mode` (`off`, `dry_run` or `live`). `null` before the first pass. |
+| `last_pass` | The account's latest `sync` or `watch` pass, from the state database: `finished_at`, `partial`, `exit_code` (0, 4 for partial, or the error's exit code), `mode` (`off`, `dry_run` or `live`) and `version`, the mailtriage version that ran it (`null` for passes recorded before schema 7). `null` before the first pass. |
 | `update` | The binary the service runs, and whether it is current: `mode` (the config's `updates`); `executable`, decoded from the service file (`null` without one, and then `installed` and `replaceable` describe the binary that runs `service status`); `installed`, its `--version` (`null` when it does not run); `latest`, `available` and `checked_at` from the last release check (`null`, `false` and `null` before the first one); `last_error`, the last failed install of that binary, else the last failed check (`{at, message}` or `null`); `replaceable` and `reason` (see [Binaries mailtriage does not replace](#binaries-mailtriage-does-not-replace)). It reads the update cache and makes no network call. |
 
 `last_pass` comes from the state database and works without any service. Every `sync` and every `watch` pass that holds the account lock records it. A healthy service shows `running: true` and a `last_pass.finished_at` no older than a few intervals.

@@ -208,3 +208,17 @@ fn doctor_adds_readiness_only_auto_needs() {
     assert_eq!(d["update"]["mode"], "notify");
     assert!(env.server.requests().is_empty());
 }
+
+/// Phase B: the version that ran the last pass.
+#[test]
+fn status_shows_the_version_of_the_last_pass() {
+    let env = Env::new();
+    let (code, _, _) = run(env.command().args(["sync", "--account", "work", "--json"]));
+    assert_eq!(code, Some(0));
+    let (code, v, stderr) =
+        run(env
+            .command()
+            .args(["service", "status", "--account", "work", "--json"]));
+    assert_eq!(code, Some(0), "{v} {stderr}");
+    assert_eq!(v["service"]["last_pass"]["version"], RUNNING);
+}

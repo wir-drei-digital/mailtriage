@@ -75,6 +75,7 @@ The result is `{"schema_version":1,"service":{...}}` (fields in [Service command
   - `finished_at`: when the pass ended. Older than a few intervals means `watch` is not running or is stuck.
   - `exit_code`: 0 is a complete pass; 4 is partial (some folders or messages failed, and `list --view all` shows each message's `error`; or the key was unavailable, which `doctor` shows); any other code is the error's exit code from the table below.
   - `mode`: the filing mode of that pass (`off`, `dry_run` or `live`).
+  - `version`: the mailtriage version that ran that pass. After an update it shows the new version once the service has switched.
 
 ### Updates
 
