@@ -951,7 +951,7 @@ Before you use `live` on a real mailbox, the live provider check in the [filing 
 
 ## Tray
 
-`mailtriage-tray` shows each account's state in the menu bar (macOS) or the system tray (Linux). It starts, stops and installs the background service, opens the service log, and edits categories in a window. It keeps no state of its own: every action is one `mailtriage` command, so you or an agent can do the same in a terminal.
+`mailtriage-tray` shows each account's state in the menu bar (macOS) or the system tray (Linux). It starts, stops and installs the background service, opens the service log, and edits categories in a window. Every action is one documented command (listed below), so you or an agent can do the same in a terminal.
 
 ```text
 mailtriage-tray [--config PATH] [--mailtriage PATH]
@@ -1154,7 +1154,7 @@ Some errors also carry a machine-readable `reason` in the error object, for scri
 | 2 | Invalid input or configuration: an unknown flag value, account, category or message, a missing or invalid `mailtriage.json`. |
 | 3 | Operational failure, reported as `Operation failed; check configuration and dependency availability`, for example when Himalaya cannot run. |
 | 4 | Partial result: a pass, `classify` or `reclassify` with failed messages or scan errors, or whose classification was skipped because the key is unavailable; a pass with filing errors; `watch` at stop after a partial or skipped pass. |
-| 5 | Conflict: the configuration changed during the command, another worker is running, the account binding changed, a cursor expired, or a placement changed concurrently. |
+| 5 | Conflict: the configuration changed during the command, another worker is running, the account binding changed, a cursor expired, a placement changed concurrently, or the categories changed since their export (`categories_changed`). |
 
 `setup` and `service` have their own cases; see [Setup exit codes](#setup-exit-codes) and [Background service](#background-service).
 

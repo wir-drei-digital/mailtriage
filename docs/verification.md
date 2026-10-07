@@ -237,7 +237,7 @@ message content.
 
 The tray's automated tests use a fake `mailtriage`, render the window headless and print the menu as text. A person runs these checks once per desktop before relying on the tray. Record `pass`, `fail` or `differs` (with a note) and the date; attach screenshots to the review, not to the repository.
 
-Setup: build both binaries (`cargo build --release --locked --workspace`), install `mailtriage-tray` next to `mailtriage`, and use a throwaway account with the background service installed.
+Setup: build both binaries as a release does (`cargo build --release --locked -p mailtriage`, then `-p mailtriage-tray`), install `mailtriage-tray` next to `mailtriage`, and use a throwaway account with the background service installed.
 
 | Check | macOS light | macOS dark | Ubuntu GNOME + AppIndicator | KDE Plasma |
 | --- | --- | --- | --- | --- |
@@ -253,6 +253,7 @@ Setup: build both binaries (`cargo build --release --locked --workspace`), insta
 | Edit categories… opens the window; a second click shows "the categories window is already open" as a notice in the menu, and on macOS also brings the window to the front | | | | |
 | The window follows the system's light or dark mode; edit, check, Apply, refile panel; closing with edits asks | | | | |
 | The window's close button and ⌘/Ctrl+W ask about unsaved edits (Cancel keeps the window); after closing, the window's private drafts directory (`$TMPDIR/mailtriage-tray-*`) is gone | | | | |
+| ⌘Q (macOS app menu) in the categories window with unsaved edits asks "Discard changes?" (Cancel keeps the window) | | | n/a | n/a |
 
 | Screen reader check | VoiceOver (macOS) | Orca (Linux) |
 | --- | --- | --- |
