@@ -344,6 +344,8 @@ mod tests {
     fn real_directories_are_created_0755_and_checked() {
         let tmp = tempfile::tempdir().unwrap();
         let root = fs::canonicalize(tmp.path()).unwrap();
+        // Private whatever the umask, so only the directories below matter.
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
         // A sticky, world-writable directory passes above the user's own.
         let sticky = root.join("sticky");
         fs::create_dir(&sticky).unwrap();

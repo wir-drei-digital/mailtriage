@@ -1144,6 +1144,7 @@ mod tests {
             || service_err(5, ErrorKind::ServiceConfigMismatch),
             || service_err(5, ErrorKind::ServiceConfigUnknown),
             || service_err(5, ErrorKind::ServiceBusy),
+            || service_err(3, ErrorKind::UnsafePermissions),
             || service_err(2, ErrorKind::Other),
             || ConfigChanged.into(),
             || anyhow::Error::from(ConfigChanged).context("during a pass"),

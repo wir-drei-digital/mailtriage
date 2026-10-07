@@ -48,6 +48,8 @@ impl Fixture {
     fn new(archive: &[u8], digest: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let root = fs::canonicalize(dir.path()).unwrap();
+        // Private whatever the umask, as the protected path rule wants.
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
         let server = Server::start();
         server.reply(&asset_path("2.2.1"), update_support::Reply::ok(archive));
         let other = "0".repeat(64);
