@@ -250,6 +250,45 @@ fn a_binary_that_is_not_replaceable_is_refused_with_its_fix() {
     assert!(leftovers(&locked.bin).is_empty());
 }
 
+/// Decision 5: a binary that may not be replaced but is already current
+/// is `current` (exit 0); the refusal (exit 3) applies only when there is
+/// something to install. Nothing is downloaded and no lock file is made.
+#[test]
+fn a_binary_that_is_not_replaceable_but_current_is_current() {
+    let brew = Sandbox::at("opt/homebrew/Cellar/mailtriage/0.1.0/bin");
+    // Group-writable, as `unsafe_permissions` reports a root-owned install.
+    let shared = Sandbox::new();
+    let dir = shared.bin.parent().unwrap().to_path_buf();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o775)).unwrap();
+    for (sandbox, reason) in [
+        (&brew, "managed_by_homebrew"),
+        (&shared, "unsafe_permissions"),
+    ] {
+        let server = Server::start();
+        server.publish(RUNNING, &release_archive(b"never used"));
+        let (code, v, stderr) = run(sandbox.command(&server).args(["update", "--json"]));
+        assert_eq!(code, Some(0), "{reason}: {v} {stderr}");
+        assert_eq!(
+            v["update"],
+            json!({"action":"current","from":RUNNING,"to":RUNNING,"path":sandbox.bin,"warnings":[]}),
+            "{reason}"
+        );
+        assert_eq!(server.count(update_support::LIST), 1, "{reason}");
+        assert_eq!(server.count("/download"), 0, "{reason}");
+        assert_eq!(fs::read(&sandbox.bin).unwrap(), original(), "{reason}");
+        let dir = sandbox.bin.parent().unwrap();
+        assert!(!dir.join(".mailtriage-update.lock").exists(), "{reason}");
+        assert!(leftovers(&sandbox.bin).is_empty(), "{reason}");
+        // The binary really is one `update` may not replace.
+        let (code, v, _) = run(sandbox
+            .command(&server)
+            .args(["update", "--check", "--json"]));
+        assert_eq!(code, Some(0), "{reason}: {v}");
+        assert_eq!(v["update"]["install"]["reason"], reason);
+        assert_eq!(v["update"]["available"], false, "{reason}");
+    }
+}
+
 fn mailtriage_is_root() -> bool {
     std::process::Command::new("id")
         .arg("-u")
