@@ -227,7 +227,52 @@ fn the_mail_item_names_the_private_himalaya_for_an_untested_version() {
     assert_eq!(
         mail["fix"],
         format!(
-            "run mailtriage himalaya install, then mailtriage setup --update --himalaya-binary {}",
+            "run mailtriage himalaya install, then mailtriage setup --update --account work --himalaya-binary {}",
+            f.private().display()
+        )
+    );
+}
+
+#[test]
+fn the_fixes_pass_the_config_and_the_account() {
+    let f = Fixture::new();
+    // A config in a directory that does not exist yet.
+    let config = f.root.join("mt/work.json");
+    let config = config.to_str().unwrap();
+    let (out, v) = f.setup(
+        &[
+            "--yes",
+            "--config",
+            config,
+            "--account",
+            "home",
+            "--himalaya-account",
+            "work",
+        ],
+        "",
+    );
+    assert_eq!(out.status.code(), Some(3), "{v}");
+    let message = v["error"]["message"].as_str().unwrap();
+    assert!(
+        message.ends_with(&format!(
+            "run mailtriage himalaya install, then mailtriage setup --update --config {config} --account home --himalaya-account work --himalaya-binary {}, or pass --himalaya-install",
+            f.private().display()
+        )),
+        "{message}"
+    );
+    write_exe(&f.root.join("bin/himalaya"), &fake("flip"));
+    let (out, v) = f.setup(
+        &["--yes", "--config", config, "--himalaya-account", "work"],
+        "",
+    );
+    assert_eq!(out.status.code(), Some(0), "{v} {}", stderr(&out));
+    let items = v["setup"]["doctor"]["items"].as_array().unwrap();
+    let mail = items.iter().find(|i| i["check"] == "mail").unwrap();
+    assert_eq!(mail["ready"], false);
+    assert_eq!(
+        mail["fix"],
+        format!(
+            "run mailtriage himalaya install, then mailtriage setup --update --config {config} --account work --himalaya-binary {}",
             f.private().display()
         )
     );

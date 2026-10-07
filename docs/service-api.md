@@ -105,7 +105,14 @@ stdout:
   state database cannot be opened. `error` and `fix` appear only when `ready`
   is false. A `key` fix for a command key names the current store:
   `mailtriage setup --update --account NAME --key-store pass` (`command` for a
-  command that is no store's read command).
+  command that is no store's read command). A `mail` fix for an untested
+  Himalaya (`transport.tested` false) is `run mailtriage himalaya install, then
+  mailtriage setup --update --account NAME --himalaya-binary PATH`
+  (`setup::himalaya_install_fix`), with the path `himalaya install` would
+  print, or `<the path it prints>` without a data directory. Step 2's failure
+  for a missing or untested Himalaya ends with the same fix, naming
+  `--account` and `--himalaya-account` when known then, and `, or pass
+  --himalaya-install`.
 - `service`: `null` when skipped, or when the `state` item is not ready (setup
   then installs nothing), else the `service install` object below.
 - Printed `mailtriage` commands (fixes, next steps, the categories hint) pass
