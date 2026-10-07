@@ -86,6 +86,15 @@ impl Installed {
 /// `mailtriage himalaya install [--version X.Y.Z]` with this user's data
 /// directory and the release endpoint (the loopback override in tests).
 pub fn run(version: Option<&str>) -> Result<Value> {
+    Ok(install_here(version)?.json())
+}
+
+/// The newest tested version, installed as `run` does; for setup.
+pub fn install_default() -> Result<Installed> {
+    install_here(None)
+}
+
+fn install_here(version: Option<&str>) -> Result<Installed> {
     let data = default_data_dir().ok_or_else(|| {
         err(
             3,
@@ -94,7 +103,7 @@ pub fn run(version: Option<&str>) -> Result<Value> {
     })?;
     let net = Net::new(Endpoint::from_env())
         .map_err(|e| err(3, format!("cannot start an HTTPS client: {e}")))?;
-    Ok(install(version, &net, &data)?.json())
+    install(version, &net, &data)
 }
 
 /// Installs `version` (default: the newest tested one) into `data`. Errors

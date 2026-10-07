@@ -131,6 +131,10 @@ struct SetupArg {
     interactive: bool,
     #[arg(long)]
     himalaya_binary: Option<PathBuf>,
+    /// Install a tested Himalaya for mailtriage when the one found is
+    /// missing or untested, without asking.
+    #[arg(long)]
+    himalaya_install: bool,
     #[arg(long)]
     himalaya_config: Option<PathBuf>,
     #[arg(long)]
@@ -183,6 +187,7 @@ impl SetupArg {
             update: self.update,
             terminal,
             himalaya_binary: self.himalaya_binary.clone(),
+            himalaya_install: self.himalaya_install,
             himalaya_config: self.himalaya_config.clone(),
             himalaya_account: self.himalaya_account.clone(),
             account: self.account.clone(),

@@ -3,12 +3,15 @@
 //! and its state directory: it makes no IMAP changes, never handles the API
 //! key and never selects `live` filing.
 use crate::{
-    config,
+    config, distribution,
     domain::{
         AccountConfig, AppConfig, Category, EngineConfig, FilingConfig, FilingMode, HimalayaConfig,
         ProviderConfig, UpdateMode,
     },
-    engine::{self, versions},
+    engine::{
+        self,
+        versions::{self, Tested},
+    },
     filing, process,
     prompt::Prompter,
     provider,
@@ -48,6 +51,9 @@ pub struct SetupArgs {
     /// Stdin is a terminal, so a key tool can prompt even with `--yes`.
     pub terminal: bool,
     pub himalaya_binary: Option<PathBuf>,
+    /// `--himalaya-install`: answer yes to installing a private Himalaya
+    /// when the one found is missing or untested, also without prompts.
+    pub himalaya_install: bool,
     pub himalaya_config: Option<PathBuf>,
     pub himalaya_account: Option<String>,
     pub account: Option<String>,
@@ -431,41 +437,23 @@ fn himalaya_step(
     p: &mut Prompter,
     stored: Option<&HimalayaConfig>,
 ) -> Result<HimalayaChoice> {
-    let binary = match (&args.himalaya_binary, stored) {
-        (Some(binary), _) => absolute(binary, "--himalaya-binary")?,
-        (None, Some(stored)) => stored.binary.clone(),
-        (None, None) => process::find_on_path("himalaya").ok_or_else(|| {
-            err(
-                3,
-                format!(
-                    "step 2 (Himalaya): himalaya is not on PATH; install a tested Himalaya ({}) or pass --himalaya-binary",
-                    versions::listed()
-                ),
-            )
-        })?,
+    let found = match (&args.himalaya_binary, stored) {
+        (Some(binary), _) => Some(absolute(binary, "--himalaya-binary")?),
+        (None, Some(stored)) => Some(stored.binary.clone()),
+        (None, None) => process::find_on_path("himalaya"),
     };
-    let (line, tested) = match run_himalaya(&binary, &[OsStr::new("--version")]) {
-        Ok(out) => versions::check_version_output(&out).map_err(|untested| {
-            err(
-                3,
-                format!(
-                    "step 2 (Himalaya): {}: {untested}; install a tested Himalaya or pass --himalaya-binary",
-                    binary.display()
-                ),
-            )
-        })?,
-        Err(_) => {
-            return Err(err(
-                3,
-                format!(
-                    "step 2 (Himalaya): {} does not run; install a tested Himalaya ({}) or pass --himalaya-binary",
-                    binary.display(),
-                    versions::listed()
-                ),
-            ))
-        }
+    let checked = match &found {
+        Some(binary) => himalaya_version(binary).map(|version| (binary.clone(), version)),
+        None => Err("himalaya is not on PATH".to_owned()),
+    };
+    let (binary, (line, tested)) = match checked {
+        Ok(found) => found,
+        Err(why) => private_himalaya(args, p, &why)?,
     };
     p.say(&format!("Using {line} at {}.", binary.display()));
+    if in_homebrew_keg(&binary) {
+        p.say(BREW_PIN_NOTE);
+    }
     let explicit = match (&args.himalaya_config, stored) {
         (Some(toml), _) => {
             let toml = absolute(toml, "--himalaya-config")?;
@@ -564,6 +552,80 @@ fn himalaya_step(
             email,
         });
     }
+}
+
+/// Printed once when the chosen Himalaya is in a Homebrew keg.
+pub const BREW_PIN_NOTE: &str = "Homebrew may upgrade Himalaya to a version mailtriage has not tested; \"brew pin himalaya\" holds it, or run mailtriage himalaya install for a private copy.";
+
+/// The first line of `binary --version` and its tested entry, or why the
+/// binary cannot be used.
+fn himalaya_version(binary: &Path) -> Result<(String, &'static Tested), String> {
+    match run_himalaya(binary, &[OsStr::new("--version")]) {
+        Ok(out) => {
+            versions::check_version_output(&out).map_err(|u| format!("{}: {u}", binary.display()))
+        }
+        Err(_) => Err(format!("{} does not run", binary.display())),
+    }
+}
+
+/// Step 2 for a Himalaya that is missing or untested (`why`): offers the
+/// private copy (default yes); `--himalaya-install` answers yes, also
+/// without prompts. Otherwise the step fails with the fix.
+fn private_himalaya(
+    args: &SetupArgs,
+    p: &mut Prompter,
+    why: &str,
+) -> Result<(PathBuf, (String, &'static Tested))> {
+    let newest = &versions::newest().version;
+    let wanted = args.himalaya_install
+        || (p.enabled() && {
+            p.say(&format!("{why}."));
+            p.confirm(&format!("Install Himalaya {newest} for mailtriage?"), true)?
+        });
+    if !wanted {
+        return Err(err(
+            3,
+            format!(
+                "step 2 (Himalaya): {why}; {}, or pass --himalaya-install",
+                himalaya_install_fix()
+            ),
+        ));
+    }
+    p.say(&format!("Installing Himalaya {newest} for mailtriage."));
+    let installed = distribution::himalaya::install_default().map_err(|e| {
+        err(
+            service::exit_code(&e),
+            format!(
+                "step 2 (Himalaya): could not install Himalaya {newest}: {}",
+                error_text(&e)
+            ),
+        )
+    })?;
+    p.say(&format!(
+        "Installed Himalaya {} at {}.",
+        installed.version,
+        installed.path.display()
+    ));
+    let version = himalaya_version(&installed.path)
+        .map_err(|why| err(3, format!("step 2 (Himalaya): {why}")))?;
+    Ok((installed.path, version))
+}
+
+/// The fix for a missing or untested Himalaya: the private copy, then setup
+/// pointed at the path `himalaya install` prints.
+pub fn himalaya_install_fix() -> String {
+    let path = distribution::himalaya::default_data_dir()
+        .map(|data| distribution::himalaya::binary_path(&data, &versions::newest().version));
+    let path = path.map_or_else(|| "<the path it prints>".to_owned(), |p| shell_line(&[p]));
+    format!(
+        "run mailtriage himalaya install, then mailtriage setup --update --himalaya-binary {path}"
+    )
+}
+
+/// Whether `binary` is in a Homebrew keg: its canonical path contains
+/// `/Cellar/himalaya/`.
+fn in_homebrew_keg(binary: &Path) -> bool {
+    fs::canonicalize(binary).is_ok_and(|p| p.to_string_lossy().contains("/Cellar/himalaya/"))
 }
 
 /// Himalaya v2.1.0's config search order without `--config` (verified on
@@ -1295,23 +1357,25 @@ fn doctor_step(
                 key["key_error"].as_str().map(str::to_owned),
                 key_fix,
             ));
-            items.push(check_item(
-                "mail",
-                report["transport"]["ready"] == true,
-                None,
-                format!(
-                    "run `{}`",
-                    shell_line(&[
-                        engine.binary.as_os_str(),
-                        OsStr::new("--config"),
-                        engine.config.as_os_str(),
-                        OsStr::new("--account"),
-                        OsStr::new(&engine.account),
-                        OsStr::new("account"),
-                        OsStr::new("check"),
-                    ])
-                ),
-            ));
+            let transport = &report["transport"];
+            let (error, fix) = if transport["tested"] == false {
+                (
+                    transport["error"].as_str().map(str::to_owned),
+                    himalaya_install_fix(),
+                )
+            } else {
+                let check = shell_line(&[
+                    engine.binary.as_os_str(),
+                    OsStr::new("--config"),
+                    engine.config.as_os_str(),
+                    OsStr::new("--account"),
+                    OsStr::new(&engine.account),
+                    OsStr::new("account"),
+                    OsStr::new("check"),
+                ]);
+                (None, format!("run `{check}`"))
+            };
+            items.push(check_item("mail", transport["ready"] == true, error, fix));
             if let Some(filing) = report.get("filing") {
                 let problems = filing["problems"].as_array().map_or(0, Vec::len);
                 items.push(check_item(

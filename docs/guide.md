@@ -91,7 +91,7 @@ mailtriage setup
 | Step | What happens | Flags |
 | --- | --- | --- |
 | 1. Config | If the config exists: update an account, add an account, or abort. Other accounts are never changed. | `--config`, `--update`, `--account` |
-| 2. Himalaya | Finds the Himalaya binary, its config file and the account, and runs `himalaya account check`. Can create an account with `himalaya configure`. | `--himalaya-binary`, `--himalaya-config`, `--himalaya-account` |
+| 2. Himalaya | Finds the Himalaya binary, its config file and the account, and runs `himalaya account check`. Can install a tested Himalaya for mailtriage, and create an account with `himalaya configure`. | `--himalaya-binary`, `--himalaya-install`, `--himalaya-config`, `--himalaya-account` |
 | 3. Account | The account name in mailtriage, your address, time zone and a one-line brief. | `--account`, `--identity`, `--timezone`, `--brief` |
 | 4. Folders | Lists the server's folders; you choose which to watch. | `--mailbox` |
 | 5. Classifier | OpenRouter or the offline `fake` provider, the model, and where the key lives. | `--provider`, `--model`, `--key-store`, `--key-command`, `--key-env`, `--key-stored` |
@@ -110,7 +110,9 @@ mailtriage setup
 
 **Step 2, Himalaya.**
 
-- Binary: `--himalaya-binary`, else the stored binary of the account being updated, else the first `himalaya` on `PATH`. Setup stores it as an absolute path. Its `--version` must report a [tested version](#himalaya-versions) with `+imap`; otherwise setup exits 3. Setup writes the version it found into `expected_version`.
+- Binary: `--himalaya-binary`, else the stored binary of the account being updated, else the first `himalaya` on `PATH`. Setup stores it as an absolute path. Its `--version` must report a [tested version](#himalaya-versions) with `+imap`. Setup writes the version it found into `expected_version`.
+- When that Himalaya is missing or untested, setup says why and asks `Install Himalaya 2.2.1 for mailtriage? [Y/n]` (default yes). It then installs a [private Himalaya](#a-private-himalaya) and uses it. Without prompts, `--himalaya-install` answers yes; otherwise setup exits 3 with the fix `run mailtriage himalaya install, then mailtriage setup --update --himalaya-binary PATH`. With a tested Himalaya found, `--himalaya-install` changes nothing.
+- When the chosen Himalaya is in a Homebrew keg (its path with symlinks resolved contains `/Cellar/himalaya/`), setup prints once: `Homebrew may upgrade Himalaya to a version mailtriage has not tested; "brew pin himalaya" holds it, or run mailtriage himalaya install for a private copy.`
 - Config file: `--himalaya-config`, else the stored file of the account being updated, else `HIMALAYA_CONFIG`, else Himalaya's default. `HIMALAYA_CONFIG` must name one file; several `:`-separated files exit 2.
 - Himalaya's default is the first existing file of: `~/Library/Application Support/himalaya/config.toml` on macOS, or `$XDG_CONFIG_HOME/himalaya/config.toml` on Linux when `XDG_CONFIG_HOME` is an absolute path; then `~/.config/himalaya/config.toml`; then `~/.himalayarc`.
 - Account: setup offers only accounts with an IMAP backend. The default is the account being updated, else Himalaya's default account.
@@ -149,7 +151,7 @@ mailtriage setup
 
 **Step 8, write.** `--updates auto|notify|off` sets [`updates`](#updates), with no prompt: a new config gets `auto`, and an existing one keeps its value unless `--updates` is given. Setup validates the whole config and writes it atomically with mode 0600, under the configuration lock (`mailtriage.lock`). When another command holds that lock, setup exits 5 (reason `config_busy`); when the file changed since step 1 read it, setup exits 5 (reason `config_changed`). Either way it writes nothing; run it again. The state directory is created with mode 0700. If the result is invalid, setup exits 2 and writes nothing. If the state directory already holds a binding for the account and the new answers would change it, setup exits 5 and writes nothing; see [Updating an account](#updating-an-account).
 
-**Step 9, check.** Setup runs `doctor` for the account. It prints each item (`provider`, `key`, `mail`, `filing` when filing is on, and `update` when `updates` is `auto` but the binary may not be replaced) as `ok`, or as `not ready` with the one command that fixes it. The `update` item does not make `doctor.ready` false, as in `doctor` itself. If `doctor` itself fails, for example because the state database cannot be opened, setup reports a single not-ready `state` item instead. Setup exits 0 even when an item is not ready.
+**Step 9, check.** Setup runs `doctor` for the account. It prints each item (`provider`, `key`, `mail`, `filing` when filing is on, and `update` when `updates` is `auto` but the binary may not be replaced) as `ok`, or as `not ready` with the one command that fixes it. The `update` item does not make `doctor.ready` false, as in `doctor` itself. If `doctor` itself fails, for example because the state database cannot be opened, setup reports a single not-ready `state` item instead. For an untested Himalaya, the `mail` item's fix is `run mailtriage himalaya install, then mailtriage setup --update --himalaya-binary PATH`, with the path that command installs to. Setup exits 0 even when an item is not ready.
 
 **Step 10, service.** With prompts on macOS or Linux, setup asks whether to run `watch` in the background (default yes); on other platforms it skips this step. When the key comes from an environment variable, the default is no, because the service does not inherit the variable; setup says so and prints the command that moves the key into a key store. Without prompts, `--service install` installs it and `--service skip` (the default) does not. `--interval-seconds` (1 to 86400, default 60) and `--limit` (1 to 500, default 100) are passed to `watch`. When step 9 reported a not-ready `state` item, setup installs no service, since every pass would fail; it prints the `service install` command to run once that is fixed. See [Background service](#background-service).
 
@@ -251,8 +253,8 @@ Progress and the check summary go to stderr. stdout carries one result object, o
 | Code | Cases |
 | --- | --- |
 | 0 | Setup finished. `doctor` items that are not ready are listed in the result. |
-| 2 | Invalid input; a required flag missing without prompts; an invalid account name; conflicting key flags, or key flags with `--provider fake`; a key tool not on `PATH`; a tool store without a terminal; setup aborted; the service on an unsupported platform. |
-| 3 | Himalaya missing or not a tested version with IMAP; `account check` failed; the folders could not be listed; a key tool or key command failed; the config could not be written; `launchctl` or `systemctl` failed. |
+| 2 | Invalid input; a required flag missing without prompts; an invalid account name; conflicting key flags, or key flags with `--provider fake`; a key tool not on `PATH`; a tool store without a terminal; setup aborted; the service on an unsupported platform; the private Himalaya on a platform for which pimalaya has no build mailtriage can use. |
+| 3 | Himalaya missing or not a tested version with IMAP, and the private Himalaya declined or, without prompts, `--himalaya-install` not given; the private Himalaya could not be installed (except on a platform pimalaya has no build for, exit 2); `account check` failed; the folders could not be listed; a key tool or key command failed; the config could not be written; `launchctl` or `systemctl` failed. |
 | 5 | The config exists and `--update` was not given (without prompts); the account is bound to another mailbox (its identity, Himalaya account or IMAP server would change); a service file exists that mailtriage did not write; another command is editing the config (`config_busy`), or it changed since setup read it (`config_changed`). |
 
 Every error except the two abort messages (`setup aborted; nothing was changed`, `setup aborted: input ended`) starts with `step N (name): ` and names the flag or command that fixes it, for example `step 2 (Himalaya): --himalaya-account is required without prompts`. Step 10 errors (`step 10 (service): `) happen after the config is written; they name the `mailtriage service install` command, with `--config` and this run's `--interval-seconds` and `--limit`, to run once the cause is fixed. On a platform without launchd or systemd the fix is to drop `--service install` instead.
@@ -1004,13 +1006,17 @@ installs a tested Himalaya release for mailtriage alone; it never touches anothe
 - It downloads that version's `himalaya.PLATFORM.tgz` from pimalaya's GitHub releases over HTTPS, with the same URL rules as `mailtriage update`, and checks it against the SHA-256 compiled into mailtriage. It unpacks only the `himalaya` executable into a new file, checks that it runs and prints that version with `+imap`, and moves it into place with a rename.
 - The directories are created with mode 0755. Before anything is written there, the version's directory and each of its parents must be safe: no symlink, owned by you or root, and not writable by group or others; a world-writable directory with the sticky bit, such as `/tmp`, is fine above one of yours. Otherwise it exits 3 with the reason `unsafe_permissions`, the directory and the fix, such as `chmod go-w DIR`.
 - Run again, it reports `current` and downloads nothing.
-- Point an account at it with `mailtriage setup --update --himalaya-binary PATH`, using the path it printed.
+- Point an account at it with `mailtriage setup --update --himalaya-binary PATH`, using the path it printed. Setup offers this itself when it finds no tested Himalaya (step 2).
 
 ```json
 {"schema_version":1,"himalaya":{"action":"installed","version":"2.2.1","path":"/Users/alice/.local/share/mailtriage/himalaya/2.2.1/himalaya"}}
 ```
 
 `action` is `installed` or `current`. Exit codes: 0; 2 for a version that is not tested, or a platform for which pimalaya has no build mailtriage can use; 3 for a network error, a checksum mismatch, a bad archive, a binary that does not run, an unsafe directory, or another `himalaya install` that held its directory's lock for 60 seconds.
+
+### Homebrew's Himalaya
+
+`brew upgrade` may move Homebrew's `himalaya` to a version mailtriage has not tested; mailtriage then refuses it until a mailtriage release tests that version. Either hold it with `brew pin himalaya` (and `brew unpin himalaya` once mailtriage tests the newer one), or give mailtriage its own copy with `mailtriage himalaya install` and `mailtriage setup --update --himalaya-binary PATH`. Setup says so when the Himalaya it uses is Homebrew's.
 
 ## Daily use
 
