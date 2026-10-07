@@ -484,8 +484,9 @@ update has committed.
   prerelease, never installed automatically) to try a build on one machine first, and
   drops the note about the repository being private.
 - **Release workflow changes.**
-  - Publishing uses one concurrency group across all tags (queued, never cancelled),
-    so two releases never publish at once.
+  - Publishing uses one concurrency group across tags, so two releases never publish
+    at once. A newer pending run can cancel a waiting one, which must then be re-run;
+    `releases.md` says so.
   - A stable release is marked Latest only when it is higher than every published
     stable release. The updater does not depend on this, but people browsing GitHub
     do.
