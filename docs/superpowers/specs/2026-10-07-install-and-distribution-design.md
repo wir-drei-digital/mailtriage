@@ -1,7 +1,7 @@
 # Installing mailtriage: install script, Homebrew tap, tested Himalaya versions
 
 Date: 2026-10-07
-Status: Design approved in conversation; written spec revised after Codex review round 2.
+Status: Design approved in conversation; written spec revised after three Codex review rounds.
 Builds on: [automatic updates](2026-10-06-auto-update-design.md) and [tray app](2026-10-06-tray-design.md).
 
 ## Goal
@@ -111,15 +111,31 @@ mailtriage himalaya install [--version X.Y.Z] [--json]
   updater's bounded archive reader, stages it exclusively, probes `--version`
   (listed version, `+imap`), then renames it into place.
 - The directory chain `<data>/mailtriage/himalaya/<version>/` is created with mode
-  0755 regardless of the umask. Before staging, every directory from
-  `<data>/mailtriage` down must be owned by the user, not group- or world-writable,
-  and not a symlink; otherwise exit 3 with `unsafe_permissions` and the directory.
-  The staged file's identity is revalidated before the rename, as in the updater.
+  0755 regardless of the umask. Before anything is staged or run, the **protected
+  path** rule (below) must hold for that directory; otherwise exit 3 with
+  `unsafe_permissions` and the offending directory. The staged file's identity is
+  revalidated before the rename, as in the updater.
 - Idempotent: an existing, matching copy is reported as `current`.
 - Output: `{"schema_version":1,"himalaya":{"action":"installed"|"current","version","path"}}`.
   Exit codes: 0; 2 invalid or unlisted version, unsupported platform; 3 network,
   checksum, archive or probe failure.
 - It never touches any other `himalaya`.
+
+### Protected path rule
+
+A directory passes when it and every ancestor up to `/`, walked without following
+symlinks, is:
+
+- not a symlink;
+- owned by the user or by root;
+- not writable by group or others.
+
+The one exception is a world-writable directory with the sticky bit set, such as
+`/tmp`: it passes when the next directory down the path is owned by the user.
+
+`mailtriage himalaya install` applies the rule to its version directory, and
+`self install` to `DIR`. Both refuse an unsafe path before staging or running
+anything there. The updater's existing replaceability check is unchanged.
 
 ### Role names
 
@@ -279,7 +295,9 @@ mailtriage self install --dir DIR [--tray-file PATH] [--no-setup] [--yes] [--jso
    missing part of the path included, are created with mode 0755 regardless of the
    umask. The canonical directory must pass the updater's checks: owned by the user,
    not group- or world-writable. Otherwise exit 3 with `unsafe_permissions`, the
-   directory, and a remedy (`chmod go-w DIR`, or another `--dir`).
+   directory, and a remedy (`chmod go-w DIR`, or another `--dir`). The
+   [protected path rule](#protected-path-rule) applies to `DIR` and its ancestors as
+   well.
 2. **No downgrade.** If `DIR/mailtriage` exists and prints a version newer than
    this binary's, exit 2:
    `DIR/mailtriage is X, newer than Y; to go back, follow the guide's rollback steps`.
@@ -385,8 +403,15 @@ cache directory, which is mode 0700. The tray creates the socket after taking th
 lock; any old socket file is removed first, since the lock proves no other tray owns
 it.
 
-- `mailtriage-tray quit [--json]` connects, sends `quit`, and waits up to 5 s for the
-  tray to answer and release `tray.lock`.
+- `mailtriage-tray quit [--json]` connects and sends `quit <path>`, where `<path>`
+  is its own canonical executable path.
+  - The tray compares that path with its own canonical executable path, taking a
+    Homebrew keg's `opt` launch path into account.
+  - It quits only when they match, answers, and releases `tray.lock`; `quit` waits up
+    to 5 s for that.
+  - On a mismatch it answers `other_installation` and keeps running. `quit` then
+    reports `other_installation`, which is not a failure, and `self uninstall`
+    continues.
 - No PID is ever signalled, so a reused PID, a categories window included, can
   never be hit.
 - When nothing listens and `tray.lock` is free, the result is `not_running`.
@@ -553,7 +578,12 @@ own concurrency group `homebrew-tap` (queued, never cancelled):
   - an update holding the installation lock delays uninstall (exit 5 after the
     wait), and the lock file survives.
 - **`mailtriage-tray quit`:** a running tray stops; a stale socket file with a free
-  lock gives `not_running`; a categories window is never affected.
+  lock gives `not_running`; a categories window is never affected; with two
+  installations sharing one cache, quitting from installation A leaves B's running
+  tray alone (`other_installation`).
+- **Protected path rule:** a group-writable ancestor, a symlinked ancestor, a
+  shared-writable data root (rejected), and `/tmp`-style sticky directories with a
+  user-owned child (accepted).
 - **Brew paths,** with a fake `<prefix>/Cellar/mailtriage/1.2.3/bin/` and `opt` link:
   - `service install` and autostart record the `opt` path;
   - the updater still reports `managed_by_homebrew`;
