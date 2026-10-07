@@ -2,7 +2,7 @@
 //! executable, what it prints for `--version`, the tray next to it, and
 //! what the cache says. Reads only; no network.
 use super::{
-    cache::{self, Cache},
+    cache::{self, Cache, CacheFile},
     installed_tray,
     platform::{self, Blocker, FileIdentity},
     release::{self, CachedRelease},
@@ -78,12 +78,12 @@ fn describe(
         .as_deref()
         .and_then(|p| file.installs.get(&cache::install_key(p)))
         .and_then(|e| e.last_error.clone())
-        .or(file.last_check_error);
+        .or_else(|| file.last_check_error.clone());
     let blocker = target
         .as_deref()
         .and_then(|p| platform::blocker(p, release::platform()));
     let tray = target.as_deref().and_then(installed_tray).map(|tray| {
-        let installed = probe_tray(&tray);
+        let installed = tray_version(&tray, &file);
         tray_block(&tray, installed.as_ref(), file.release.as_ref())
     });
     let mut block = json!({
@@ -103,14 +103,28 @@ fn describe(
     (block, target.zip(blocker))
 }
 
-/// The tray's `--version`, run once per tray file and command (process):
-/// `service status` describes every account, and their services usually
-/// share one executable and so one tray. A file with another identity is
-/// probed again.
-fn probe_tray(path: &Path) -> Option<Version> {
+/// The tray's installed version, read as `watch` reads it: the version
+/// its `installs` entry recorded for this very file (same identity), else
+/// its `--version` (`probe_tray`). Nothing is written: status and doctor
+/// only read. A running tray asks `service status` every 15 s; this keeps
+/// that from starting the tray's binary each time.
+fn tray_version(path: &Path, file: &CacheFile) -> Option<Version> {
+    let identity = FileIdentity::read(path).ok()?;
+    file.installs
+        .get(&cache::install_key(path))
+        .filter(|entry| entry.identity == Some(identity))
+        .and_then(|entry| entry.version.as_deref())
+        .and_then(|v| Version::parse(v).ok())
+        .or_else(|| probe_tray(path, identity))
+}
+
+/// The tray's `--version`, run once per tray file identity and command
+/// (process): `service status` describes every account, and their
+/// services usually share one executable and so one tray. A file with
+/// another identity (a replaced tray) is probed again.
+fn probe_tray(path: &Path, identity: FileIdentity) -> Option<Version> {
     type Seen = Vec<(PathBuf, FileIdentity, Option<Version>)>;
     static SEEN: Mutex<Seen> = Mutex::new(Vec::new());
-    let identity = FileIdentity::read(path).ok()?;
     let mut seen = SEEN.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some((_, _, found)) = seen.iter().find(|(p, i, _)| p == path && *i == identity) {
         return found.clone();

@@ -4,7 +4,10 @@
 mod common;
 mod update_support;
 use common::{write_tool, LAUNCHCTL, SYSTEMCTL};
-use mailtriage::system_service::{self, Manager, Unit};
+use mailtriage::{
+    system_service::{self, Manager, Unit},
+    update::platform::FileIdentity,
+};
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -296,6 +299,50 @@ fn every_accounts_status_probes_a_shared_tray_once() {
     }
     let probes = fs::read_to_string(exe.parent().unwrap().join("probes")).unwrap();
     assert_eq!(probes.lines().count(), 1, "{probes}");
+}
+
+/// A running tray asks `service status` every 15 s, so the tray's version
+/// comes from its `installs` entry when that was recorded for this very
+/// file (same identity), as `watch` reads it, and `--version` runs only
+/// otherwise: for another file at the path, or while the version is
+/// unknown. `doctor` shares the block.
+#[test]
+fn status_reuses_the_tray_version_recorded_for_the_same_file() {
+    let env = Env::new();
+    let exe = env.executable("svc/bin", "0.0.1");
+    env.service_file(&exe);
+    let tray = tray_next_to(&exe, "0.0.1");
+    let probes = exe.parent().unwrap().join("probes");
+    let count = || {
+        fs::read_to_string(&probes)
+            .map(|p| p.lines().count())
+            .unwrap_or(0)
+    };
+    let release = json!({"version":"9.9.9","release_url":"u","published_at":null,
+                         "archives":{"mailtriage":null,"mailtriage-tray":null},"sums":null});
+    let cache = |entry: Value| {
+        json!({"schema_version": 1, "release": release, "checked_at": "2026-11-03T07:00:00Z",
+               "installs": {tray.to_str().unwrap(): entry}})
+    };
+    let identity = FileIdentity::read(&tray).unwrap();
+    env.write_cache(&cache(json!({"version": "0.0.7", "identity": identity})));
+    assert_eq!(
+        env.status()["tray"],
+        json!({"path": tray, "installed": "0.0.7", "available": true})
+    );
+    assert_eq!(env.doctor()["update"]["tray"]["installed"], "0.0.7");
+    assert_eq!(count(), 0, "a recorded version of the same file is reused");
+
+    // Another file at the path (its size differs): probed again.
+    tray_next_to(&exe, "0.0.12");
+    assert_eq!(env.status()["tray"]["installed"], "0.0.12");
+    assert_eq!(count(), 1);
+    // The same file, but no version recorded for it: probed again too.
+    let identity = FileIdentity::read(&tray).unwrap();
+    env.write_cache(&cache(json!({"version": null, "identity": identity})));
+    assert_eq!(env.status()["tray"]["installed"], "0.0.12");
+    assert_eq!(count(), 2);
+    assert!(env.server.requests().is_empty());
 }
 
 /// Phase B: the version that ran the last pass.

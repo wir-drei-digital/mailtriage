@@ -187,8 +187,11 @@ The CLI wraps each in `{"schema_version":1,"service":{...}}`.
   path)>, Option<Cache>)`: `{mode, executable, installed, latest, available,
   checked_at, last_error, replaceable, reason}`, plus `tray: {path, installed,
   available}` (`update::report::tray_block`) when a regular file
-  `mailtriage-tray` sits next to the executable it describes. Each tray file
-  is probed once per process. `status_account` passes the cache of the
+  `mailtriage-tray` sits next to the executable it describes. The tray's
+  `installed` is the version its `installs` entry recorded for the same file
+  (same identity), as `watch` reads it; otherwise `--version` runs, once per
+  file identity per process (a replaced file is probed again). Nothing is
+  written to the cache. `status_account` passes the cache of the
   context's home (`Cache::for_home`: `XDG_CACHE_HOME` counts only for the home
   in `HOME`), so a test `Context` never reads this user's cache; without a
   context it uses `Cache::for_user()`. `doctor` adds
