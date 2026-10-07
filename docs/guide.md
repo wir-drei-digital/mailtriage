@@ -729,9 +729,11 @@ Set it with `mailtriage setup --update --updates notify`, or edit the file. The 
 
 ### `mailtriage update`
 
+`--check` reports and changes nothing but the cache; without it, `update` installs the newest stable release:
+
 ```sh
-mailtriage update --check --json   # report; changes nothing but the cache
-mailtriage update --json           # install the newest stable release
+mailtriage update --check --json
+mailtriage update --json
 ```
 
 Both read the release list of `wir-drei-digital/mailtriage` from the GitHub API, every page, without a token. The candidate is the highest release whose tag is exactly `vX.Y.Z`: drafts, prereleases such as `v0.4.0-rc.1` and other tags are ignored, and GitHub's "Latest" flag is not used. Versions compare by SemVer, so `0.3.0-rc.1 < 0.3.0 < 0.3.1`. A release is installed only when it is newer than the installed binary. mailtriage never downgrades, and a release candidate you installed by hand stays until a higher stable release appears.
