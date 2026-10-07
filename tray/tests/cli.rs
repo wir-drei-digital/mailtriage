@@ -121,6 +121,57 @@ fn a_cli_without_the_new_fields_asks_for_an_update() {
         .starts_with("missing field /services/0/config_matches"));
 }
 
+/// mailtriage's own parser error with `--json`, as `src/cli.rs` prints it:
+/// clap's text (it starts with `error: `) as the message, code and exit 2.
+/// This is what the CLI of 34b4213 answers to `service status --json`.
+const OLD_STATUS_USAGE: &str = "error: the following required arguments were not provided:\n  --account <ACCOUNT>\n\nUsage: mailtriage service status --account <ACCOUNT> --json\n\nFor more information, try '--help'.";
+
+/// An older CLI that rejects the tray's arguments asks for an update, with
+/// its parser's text in the details; a code-2 error of mailtriage's own
+/// (a bad value, an unknown account) keeps its message.
+#[test]
+fn a_cli_that_rejects_the_arguments_asks_for_an_update() {
+    let fake = FakeCli::new();
+    fake.fail("service-status", 2, OLD_STATUS_USAGE, None);
+    let failure = cli::status(&cli(&fake).run(&Request::Status)).unwrap_err();
+    assert_eq!(failure.message, cli::OUTDATED);
+    assert_eq!(failure.details.exit_code, Some(2));
+    assert!(
+        failure.details.output.starts_with(OLD_STATUS_USAGE),
+        "{}",
+        failure.details.output
+    );
+    // The tray's summary and the window's first load come from here.
+    let Err(Problem::Status(failure)) =
+        paths::resolve(Some(&fake.program), None, &env_in(fake.dir.path()))
+    else {
+        panic!("a status problem")
+    };
+    assert_eq!(failure.message, cli::OUTDATED);
+    fake.fail(
+        "categories-export",
+        2,
+        "error: unrecognized subcommand 'categories'\n\nUsage: mailtriage [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.",
+        None,
+    );
+    let failure = cli::categories(&cli(&fake).run(&Request::Export("daniel".into()))).unwrap_err();
+    assert_eq!(failure.message, cli::OUTDATED);
+    // mailtriage's own input errors are not parser errors.
+    fake.fail("categories-export", 2, "unknown account", None);
+    let failure = cli::categories(&cli(&fake).run(&Request::Export("daniel".into()))).unwrap_err();
+    assert_eq!(failure.message, "unknown account");
+    fake.fail(
+        "service-status",
+        2,
+        "configuration not found; run `mailtriage setup` or pass --config",
+        None,
+    );
+    assert_eq!(
+        paths::resolve(Some(&fake.program), None, &env_in(fake.dir.path())),
+        Err(Problem::NotSetUp(None))
+    );
+}
+
 #[test]
 fn json_errors_keep_their_reason_and_details() {
     let fake = FakeCli::new();
@@ -314,9 +365,23 @@ fn the_config_comes_from_the_first_status_when_not_given() {
         missing,
         Problem::NotSetUp(Some(fake.dir.path().join("nope.json")))
     );
+    // `mailtriage setup` would write the default config, not this one:
+    // the text names the file and the command that creates it.
     assert_eq!(
         missing.text(),
+        format!(
+            "Not set up: no config at {path}. Run `mailtriage setup --config {path}` in a terminal.",
+            path = fake.dir.path().join("nope.json").display()
+        )
+    );
+    assert_eq!(
+        Problem::NotSetUp(None).text(),
         "Not set up. Run `mailtriage setup` in a terminal."
+    );
+    // A path a shell would split is quoted in the command.
+    assert_eq!(
+        Problem::NotSetUp(Some(PathBuf::from("/home/a b/mailtriage.json"))).text(),
+        "Not set up: no config at /home/a b/mailtriage.json. Run `mailtriage setup --config '/home/a b/mailtriage.json'` in a terminal."
     );
 }
 

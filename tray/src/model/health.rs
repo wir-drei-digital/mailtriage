@@ -95,9 +95,15 @@ impl Observations {
     }
 }
 
-/// How old the last check may be: 3 × the interval plus 30 minutes.
+/// How old the last check may be: 3 × the interval plus 30 minutes. A
+/// hand-edited interval too large for that saturates at `Duration::MAX`.
 pub fn stale_after(s: &ServiceInfo) -> Duration {
-    Duration::seconds(3 * s.interval_seconds.unwrap_or(60) as i64) + Duration::minutes(30)
+    let seconds = s.interval_seconds.unwrap_or(60).saturating_mul(3);
+    i64::try_from(seconds)
+        .ok()
+        .and_then(Duration::try_seconds)
+        .and_then(|d| d.checked_add(&Duration::minutes(30)))
+        .unwrap_or(Duration::MAX)
 }
 
 fn pass_warning(pass: &LastPass) -> Option<Warning> {
@@ -437,6 +443,27 @@ mod tests {
             state(&past, &fresh),
             (State::Warning, Some(Warning::NoCheckSince))
         );
+    }
+
+    /// A hand-edited, absurd `interval_seconds` neither overflows nor
+    /// panics: the check is just never stale.
+    #[test]
+    fn a_huge_interval_saturates() {
+        // Past u64, past i64, past chrono's range, and at its very end.
+        let at_the_end = (i64::MAX / 1000 / 3) as u64;
+        for interval in [u64::MAX, u64::MAX / 3, 1 << 62, 1 << 58, at_the_end] {
+            let mut s = running();
+            s.interval_seconds = Some(interval);
+            assert_eq!(stale_after(&s), Duration::MAX, "{interval}");
+            let seen_long_ago = seen(None, Some(minutes_ago(600)));
+            s.last_pass = Some(pass(minutes_ago(60 * 24 * 365), 0, None));
+            assert_eq!(state(&s, &seen_long_ago).0, State::Ok, "{interval}");
+            s.last_pass = None;
+            assert_eq!(state(&s, &seen_long_ago).0, State::Starting, "{interval}");
+        }
+        let mut s = running();
+        s.interval_seconds = Some(600);
+        assert_eq!(stale_after(&s), Duration::minutes(60));
     }
 
     #[test]

@@ -1135,8 +1135,9 @@ The summary line, and the categories window, show these:
 | Message | What to do |
 | --- | --- |
 | mailtriage not found (looked in …) | Install `mailtriage` in the same directory as `mailtriage-tray` or on your `PATH`, or start the tray with `--mailtriage PATH`. |
-| Not set up. Run `mailtriage setup` in a terminal. | No config was found, or `--config` names a missing file. Run `mailtriage setup`; the tray finds the config at its next refresh. The tray never runs setup itself. |
-| mailtriage is older than the tray; run `mailtriage update`. | The CLI lacks fields this tray needs; "Show details" names the missing one. Install `mailtriage` from the tray's release. |
+| Not set up. Run `mailtriage setup` in a terminal. | No config was found. Run `mailtriage setup`; the tray finds the config at its next refresh. The tray never runs setup itself. |
+| Not set up: no config at PATH. Run `mailtriage setup --config PATH` in a terminal. | `--config` names a file that does not exist. That command creates it there (plain `mailtriage setup` would write the default config instead); the tray finds it at its next refresh. |
+| mailtriage is older than the tray; run `mailtriage update`. | The CLI lacks a field or a command this tray needs; "Show details" names the missing field, or shows the CLI's own complaint about the tray's arguments. Install `mailtriage` from the tray's release. |
 | Any other message | The failed command's error. In the menu, "Show details" copies the command, its exit code and its output; in the window, it shows them with "Copy". Run the command in a terminal to see more. |
 
 ## Reference

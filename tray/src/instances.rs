@@ -91,13 +91,17 @@ pub struct Windows {
 }
 
 impl Windows {
-    /// The PIDs a previous image of the tray passed on.
+    /// The PIDs a previous image of the tray passed on. Only `1..=i32::MAX`
+    /// count: for `waitpid`, 0 means any child in this process group, and a
+    /// larger value turns negative as a `pid_t`, which means any child of
+    /// another group (`u32::MAX` becomes -1: any child at all).
     pub fn from_env(value: Option<&str>) -> Self {
         Self {
             pids: value
                 .unwrap_or_default()
                 .split(',')
                 .filter_map(|p| p.trim().parse().ok())
+                .filter(|&pid: &u32| i32::try_from(pid).is_ok_and(|pid| pid > 0))
                 .collect(),
         }
     }
@@ -134,5 +138,18 @@ impl Windows {
             false
         });
         ended
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only PIDs that `waitpid` takes as one process.
+    #[test]
+    fn only_single_process_pids_come_from_the_environment() {
+        let windows = Windows::from_env(Some("12, 0,4294967295,2147483648,2147483647,x,,-5,34"));
+        assert_eq!(windows.pids(), [12, 2147483647, 34]);
+        assert!(Windows::from_env(None).pids().is_empty());
     }
 }

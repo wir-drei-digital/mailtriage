@@ -339,8 +339,12 @@ impl Failure {
     }
 }
 
-/// The text shown when the CLI lacks a field the tray needs.
+/// The text shown when the CLI lacks a field or a command the tray needs.
 pub const OUTDATED: &str = "mailtriage is older than the tray; run `mailtriage update`.";
+
+/// How mailtriage's argument parser (clap) starts the message of a usage
+/// error, which `--json` prints as an error object with code and exit 2.
+const PARSER_ERROR: &str = "error: ";
 
 /// The command's JSON result, or its failure: a JSON error object, no
 /// JSON at all, a timeout or a program that could not start.
@@ -354,13 +358,27 @@ pub fn outcome(finished: &Finished) -> Result<Value, Failure> {
             let value: Value = serde_json::from_str(finished.stdout.trim())
                 .map_err(|_| fail("mailtriage gave an answer the tray cannot read".into()))?;
             if let Some(error) = value.get("error") {
+                let message = error["message"].as_str().unwrap_or("mailtriage failed");
+                let code = error["code"].as_i64().map(|c| c as i32);
+                // The parser rejected the tray's arguments: a mailtriage
+                // older than the tray. Its text goes to the details.
+                if finished.exit_code() == Some(2)
+                    && code == Some(2)
+                    && message.starts_with(PARSER_ERROR)
+                {
+                    let mut details = finished.details();
+                    details.output = format!("{message}\n{}", details.output);
+                    return Err(Failure {
+                        message: OUTDATED.to_owned(),
+                        reason: None,
+                        code,
+                        details,
+                    });
+                }
                 return Err(Failure {
-                    message: error["message"]
-                        .as_str()
-                        .unwrap_or("mailtriage failed")
-                        .to_owned(),
+                    message: message.to_owned(),
                     reason: error["reason"].as_str().map(str::to_owned),
-                    code: error["code"].as_i64().map(|c| c as i32),
+                    code,
                     details: finished.details(),
                 });
             }
