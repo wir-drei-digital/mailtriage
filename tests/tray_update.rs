@@ -577,6 +577,103 @@ fn a_skip_that_cannot_be_recorded_is_a_warning() {
     );
 }
 
+/// Makes the tray file group-writable: `platform::blocker` then refuses the
+/// tray (`unsafe_permissions`) while the CLI next to it, 0755 in a 0755
+/// directory, stays replaceable. Returns the refusal both parts report.
+fn make_unsafe(tray: &Path) -> String {
+    fs::set_permissions(tray, fs::Permissions::from_mode(0o775)).unwrap();
+    format!(
+        "{} cannot be replaced (unsafe_permissions): install mailtriage into a directory that only this user owns and can write, such as ~/.local/bin, or set \"updates\" to \"notify\" (now: {})",
+        tray.display(),
+        tray.display()
+    )
+}
+
+/// Spec step 3 for the tray: a tray the replaceability check refuses fails
+/// the tray part like any other tray failure (exit 4, the update spec's
+/// backoff), with the CLI current and replaceable, and nothing downloaded.
+#[test]
+fn a_tray_that_may_not_be_replaced_fails_the_tray_part_with_a_backoff() {
+    let sandbox = Sandbox::new();
+    let server = Server::start();
+    publish(
+        &server,
+        RUNNING,
+        TrayAsset::Good,
+        Path::new("/dev/null"),
+        true,
+    );
+    let tray = put_tray(&sandbox, "0.0.1", true);
+    let refusal = make_unsafe(&tray);
+    let (code, v) = mailtriage(&sandbox, &server, &["update", "--check", "--json"]);
+    assert_eq!(code, Some(0), "{v}");
+    assert_eq!(v["out"]["update"]["install"]["replaceable"], true, "{v}");
+    let before = chrono::Utc::now();
+    let (code, v) = mailtriage(&sandbox, &server, &["update", "--json"]);
+    assert_eq!(code, Some(4), "{v}");
+    let out = &v["out"];
+    assert_eq!(out["partial"], true);
+    assert_eq!(out["update"]["action"], "current");
+    assert_eq!(
+        out["update"]["tray"],
+        json!({"action": "failed", "from": "0.0.1", "to": RUNNING, "error": refusal})
+    );
+    assert_eq!(server.count("/download/"), 0, "{:?}", server.requests());
+    assert_eq!(version_of(&tray), "mailtriage-tray 0.0.1");
+    assert!(!previous(&tray).exists());
+    let entry = &sandbox.cache()["installs"][key(&tray)];
+    assert_eq!(entry["last_error"]["message"], refusal.as_str());
+    assert_eq!(entry["failures"], 1);
+    let next = chrono::DateTime::parse_from_rfc3339(entry["next_attempt_at"].as_str().unwrap())
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    assert!(next >= before + chrono::Duration::minutes(59), "{next}");
+}
+
+/// The same refusal in `watch`: an `error` event, the tray's own backoff,
+/// no download; the passes go on.
+#[test]
+fn a_tray_that_may_not_be_replaced_is_an_error_event_in_watch() {
+    let sandbox = Sandbox::new();
+    let server = Server::start();
+    let assets = publish(
+        &server,
+        RUNNING,
+        TrayAsset::Good,
+        Path::new("/dev/null"),
+        false,
+    );
+    let tray = put_tray(&sandbox, "0.0.1", true);
+    let refusal = make_unsafe(&tray);
+    let config = sandbox.config("cfg", "auto");
+    write_cache(
+        &sandbox,
+        &cache_with(
+            &assets,
+            RUNNING,
+            json!({"mailtriage": assets[&cli_archive(RUNNING)], "mailtriage-tray": assets[&tray_archive(RUNNING)]}),
+            "2999-01-01T00:00:00Z",
+            json!({}),
+        ),
+    );
+    let mut watch = sandbox.watch(&server, &config);
+    let error = watch.event("error");
+    assert_eq!(
+        error["update"]["message"],
+        format!("installing the mailtriage-tray update failed: {refusal}")
+    );
+    watch.wait_passes(3);
+    assert_eq!(watch.events("error").len(), 1, "{:#?}", watch.seen);
+    let (code, _) = watch.stop();
+    assert_eq!(code, Some(0));
+    assert_eq!(server.count("/download/"), 0, "{:?}", server.requests());
+    assert_eq!(version_of(&tray), "mailtriage-tray 0.0.1");
+    let entry = &sandbox.cache()["installs"][key(&tray)];
+    assert_eq!(entry["last_error"]["message"], refusal.as_str());
+    assert_eq!(entry["failures"], 1);
+    assert!(entry["next_attempt_at"].is_string(), "{entry}");
+}
+
 /// The update spec's background install for the tray: a later `watch` pass
 /// installs the still-older tray once its backoff has passed, from the
 /// persisted cache alone (the server serves no release list). The CLI is
