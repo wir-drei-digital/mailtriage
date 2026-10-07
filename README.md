@@ -25,19 +25,21 @@ VERSION=0.1.0
 gh release download "v$VERSION" --repo wir-drei-digital/mailtriage --pattern "mailtriage-v$VERSION-macos-arm64.tar.gz*"
 shasum -a 256 --check "mailtriage-v$VERSION-macos-arm64.tar.gz.sha256"
 tar -xzf "mailtriage-v$VERSION-macos-arm64.tar.gz"
-sudo install -m 0755 mailtriage /usr/local/bin/mailtriage
+install -d ~/.local/bin
+install -m 0755 mailtriage ~/.local/bin/mailtriage
 ```
 
-On Linux, use `linux-amd64` or `linux-arm64` in the file name and `sha256sum --check`. The macOS executable is unsigned and not notarized.
+On Linux, use `linux-amd64` or `linux-arm64` in the file name and `sha256sum --check`. The macOS executable is unsigned and not notarized. `~/.local/bin` must be on your `PATH`.
 
 From source, with a stable Rust toolchain:
 
 ```sh
 cargo build --release --locked
-sudo install -m 0755 target/release/mailtriage /usr/local/bin/mailtriage
+install -d ~/.local/bin
+install -m 0755 target/release/mailtriage ~/.local/bin/mailtriage
 ```
 
-mailtriage keeps itself up to date: the background service installs new releases by itself, and `mailtriage update` installs one now. That needs a binary you own, such as `install -m 0755 mailtriage ~/.local/bin/mailtriage` instead of `sudo install` ([Updates](docs/guide.md#updates)).
+mailtriage keeps itself up to date: the background service installs new releases by itself, and `mailtriage update` installs one now. A root-owned or otherwise unsafe install, for example one made with `sudo` into `/usr/local/bin`, is not replaced: mailtriage only reports new releases for it ([Binaries mailtriage does not replace](docs/guide.md#binaries-mailtriage-does-not-replace)).
 
 ## Get started
 

@@ -52,20 +52,22 @@ VERSION=0.1.0
 gh release download "v$VERSION" --repo wir-drei-digital/mailtriage --pattern "mailtriage-v$VERSION-macos-arm64.tar.gz*"
 shasum -a 256 --check "mailtriage-v$VERSION-macos-arm64.tar.gz.sha256"   # Linux: sha256sum --check
 tar -xzf "mailtriage-v$VERSION-macos-arm64.tar.gz"
-sudo install -m 0755 mailtriage /usr/local/bin/mailtriage
+install -d ~/.local/bin
+install -m 0755 mailtriage ~/.local/bin/mailtriage
 ```
 
-The macOS executable is unsigned and not notarized. See the [release guide](releases.md) for how releases are made. For automatic updates, install the binary into a directory you own instead of with `sudo`, for example `install -m 0755 mailtriage ~/.local/bin/mailtriage`; see [Updates](#updates).
+The macOS executable is unsigned and not notarized. See the [release guide](releases.md) for how releases are made. A root-owned or otherwise unsafe install, for example one made with `sudo` into `/usr/local/bin`, is not replaced: mailtriage only reports new releases for it (see [Binaries mailtriage does not replace](#binaries-mailtriage-does-not-replace)).
 
 From source, with a stable Rust toolchain:
 
 ```sh
 cargo build --release --locked
-sudo install -m 0755 target/release/mailtriage /usr/local/bin/mailtriage
+install -d ~/.local/bin
+install -m 0755 target/release/mailtriage ~/.local/bin/mailtriage
 mailtriage --version
 ```
 
-The examples below assume `mailtriage` is on your `PATH`. The background service records the absolute path of the executable that installs it, so install the binary in its final place first.
+`~/.local/bin` must be on your `PATH`; the examples below assume `mailtriage` is. The background service records the absolute path of the executable that installs it, so install the binary in its final place first.
 
 ## Guided setup
 
@@ -851,7 +853,7 @@ Without the cache directory (no `HOME`, and on Linux no absolute `XDG_CACHE_HOME
 
 Copies older than the release that brought automatic updates cannot update themselves. Once:
 
-1. Install the first release with automatic updates by hand into a directory you own: from its archive into `~/.local/bin` (see [Binaries mailtriage does not replace](#binaries-mailtriage-does-not-replace)), or with `cargo install` into `~/.cargo/bin`. Remove an older copy installed with `sudo`, for example `sudo rm /usr/local/bin/mailtriage`, so it does not come first on your `PATH`: `service install` records the binary that runs it, and a root-owned binary is never updated. `command -v mailtriage` must show the new path.
+1. Install the first release with automatic updates by hand into a directory you own: from its archive into `~/.local/bin` (see [Binaries mailtriage does not replace](#binaries-mailtriage-does-not-replace)), or with `cargo install` into `~/.cargo/bin`. Remove an older copy that you installed with `sudo` and no longer use, for example `sudo rm /usr/local/bin/mailtriage`, so it does not come first on your `PATH`: `service install` records the binary that runs it, and a root-owned binary is never updated. `command -v mailtriage` must show the new path.
 2. Run `mailtriage service install --account NAME` once for every account, so each service runs the new binary. The old processes have no restart rule and would keep running the old code.
 3. After the next pass, check that `mailtriage service status --account NAME --json` shows the new version in `last_pass.version` and `update.replaceable: true`. When `replaceable` is `false`, `update.reason` says why.
 
@@ -867,11 +869,13 @@ A release that fails before `watch` reaches its update step cannot repair itself
    ```sh
    VERSION=0.3.1 PLATFORM=macos-arm64   # or linux-amd64, linux-arm64
    base="https://github.com/wir-drei-digital/mailtriage/releases/download/v$VERSION"
-   curl -fLO "$base/mailtriage-v$VERSION-$PLATFORM.tar.gz"
-   curl -fLO "$base/SHA256SUMS"
-   shasum -a 256 --check --ignore-missing SHA256SUMS   # Linux: sha256sum --check --ignore-missing SHA256SUMS
-   tar -xzf "mailtriage-v$VERSION-$PLATFORM.tar.gz" mailtriage
-   mv mailtriage ~/.local/bin/mailtriage   # the path of your installed binary
+   # Linux: sha256sum --check --ignore-missing SHA256SUMS in place of shasum -a 256 …
+   # Replace ~/.local/bin/mailtriage with the path of your installed binary.
+   curl -fLO "$base/mailtriage-v$VERSION-$PLATFORM.tar.gz" &&
+     curl -fLO "$base/SHA256SUMS" &&
+     shasum -a 256 --check --ignore-missing SHA256SUMS &&
+     tar -xzf "mailtriage-v$VERSION-$PLATFORM.tar.gz" mailtriage &&
+     mv mailtriage ~/.local/bin/mailtriage
    ```
 
    Running services switch to it before their next pass.
