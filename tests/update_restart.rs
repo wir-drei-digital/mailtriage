@@ -2,7 +2,11 @@
 //! `watch` re-executes itself onto a replaced binary: the real binary, a
 //! script that does not run until `chmod +x`, and a failing `exec`.
 mod update_support;
-use std::{fs, os::unix::fs::PermissionsExt};
+use std::{
+    fs,
+    os::unix::fs::PermissionsExt,
+    time::{Duration, Instant},
+};
 use update_support::{fake_binary, replace_file, run, signal, wait_exit, Sandbox, Server};
 
 const RUNNING: &str = env!("CARGO_PKG_VERSION");
@@ -62,6 +66,49 @@ fn watch_restarts_onto_a_fresh_copy_and_keeps_its_pid() {
         .count();
     assert!(since >= 2);
     assert_eq!(last["watch"]["passes"], since, "{:#?}", watch.seen);
+    assert!(server.requests().is_empty());
+}
+
+/// While `watch` waits between passes it checks every 5 s: with passes
+/// 60 s apart, the restart comes long before the next pass would.
+#[test]
+fn watch_restarts_while_it_waits_between_passes() {
+    let sandbox = Sandbox::new();
+    let server = Server::start();
+    let config = sandbox.config("cfg", "off");
+    let mut watch = sandbox.watch_with_interval(&server, &config, 60);
+    watch.wait_passes(1);
+    let binary = fs::read(env!("CARGO_BIN_EXE_mailtriage")).unwrap();
+    let replaced = Instant::now();
+    replace_file(&sandbox.bin, &binary, 0o755);
+    let restarting = watch.event("restarting");
+    let waited = replaced.elapsed();
+    assert!(
+        waited < Duration::from_secs(15),
+        "restarted after {waited:?}"
+    );
+    // It came from the wait after the first pass, not from a second one.
+    let at = watch
+        .seen
+        .iter()
+        .position(|v| v["update"]["event"] == "restarting")
+        .unwrap();
+    let before = watch.seen[..at]
+        .iter()
+        .filter(|v| v.get("discovered").is_some())
+        .count();
+    assert_eq!(before, 1, "{:#?}", watch.seen);
+    assert_eq!(restarting["update"]["pid"], watch.child.id());
+    assert_eq!(restarting["update"]["to"], RUNNING);
+    // The new image passes at once, then waits; SIGTERM ends that wait.
+    watch.wait_passes(2);
+    assert_eq!(watch.events("restarting").len(), 1);
+    assert!(watch.events("error").is_empty(), "{:#?}", watch.seen);
+    let (code, last) = watch.stop();
+    assert_eq!(code, Some(0));
+    assert_eq!(last["watch"]["stopped"], true);
+    // Only the pass since the restart: the `exec` happened.
+    assert_eq!(last["watch"]["passes"], 1, "{last}");
     assert!(server.requests().is_empty());
 }
 
