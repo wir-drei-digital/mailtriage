@@ -42,6 +42,8 @@ const BAR_MARGIN: Margin = Margin::symmetric(16, 8);
 const WAIT_LOADING: &str = "Wait until loading finishes";
 /// Why a control is off while a command that writes runs.
 const WAIT_ACTION: &str = "Wait until the current action finishes";
+/// The accessible label of the refile panel's "Close".
+const CLOSE_REFILE: &str = "Close Move filed mail";
 
 /// What the window needs to work.
 pub struct Setup {
@@ -94,6 +96,11 @@ pub fn style(ctx: &egui::Context) {
         style.spacing.menu_margin = Margin::same(8);
         style.spacing.indent = 16.0;
         style.spacing.icon_spacing = 8.0;
+        // A scroll area that holds more than it shows (the form under the
+        // refile panel, the panel itself) says so with a thin bar that stays
+        // visible and takes its own room, instead of one that appears only
+        // on hover over the content.
+        style.spacing.scroll = ScrollStyle::thin();
         // Secondary text (a category's folder, notes, placeholders) at
         // about 4:1 in light mode and 3.5:1 in dark mode instead of under
         // 3:1, still lighter than the text itself.
@@ -423,6 +430,9 @@ fn dialog_buttons(ui: &mut egui::Ui, buttons: impl FnOnce(&mut egui::Ui)) {
             ui.ctx().data_mut(|d| d.insert_temp(id, row));
             ui.ctx()
                 .request_discard("the dialog's buttons changed width");
+            // Should egui decline another pass this frame, the next one
+            // lays the row out right.
+            ui.ctx().request_repaint();
         }
     });
 }
@@ -620,8 +630,29 @@ impl Editor {
         }
     }
 
+    /// The refile panel: its heading with "Close" at the right, then the
+    /// preview, which scrolls when it is more than the panel holds.
     fn refile(&self, ui: &mut egui::Ui, refile: &Refile, msgs: &mut Vec<Msg>) {
-        ui.heading("Move filed mail");
+        ui.horizontal(|ui| {
+            ui.heading("Move filed mail");
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                // A running move reports its result here.
+                let can_close = self.model.running != Some(Running::Moving);
+                let close = ui
+                    .add_enabled(can_close, Button::new("Close"))
+                    .on_disabled_hover_text(WAIT_ACTION);
+                close.widget_info(|| {
+                    WidgetInfo::labeled(WidgetType::Button, can_close, CLOSE_REFILE)
+                });
+                if close.clicked() {
+                    msgs.push(Msg::CloseRefile);
+                }
+            });
+        });
+        ScrollArea::vertical().show(ui, |ui| self.refile_preview(ui, refile, msgs));
+    }
+
+    fn refile_preview(&self, ui: &mut egui::Ui, refile: &Refile, msgs: &mut Vec<Msg>) {
         if let Some(result) = &refile.result {
             ui.label(RichText::new(result).strong());
         }
@@ -759,6 +790,7 @@ impl Editor {
             self.actions_width = width;
             self.footer_height = height;
             ui.ctx().request_discard("the footer changed size");
+            ui.ctx().request_repaint();
         }
     }
 
@@ -985,11 +1017,7 @@ impl eframe::App for Editor {
             });
         if let Some((refile, rect)) = refile {
             let mut panel = reserved_ui(ui, "refile-contents", rect, Layout::top_down(Align::Min));
-            // More than the panel holds (a result line, "Not moved" opened)
-            // scrolls; a scroll bar that stays visible and takes its own
-            // room shows that, and keeps text from running under it.
-            panel.spacing_mut().scroll = ScrollStyle::thin();
-            ScrollArea::vertical().show(&mut panel, |ui| self.refile(ui, &refile, &mut controls));
+            self.refile(&mut panel, &refile, &mut controls);
         }
         self.footer(ui, footer, &mut controls);
         if !dialog_open {

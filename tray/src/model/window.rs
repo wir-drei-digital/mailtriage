@@ -278,6 +278,7 @@ pub enum Msg {
     MoveFiledMail,
     MoveFolder(String),
     MoveAll,
+    CloseRefile,
     CloseRequested,
     Status {
         load: u64,
@@ -365,8 +366,6 @@ pub struct Window {
     load_account: Option<String>,
     pub check: Check,
     check_due: Option<Instant>,
-    /// The revision whose check runs or is due.
-    checking: Option<u64>,
     /// The revision whose draft file the accepted check used.
     accepted_file: Option<u64>,
     pub running: Option<Running>,
@@ -374,8 +373,9 @@ pub struct Window {
     pub dialog: Option<Dialog>,
     pub notice: Option<Notice>,
     pub refile: Option<Refile>,
-    /// The changes of the last apply, to open the refile panel after the reload.
-    refile_after_load: bool,
+    /// The account whose last apply asks for the refile panel once the
+    /// reload after it has loaded that account.
+    refile_after_load: Option<String>,
     pub closing: bool,
     /// 3 once the first load failed (or mailtriage was not found).
     pub exit_code: i32,
@@ -398,14 +398,13 @@ impl Window {
             load_account: None,
             check: Check::None,
             check_due: None,
-            checking: None,
             accepted_file: None,
             running: None,
             retry_at: None,
             dialog: None,
             notice: None,
             refile: None,
-            refile_after_load: false,
+            refile_after_load: None,
             closing: false,
             exit_code: 0,
             observations: Observations::default(),
@@ -553,7 +552,6 @@ impl Window {
         self.load = Some(self.loads);
         self.load_account = account;
         self.check_due = None;
-        self.checking = None;
         vec![Effect::Status { load: self.loads }]
     }
 
@@ -566,13 +564,7 @@ impl Window {
     /// A new revision, checked after a pause when the draft differs.
     fn bump(&mut self, now: Instant) {
         self.revision += 1;
-        if self.dirty() {
-            self.check_due = Some(now + self.options.check_delay);
-            self.checking = Some(self.revision);
-        } else {
-            self.check_due = None;
-            self.checking = None;
-        }
+        self.check_due = self.dirty().then(|| now + self.options.check_delay);
     }
 
     fn check_effect(&mut self) -> Vec<Effect> {
@@ -580,7 +572,6 @@ impl Window {
             return vec![];
         };
         self.check_due = None;
-        self.checking = Some(self.revision);
         vec![Effect::Check {
             account,
             revision: self.revision,
@@ -885,6 +876,13 @@ impl Window {
             }
             Msg::MoveFolder(native) => self.move_mail(Some(native)),
             Msg::MoveAll => self.move_mail(None),
+            Msg::CloseRefile => {
+                // A running move reports into the panel.
+                if self.running != Some(Running::Moving) {
+                    self.refile = None;
+                }
+                vec![]
+            }
             Msg::CloseRequested => {
                 if self.running.is_some() {
                     self.closing = true;
@@ -952,7 +950,8 @@ impl Window {
                         self.load = None;
                         self.check = Check::None;
                         self.bump(now);
-                        if std::mem::take(&mut self.refile_after_load) && filing_on {
+                        let after_save = self.refile_after_load.take();
+                        if after_save.as_deref() == Some(exported.account.as_str()) && filing_on {
                             self.refile = Some(Refile {
                                 account: exported.account.clone(),
                                 dry_run: filing_mode == FilingMode::DryRun,
@@ -984,7 +983,6 @@ impl Window {
                 if self.account.as_deref() != Some(&account) || revision != self.revision {
                     return vec![Effect::DeleteDraft(revision)];
                 }
-                self.checking = None;
                 if self.notice == Some(Notice::Rechecking) {
                     self.notice = None;
                 }
@@ -1017,11 +1015,12 @@ impl Window {
                     Ok(()) => {
                         let changes = self.changes().cloned().unwrap_or_default();
                         self.notice = Some(Notice::Saved(words::saved(&changes)));
-                        self.refile_after_load = self.filing_on()
+                        let refiles = self.filing_on()
                             && (!changes.added.is_empty()
                                 || !changes.removed.is_empty()
                                 || !changes.folders_changed.is_empty()
                                 || changes.reclassifies);
+                        self.refile_after_load = if refiles { self.account.clone() } else { None };
                         // The applied draft is saved: no edit to discard
                         // while the reload runs.
                         if let Some(loaded) = &mut self.loaded {
@@ -1137,6 +1136,8 @@ impl Window {
 
     fn load_failed(&mut self, message: String, details: Option<Details>) -> Vec<Effect> {
         self.load = None;
+        // A failed reload after a save forgets the refile panel it was to open.
+        self.refile_after_load = None;
         if self.loaded.is_none() {
             self.exit_code = 3;
         }
@@ -1157,8 +1158,14 @@ mod tests {
     use crate::cli::{RefileFolder, ServiceInfo};
     use std::collections::BTreeMap;
 
+    thread_local! {
+        /// One base instant per test (each test runs on its own thread), so
+        /// a stalled thread cannot make a check or a retry due early.
+        static T0: Instant = Instant::now();
+    }
+
     fn t0() -> Instant {
-        Instant::now()
+        T0.with(|t0| *t0)
     }
 
     fn details() -> Details {
@@ -2001,6 +2008,191 @@ mod tests {
         assert_eq!(
             w.refile.as_ref().unwrap().result.as_deref(),
             Some("Marked 30 messages; 12 more will move if their new category calls for it. The background service is not running. Start it, or run `mailtriage sync`, to move them.")
+        );
+    }
+
+    #[test]
+    fn the_refile_panel_closes_except_while_a_move_runs() {
+        let mut w = opened();
+        w.update(Msg::MoveFiledMail, t0());
+        w.update(
+            Msg::Previewed {
+                account: "daniel".into(),
+                result: Ok(preview()),
+            },
+            t0(),
+        );
+        w.update(Msg::MoveAll, t0());
+        assert_eq!(w.running, Some(Running::Moving));
+        assert_eq!(w.update(Msg::CloseRefile, t0()), []);
+        assert!(w.refile.is_some(), "a running move keeps its panel");
+        w.update(
+            Msg::Moved {
+                account: "daniel".into(),
+                result: Ok(RefileMarked {
+                    marked: 38,
+                    waiting_marked: 0,
+                }),
+            },
+            t0(),
+        );
+        assert_eq!(w.update(Msg::CloseRefile, t0()), []);
+        assert_eq!(w.refile, None);
+        // The preview the move asked for comes back to a closed panel.
+        w.update(
+            Msg::Previewed {
+                account: "daniel".into(),
+                result: Ok(preview()),
+            },
+            t0(),
+        );
+        assert_eq!(w.refile, None);
+    }
+
+    /// A saved draft that adds a category on `daniel`, while the reload
+    /// after the save (load 2) runs.
+    fn saved_with_a_new_category() -> Window {
+        let mut w = opened();
+        w.update(Msg::Add, t0());
+        let added = w.draft.len() - 1;
+        w.update(Msg::Edit(added, Field::Name, "Travel".into()), t0());
+        w.update(Msg::Edit(added, Field::Description, "Trips".into()), t0());
+        let changes = Changes {
+            added: vec!["travel".into()],
+            ..Changes::default()
+        };
+        check(&mut w, valid(changes));
+        w.update(Msg::RequestApply, t0());
+        let revision = w.revision;
+        w.update(Msg::Confirm, t0());
+        assert_eq!(
+            w.update(
+                Msg::Applied {
+                    revision,
+                    result: Ok(()),
+                },
+                t0(),
+            ),
+            [Effect::Status { load: 2 }]
+        );
+        w
+    }
+
+    /// `status()` with filing live on `info` too.
+    fn both_filing() -> Status {
+        let mut status = status();
+        status.services[1].filing_mode = FilingMode::Live;
+        status
+    }
+
+    /// Loads `account` as load `load` and returns the export's effects.
+    fn finish_load(w: &mut Window, load: u64, account: &str) -> Vec<Effect> {
+        assert_eq!(
+            w.update(
+                Msg::Status {
+                    load,
+                    at: Utc::now(),
+                    result: Ok(both_filing()),
+                },
+                t0(),
+            ),
+            [Effect::Export {
+                load,
+                account: account.into()
+            }]
+        );
+        w.update(
+            Msg::Exported {
+                load,
+                result: Ok(exported(account)),
+            },
+            t0(),
+        )
+    }
+
+    #[test]
+    fn the_refile_panel_after_a_save_does_not_follow_a_switch() {
+        let mut w = saved_with_a_new_category();
+        // The selector works during the reload: switch to info.
+        assert_eq!(
+            w.update(Msg::SelectAccount("info".into()), t0()),
+            [Effect::Status { load: 3 }]
+        );
+        assert_eq!(finish_load(&mut w, 3, "info"), []);
+        assert_eq!(w.refile, None, "no panel and no preview for info");
+        // Back on daniel, the save is past: no panel either.
+        assert_eq!(
+            w.update(Msg::SelectAccount("daniel".into()), t0()),
+            [Effect::Status { load: 4 }]
+        );
+        assert_eq!(finish_load(&mut w, 4, "daniel"), []);
+        assert_eq!(w.refile, None);
+    }
+
+    #[test]
+    fn a_failed_reload_after_a_save_forgets_the_refile_panel() {
+        let mut w = saved_with_a_new_category();
+        w.update(
+            Msg::Status {
+                load: 2,
+                at: Utc::now(),
+                result: Err(failure(None, "boom")),
+            },
+            t0(),
+        );
+        assert!(matches!(w.notice, Some(Notice::Error { .. })));
+        assert_eq!(w.update(Msg::Reload, t0()), [Effect::Status { load: 3 }]);
+        assert_eq!(finish_load(&mut w, 3, "daniel"), []);
+        assert_eq!(w.refile, None);
+        // And on another account after the export failed.
+        let mut w = saved_with_a_new_category();
+        w.update(
+            Msg::Status {
+                load: 2,
+                at: Utc::now(),
+                result: Ok(both_filing()),
+            },
+            t0(),
+        );
+        w.update(
+            Msg::Exported {
+                load: 2,
+                result: Err(failure(None, "boom")),
+            },
+            t0(),
+        );
+        w.update(Msg::SelectAccount("info".into()), t0());
+        assert_eq!(finish_load(&mut w, 3, "info"), []);
+        assert_eq!(w.refile, None);
+    }
+
+    #[test]
+    fn the_refile_panel_opens_after_the_reload_of_its_own_save() {
+        let mut w = saved_with_a_new_category();
+        // The reload after the save goes through Status and Export first.
+        w.update(
+            Msg::Status {
+                load: 2,
+                at: Utc::now(),
+                result: Ok(both_filing()),
+            },
+            t0(),
+        );
+        assert_eq!(
+            w.update(
+                Msg::Exported {
+                    load: 2,
+                    result: Ok(exported("daniel")),
+                },
+                t0(),
+            ),
+            [Effect::Preview {
+                account: "daniel".into()
+            }]
+        );
+        assert_eq!(
+            w.refile.as_ref().map(|r| r.account.as_str()),
+            Some("daniel")
         );
     }
 

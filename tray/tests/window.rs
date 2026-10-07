@@ -394,6 +394,54 @@ fn the_refile_panel_shows_a_whole_preview() {
     );
 }
 
+/// The refile panel's Close button: it waits while a move runs and says
+/// why, then closes the panel.
+#[test]
+fn the_refile_panel_closes() {
+    let fake = fake();
+    fake.respond_fixture("filing-refile", "refile-preview.json");
+    fake.respond_fixture("filing-refile-apply", "refile-marked-folder.json");
+    let drafts = tempfile::tempdir().unwrap();
+    let mut h = open(&fake, drafts.path());
+    click(&mut h, "Move filed mail…");
+    settle(&mut h, |h| shows(h, "Move all 38"));
+    fake.hold("filing-refile-apply");
+    click(&mut h, "Move mail from Promotions");
+    settle(&mut h, |_| fake.calls_of("filing", "refile").len() >= 2);
+    assert!(disabled(&h, CLOSE_REFILE));
+    assert!(says_why(
+        &mut h,
+        CLOSE_REFILE,
+        "Wait until the current action finishes"
+    ));
+    fake.release("filing-refile-apply");
+    settle(&mut h, |h| shows(h, "Marked 30 messages"));
+    assert!(!disabled(&h, CLOSE_REFILE));
+    click(&mut h, CLOSE_REFILE);
+    assert!(h.state().model().refile.is_none());
+    assert!(h.query_by_label("Move all 38").is_none());
+    assert!(h.query_by_label(CLOSE_REFILE).is_none());
+}
+
+/// Every scroll area (the form, the list, the refile panel, details) shows
+/// a thin bar that stays visible and takes its own room, so content below
+/// the fold is never hidden behind a bar that appears only on hover.
+#[test]
+fn scroll_bars_stay_visible() {
+    let ctx = egui::Context::default();
+    editor::style(&ctx);
+    for theme in [egui::Theme::Light, egui::Theme::Dark] {
+        assert_eq!(
+            ctx.style_of(theme).spacing.scroll,
+            egui::style::ScrollStyle::thin(),
+            "{theme:?}"
+        );
+    }
+}
+
+/// The accessible label of the refile panel's "Close".
+const CLOSE_REFILE: &str = "Close Move filed mail";
+
 /// The window after a rename, with the refile panel open: every kind of
 /// control is enabled and shown.
 fn everything_shown(fake: &FakeCli, drafts: &std::path::Path) -> Harness<'static, Editor> {
@@ -406,8 +454,9 @@ fn everything_shown(fake: &FakeCli, drafts: &std::path::Path) -> Harness<'static
 }
 
 /// The controls in the order the window shows them: header, list, form,
-/// refile panel, then the footer from left to right, ending with Apply.
-const VISUAL_ORDER: [&str; 19] = [
+/// refile panel (its heading row with Close first), then the footer from
+/// left to right, ending with Apply.
+const VISUAL_ORDER: [&str; 20] = [
     "Account",
     "Reload",
     "Work\nWork",
@@ -421,6 +470,7 @@ const VISUAL_ORDER: [&str; 19] = [
     "Mail folder",
     "Advanced",
     "Remove category",
+    CLOSE_REFILE,
     "Move mail from Promotions",
     "Move all 38",
     "Not moved",
