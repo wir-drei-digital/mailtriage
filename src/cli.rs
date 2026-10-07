@@ -108,6 +108,19 @@ enum SelfCommand {
     /// Install this binary (and a tray) into DIR with the updater's
     /// transaction, then offer setup and the tray's login item.
     Install(SelfInstallArg),
+    /// Remove the installation in DIR: its services, the tray's login item,
+    /// the running tray, then its programs. Config, state and mail stay.
+    Uninstall(SelfUninstallArg),
+}
+
+#[derive(Args)]
+struct SelfUninstallArg {
+    /// The installation's directory (default: this program's directory).
+    #[arg(long)]
+    dir: Option<PathBuf>,
+    /// Do not ask for confirmation.
+    #[arg(long)]
+    yes: bool,
 }
 
 #[derive(Args)]
@@ -782,6 +795,17 @@ fn execute(cli: &Cli) -> Result<Value, CliError> {
             };
             let mut prompt = Prompter::new(prompt::stdin_unbuffered(), io::stderr(), true);
             distribution::self_install::run(&args, &update::install::EnvHooks, &mut prompt)
+                .map_err(service_error)
+        }
+        Command::SelfCmd {
+            command: SelfCommand::Uninstall(arg),
+        } => {
+            let args = distribution::self_uninstall::Args {
+                dir: arg.dir.clone(),
+                yes: arg.yes,
+            };
+            let mut prompt = Prompter::new(prompt::stdin_unbuffered(), io::stderr(), true);
+            distribution::self_uninstall::run(&args, &update::install::EnvHooks, &mut prompt)
                 .map_err(service_error)
         }
     }

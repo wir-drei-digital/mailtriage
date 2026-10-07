@@ -96,6 +96,31 @@ mailtriage self install --dir DIR [--tray-file PATH] [--no-setup] [--yes] [--jso
 
 Exit codes: 0; 2 for invalid flags or a refused downgrade; 3 for an unsafe directory, a failed install, a failed tray install, or a failed setup (the binaries stay installed); 5 when another update or install held the installation lock for 60 seconds.
 
+### Uninstall
+
+```sh
+mailtriage self uninstall [--dir DIR] [--yes] [--json]
+```
+
+`self uninstall` removes the installation in `DIR`, by default the directory of the `mailtriage` that runs it, and nothing else:
+
+1. A Homebrew install is refused: `installed by Homebrew; run brew uninstall mailtriage` (exit 2). Without `--yes` it asks first (default no); without a terminal it needs `--yes` (exit 2).
+2. It takes the installation lock, waiting up to 60 seconds (else exit 5), so no update recreates the binaries meanwhile.
+3. It uninstalls every background service whose executable is `DIR/mailtriage`, as `service uninstall` does, under each account's service lock. Services of other installations, Homebrew's included, stay.
+4. It removes the tray's login item when that starts `DIR/mailtriage-tray` (on macOS it also stops the login job), then runs `DIR/mailtriage-tray quit`. Close any open categories window yourself.
+5. Only when all of that worked, it deletes `DIR/mailtriage`, `DIR/mailtriage-tray` and their `.previous` copies, and their entries in the update cache. When a step failed, it deletes no program file (services and a login item it already removed stay removed), lists the failures and exits 3.
+
+It keeps the installation lock file, the private Himalaya under `~/.local/share/mailtriage/himalaya` (other configs may use it; it prints how to delete it), and your config, state and logs (`~/.config/mailtriage/` by default). No mail is touched.
+
+```json
+{"schema_version":1,"self_uninstall":{"dir":"/Users/alice/.local/bin","services":[{"account":"work","unit_path":"/Users/alice/Library/LaunchAgents/digital.wirdrei.mailtriage.work.plist","action":"uninstalled","error":null}],"tray":"quit","removed":["/Users/alice/Library/LaunchAgents/digital.wirdrei.mailtriage-tray.plist","/Users/alice/.local/bin/mailtriage","/Users/alice/.local/bin/mailtriage.previous","/Users/alice/.local/bin/mailtriage-tray"],"kept":["/Users/alice/.local/bin/.mailtriage-update.lock","/Users/alice/.config/mailtriage"],"failures":[]}}
+```
+
+- `services[].action`: `uninstalled`, `skipped` (by the time its lock was held, the file named another executable) or `failed`, with `error`.
+- `tray`: `quit`, `not_running`, `other_installation` (another installation's tray, which keeps running), `not_installed`, or `failed`.
+
+Exit codes: 0; 2 for a Homebrew install, a refused confirmation, no terminal without `--yes`, or `HOME` not set (nothing is changed); 3 for a failed service or tray step (no program file was deleted); 5 when the installation lock was held for 60 seconds.
+
 ## Guided setup
 
 ```sh
@@ -1507,7 +1532,7 @@ Some errors also carry a machine-readable `reason` in the error object, for scri
 | 4 | Partial result: a pass, `classify` or `reclassify` with failed messages or scan errors, or whose classification was skipped because the key is unavailable; a pass with filing errors; `watch` at stop after a partial or skipped pass. |
 | 5 | Conflict: the configuration changed during the command, another worker is running, the account binding changed, a cursor expired, a placement changed concurrently, or the categories changed since their export (`categories_changed`). |
 
-`setup` and `service` have their own cases; see [Setup exit codes](#setup-exit-codes) and [Background service](#background-service).
+`setup`, `service`, `himalaya install`, `self install` and `self uninstall` have their own cases; see [Setup exit codes](#setup-exit-codes), [Background service](#background-service), [A private Himalaya](#a-private-himalaya), [`mailtriage self install`](#mailtriage-self-install) and [Uninstall](#uninstall).
 
 ### Account binding
 
