@@ -97,7 +97,8 @@ pub struct InstallLock {
 }
 
 /// Takes the installation lock of `dir`, trying for up to `wait` (zero:
-/// once). `None` when another updater holds it.
+/// once). `None` when another updater holds it; an error when locking
+/// fails for another reason, such as a filesystem without locks.
 pub fn lock(dir: &Path, wait: Duration) -> Result<Option<InstallLock>> {
     let path = dir.join(LOCK_FILE);
     let file = OpenOptions::new()
@@ -107,13 +108,24 @@ pub fn lock(dir: &Path, wait: Duration) -> Result<Option<InstallLock>> {
         .write(true)
         .open(&path)
         .with_context(|| format!("cannot open {}", path.display()))?;
+    let locked = try_until(wait, || file.try_lock_exclusive())
+        .with_context(|| format!("cannot lock {}", path.display()))?;
+    Ok(locked.then_some(InstallLock { _file: file }))
+}
+
+/// Runs `attempt` until it succeeds or `wait` is over (zero: once).
+/// `false` when every attempt met lock contention; any other error is
+/// returned at once.
+fn try_until(wait: Duration, mut attempt: impl FnMut() -> io::Result<()>) -> io::Result<bool> {
     let deadline = Instant::now() + wait;
     loop {
-        if file.try_lock_exclusive().is_ok() {
-            return Ok(Some(InstallLock { _file: file }));
+        match attempt() {
+            Ok(()) => return Ok(true),
+            Err(e) if e.kind() != fs2::lock_contended_error().kind() => return Err(e),
+            Err(_) => {}
         }
         if Instant::now() >= deadline {
-            return Ok(None);
+            return Ok(false);
         }
         thread::sleep(Duration::from_millis(100));
     }
@@ -372,4 +384,49 @@ fn copy_or_link(path: &Path, backup: &Path) -> io::Result<()> {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    /// Only contention means another updater is at work; any other error
+    /// (ENOLCK on NFS without locks, say) is returned at once, not waited
+    /// out as "busy".
+    #[test]
+    fn only_lock_contention_counts_as_busy() {
+        let tries = Cell::new(0);
+        let start = Instant::now();
+        let busy = try_until(Duration::from_millis(250), || {
+            tries.set(tries.get() + 1);
+            Err(fs2::lock_contended_error())
+        });
+        assert!(!busy.unwrap());
+        assert!(start.elapsed() >= Duration::from_millis(250));
+        assert!(tries.get() >= 2, "{}", tries.get());
+
+        let tries = Cell::new(0);
+        let start = Instant::now();
+        let error = try_until(Duration::from_secs(60), || {
+            tries.set(tries.get() + 1);
+            Err(io::Error::other("No locks available"))
+        })
+        .unwrap_err();
+        assert_eq!(error.to_string(), "No locks available");
+        assert_eq!(tries.get(), 1);
+        assert!(start.elapsed() < Duration::from_secs(5));
+
+        let tries = Cell::new(0);
+        let locked = try_until(Duration::from_secs(60), || {
+            tries.set(tries.get() + 1);
+            if tries.get() < 3 {
+                Err(fs2::lock_contended_error())
+            } else {
+                Ok(())
+            }
+        });
+        assert!(locked.unwrap());
+        assert_eq!(tries.get(), 3);
+    }
 }
