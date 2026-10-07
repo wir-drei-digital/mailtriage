@@ -26,6 +26,47 @@ tag:
 - A bad release is fixed by a newer one; there is no rollback command (see
   [Rolling back by hand](guide.md#rolling-back-by-hand)).
 
+## Tested Himalaya versions
+
+`src/engine/himalaya-versions.json` lists the Himalaya versions mailtriage
+accepts, with the SHA-256 of each one's release archives; every release
+compiles it in. The Dovecot end-to-end workflow (`e2e.yml`) reads it and runs
+once per listed version, so the workflow never changes when a version is added.
+
+**The weekly check.** `.github/workflows/himalaya-compat.yml` runs every
+Monday and on demand, in three jobs:
+
+1. `test` (read-only) reads pimalaya/himalaya's newest stable release and
+   stops when it is listed. Otherwise it adds it with
+   `scripts/add-himalaya-version.sh` and runs the Dovecot suite against it in
+   both namespace layouts. The candidate binary runs only in this job.
+2. `propose`, when the suite passed: pushes the edited file to the branch
+   `himalaya/VERSION`, opens the pull request `Test Himalaya VERSION`, and
+   starts `ci.yml` and `e2e.yml` on the branch (a branch pushed with the
+   workflow's token starts no workflow by itself). When the branch exists
+   already, it does nothing.
+3. `report`, when the suite failed: opens the issue `Himalaya VERSION fails the
+   end-to-end suite`, or comments on the open one, with the end of the
+   failing log.
+
+Before merging such a pull request, read the new version's `--mailbox`
+resolver in Himalaya's source for role changes: the script copies `roles` from
+the previous version. The workflow needs one repository setting, made once:
+Settings → Actions → General → Workflow permissions → "Allow GitHub Actions
+to create and approve pull requests".
+
+**Adding a version by hand:**
+
+```sh
+scripts/add-himalaya-version.sh 2.3.0
+```
+
+It reads the release's asset digests from the GitHub API (set `GH_TOKEN` to
+avoid the anonymous rate limit), fails without changing anything when a
+platform's digest is missing, and appends the entry with the previous
+version's `roles`. Check the roles, push, and let `e2e.yml` run the suite for
+every listed version.
+
 ## Publish a version
 
 1. Update the package version in `Cargo.toml` and in `tray/Cargo.toml` (the

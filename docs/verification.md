@@ -5,8 +5,9 @@ following the [implementation plan](implementation-plan.md). Independent review
 reports: [core](review-core.md) and [integration](review-cli-integration.md).
 
 Completed: Rust library/CLI; all three decisions; editable taxonomy; RFC822/JSON
-normalization; OpenRouter Decisions and explicit fake providers; Himalaya 2.1.0
-adapter; SQLite jobs, retry and lease recovery; source binding and UID epochs;
+normalization; OpenRouter Decisions and explicit fake providers; Himalaya
+adapter for the tested versions in `src/engine/himalaya-versions.json`; SQLite
+jobs, retry and lease recovery; source binding and UID epochs;
 bounded discovery/reconciliation; corrections, Done/reopen, query cursors and
 export; Hermes guide and cross-platform CI/release workflows.
 
@@ -58,17 +59,18 @@ an inspection/interchange artifact.
 ## Dovecot end to end
 
 `.github/workflows/e2e.yml` runs `tests/e2e_dovecot.rs` on every push to
-`main`, on pull requests and on demand. It uses the real `mailtriage` binary,
-the official Himalaya v2.1.0 Linux x86_64 release (`himalaya.x86_64-linux.tgz`,
-SHA-256 `683a2ab8e1534f01e6bda3a69e204d564c31fbfbe20511fc7bc60b67f2e85884`) and
-a `dovecot/dovecot:2.3.21` container in two namespace layouts: no prefix with
+`main`, on pull requests and on demand, once for every Himalaya version in
+`src/engine/himalaya-versions.json`. It uses the real `mailtriage` binary, the
+official Linux x86_64 release of that version (`himalaya.x86_64-linux.tgz`,
+pinned by the SHA-256 in the same file) and a `dovecot/dovecot:2.3.21`
+container in two namespace layouts: no prefix with
 separator `/` (`tests/e2e/dovecot-flat.conf`) and prefix `INBOX.` with
 separator `.` (`tests/e2e/dovecot-prefix.conf`). The test enables `live` filing
 and checks: filing into category folders with read state preserved and
 `\Flagged` added, a client move as a category correction, a client move back
 to `INBOX` as a pin, a client delete as done, and an `INBOX` UIDVALIDITY reset
 that keeps the pinned message known and open. To run it locally, you need
-Docker with a running daemon, Python 3, Cargo and a Himalaya v2.1.0 binary.
+Docker with a running daemon, Python 3, Cargo and a Himalaya binary of a tested version.
 Pass the binary in `MT_E2E_HIMALAYA`, the layout (`flat` or `prefix`) and a
 free local port:
 

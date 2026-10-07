@@ -1,0 +1,203 @@
+name: Himalaya compatibility
+
+# Weekly: test pimalaya/himalaya's newest stable release with the Dovecot
+# end-to-end suite. A passing release is proposed as a pull request that adds
+# it to src/engine/himalaya-versions.json; a failing one opens or updates an
+# issue. The candidate binary only ever runs in the read-only `test` job.
+
+on:
+  schedule:
+    - cron: '23 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: himalaya-compat
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test the newest Himalaya
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.newest.outputs.version }}
+      listed: ${{ steps.newest.outputs.listed }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Newest stable Himalaya release
+        id: newest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$(gh api repos/pimalaya/himalaya/releases/latest --jq .tag_name)"
+          version="${tag#v}"
+          if ! printf '%s\n' "$version" | grep -Eqx '(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'; then
+            echo "::error::the newest Himalaya release has the tag $tag"
+            exit 1
+          fi
+          listed="$(python3 -c 'import json, sys; print(str(any(v["version"] == sys.argv[2] for v in json.load(open(sys.argv[1]))["versions"])).lower())' src/engine/himalaya-versions.json "$version")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "listed=$listed" >> "$GITHUB_OUTPUT"
+          if [ "$listed" = true ]; then
+            echo "::notice::Himalaya $version is already tested"
+          fi
+      - name: Add the candidate to the data file
+        if: steps.newest.outputs.listed == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.newest.outputs.version }}
+        run: bash scripts/add-himalaya-version.sh "$VERSION"
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.newest.outputs.listed == 'false'
+      - uses: Swatinem/rust-cache@v2
+        if: steps.newest.outputs.listed == 'false'
+        with:
+          key: e2e
+      - name: Install the candidate, pinned by its digest
+        if: steps.newest.outputs.listed == 'false'
+        env:
+          VERSION: ${{ steps.newest.outputs.version }}
+        run: |
+          set -euo pipefail
+          digest="$(python3 -c 'import json, sys; print([v for v in json.load(open(sys.argv[1]))["versions"] if v["version"] == sys.argv[2]][0]["assets"]["x86_64-linux"][len("sha256:"):])' src/engine/himalaya-versions.json "$VERSION")"
+          dir="$RUNNER_TEMP/himalaya-v$VERSION"
+          mkdir -p "$dir"
+          cd "$dir"
+          curl --proto '=https' --tlsv1.2 -fsSL -o himalaya.x86_64-linux.tgz \
+            "https://github.com/pimalaya/himalaya/releases/download/v$VERSION/himalaya.x86_64-linux.tgz"
+          echo "$digest  himalaya.x86_64-linux.tgz" | sha256sum -c -
+          tar -xzf himalaya.x86_64-linux.tgz himalaya
+          ./himalaya --version
+          echo "MT_E2E_HIMALAYA=$PWD/himalaya" >> "$GITHUB_ENV"
+      - id: build
+        if: steps.newest.outputs.listed == 'false'
+        run: cargo build --locked
+      - name: End to end, flat namespace
+        if: steps.newest.outputs.listed == 'false'
+        run: |
+          set -o pipefail
+          bash tests/e2e/run.sh flat 31143 2>&1 | tee "$RUNNER_TEMP/e2e-flat.log"
+      - name: End to end, INBOX. prefix namespace
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          bash tests/e2e/run.sh prefix 31144 2>&1 | tee "$RUNNER_TEMP/e2e-prefix.log"
+      - uses: actions/upload-artifact@v7.0.1
+        if: steps.newest.outputs.listed == 'false'
+        with:
+          name: himalaya-versions
+          path: src/engine/himalaya-versions.json
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@v7.0.1
+        if: failure()
+        with:
+          name: e2e-logs
+          path: ${{ runner.temp }}/e2e-*.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+  propose:
+    name: Propose the candidate
+    needs: test
+    if: needs.test.outputs.listed == 'false'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: himalaya-versions
+          path: ${{ runner.temp }}/candidate
+      - name: Branch, pull request and CI runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.test.outputs.version }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          branch="himalaya/$VERSION"
+          if git ls-remote --exit-code --heads origin "$branch" > /dev/null; then
+            echo "::notice::$branch exists already; its pull request is open or was decided"
+            exit 0
+          fi
+          cp "$RUNNER_TEMP/candidate/himalaya-versions.json" src/engine/himalaya-versions.json
+          git switch -c "$branch"
+          git add src/engine/himalaya-versions.json
+          git -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -m "Test Himalaya $VERSION"
+          git push origin "$branch"
+          cat > "$RUNNER_TEMP/body.md" <<BODY
+          The weekly check passed the Dovecot end-to-end suite against Himalaya $VERSION in both namespace layouts: $RUN_URL
+
+          This adds $VERSION to \`src/engine/himalaya-versions.json\` with the digests from its release and \`roles\` copied from the previous version. Before merging, read this version's \`--mailbox\` resolver in Himalaya's source (\`Account::resolve_mailbox\`, \`MailboxArg\` and the IMAP backend's mailbox parsing) for role changes; correct \`roles\` and the tests that pin it (\`src/engine/versions.rs\`, \`src/engine/targets.rs\`) if it changed.
+
+          CI and the end-to-end matrix were started on this branch.
+          BODY
+          gh pr create --base main --head "$branch" --title "Test Himalaya $VERSION" --body-file "$RUNNER_TEMP/body.md"
+          gh workflow run ci.yml --ref "$branch"
+          gh workflow run e2e.yml --ref "$branch"
+
+  report:
+    name: Report the failure
+    needs: test
+    if: ${{ failure() && needs.test.result == 'failure' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/download-artifact@v8.0.1
+        continue-on-error: true
+        with:
+          name: e2e-logs
+          path: ${{ runner.temp }}/logs
+      - name: Open or comment on the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.test.outputs.version }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "$VERSION" ]; then
+            VERSION="$(gh api repos/pimalaya/himalaya/releases/latest --jq .tag_name)"
+            VERSION="${VERSION#v}"
+          fi
+          title="Himalaya $VERSION fails the end-to-end suite"
+          {
+            echo "The weekly check failed for Himalaya $VERSION: $RUN_URL"
+            echo
+            for log in "$RUNNER_TEMP"/logs/e2e-*.log; do
+              [ -f "$log" ] || continue
+              echo "Last lines of $(basename "$log"):"
+              echo
+              echo '```text'
+              tail -n 60 "$log"
+              echo '```'
+              echo
+            done
+          } > "$RUNNER_TEMP/body.md"
+          number="$(gh issue list --state open --search "\"$title\" in:title" --json number,title \
+            --jq "map(select(.title == \"$title\")) | .[0].number // empty")"
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body-file "$RUNNER_TEMP/body.md"
+          else
+            gh issue create --title "$title" --body-file "$RUNNER_TEMP/body.md"
+          fi
