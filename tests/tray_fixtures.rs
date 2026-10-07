@@ -108,10 +108,38 @@ fn shapes(values: &[Value]) -> Shapes {
     shapes
 }
 
+/// Whether `path` lies inside an array that every real output left empty,
+/// such as `log_paths` on systemd: an empty array says nothing about the
+/// shape of its items.
+fn inside_empty_array(path: &str, real: &Shapes) -> bool {
+    let mut prefix = String::new();
+    for segment in path.split('/').skip(1) {
+        let parent = if prefix.is_empty() {
+            "/".to_owned()
+        } else {
+            prefix.clone()
+        };
+        prefix.push('/');
+        prefix.push_str(segment);
+        if segment == "[]"
+            && !real.contains_key(&prefix)
+            && real
+                .get(&parent)
+                .is_some_and(|kinds| kinds.contains("array"))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Each key path and type of `fixture` that no real output has.
 fn drift(fixture: &Value, real: &Shapes) -> Vec<String> {
     let mut drift = vec![];
     for (path, kinds) in shapes(std::slice::from_ref(fixture)) {
+        if inside_empty_array(&path, real) {
+            continue;
+        }
         let seen = real.get(&path).cloned().unwrap_or_default();
         for k in kinds.difference(&seen) {
             drift.push(format!("{path}: {k} (real: {seen:?})"));
@@ -368,4 +396,13 @@ fn status_fixtures_match_the_real_status_of_every_account() {
     }
     check(Output::Status, &real);
     assert!(server.requests().is_empty(), "status asks no server");
+}
+
+#[test]
+fn an_empty_real_array_accepts_any_items() {
+    let real = shapes(&[serde_json::json!({"log_paths": []})]);
+    let fixture = serde_json::json!({"log_paths": ["/a.log"]});
+    assert!(drift(&fixture, &real).is_empty());
+    let real = shapes(&[serde_json::json!({"log_paths": [1]})]);
+    assert_eq!(drift(&fixture, &real).len(), 1);
 }

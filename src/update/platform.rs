@@ -14,6 +14,12 @@ use std::{
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const PROBE_MAX_STDOUT: usize = 4096;
 const PROBE_MAX_STDERR: usize = 4096;
+/// `ETXTBSY` (26 on Linux and macOS): another thread forked while a write
+/// handle to the file was open, and that child still holds it. It clears
+/// once the child execs, so starting the binary is retried briefly.
+const TEXT_FILE_BUSY: i32 = 26;
+const BUSY_RETRIES: u32 = 20;
+const BUSY_PAUSE: Duration = Duration::from_millis(50);
 
 /// A file's identity: device, inode, size, modification time, change time
 /// and mode. A rename over the path, a rewrite or a `chmod` changes it.
@@ -187,14 +193,23 @@ fn writable(dir: &Path) -> bool {
 /// not start`, `killed by signal N`, `timed out`, `exited with N`, or
 /// `printed "…"`, each with the first line of stderr when there is one.
 pub fn probe(program: &Path, component: Component) -> Result<Version, String> {
-    let out = process::run_captured(
-        program,
-        &["--version"],
-        PROBE_TIMEOUT,
-        PROBE_MAX_STDOUT,
-        PROBE_MAX_STDERR,
-    )
-    .map_err(|_| "could not start".to_owned())?;
+    let mut attempt = 0;
+    let out = loop {
+        match process::run_captured(
+            program,
+            &["--version"],
+            PROBE_TIMEOUT,
+            PROBE_MAX_STDOUT,
+            PROBE_MAX_STDERR,
+        ) {
+            Ok(out) => break out,
+            Err(e) if e.raw_os_error() == Some(TEXT_FILE_BUSY) && attempt < BUSY_RETRIES => {
+                attempt += 1;
+                std::thread::sleep(BUSY_PAUSE);
+            }
+            Err(_) => return Err("could not start".to_owned()),
+        }
+    };
     let cause = match out.ending {
         Ending::TimedOut => "timed out".to_owned(),
         Ending::Overflowed => "printed too much".to_owned(),
