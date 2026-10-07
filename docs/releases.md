@@ -28,7 +28,8 @@ tag:
 
 ## Publish a version
 
-1. Update the package version in `Cargo.toml` and regenerate `Cargo.lock`.
+1. Update the package version in `Cargo.toml` and in `tray/Cargo.toml` (the
+   same version; CI refuses a mismatch) and regenerate `Cargo.lock`.
 2. Commit the version change and push it to `main`; wait for CI to pass.
 3. Create and push the matching annotated tag:
 
@@ -54,11 +55,19 @@ Each release contains:
 - `mailtriage-vVERSION-linux-amd64.tar.gz`
 - `mailtriage-vVERSION-linux-arm64.tar.gz`
 - `mailtriage-vVERSION-macos-arm64.tar.gz`
-- A `.sha256` file for each archive, and a combined `SHA256SUMS`.
+- `mailtriage-tray-vVERSION-linux-amd64.tar.gz`
+- `mailtriage-tray-vVERSION-linux-arm64.tar.gz`
+- `mailtriage-tray-vVERSION-macos-arm64.tar.gz`
+- A `.sha256` file for each archive, and a combined `SHA256SUMS` that lists
+  all six archives.
 
-Archives contain the executable, README and license. Linux builds use Ubuntu
-24.04's GNU libc environment; the macOS executable is unsigned and not notarized.
-Validate the Linux build in the target Hermes image before rollout.
+The `mailtriage` archives contain the executable, README and license, and stay
+free of GUI libraries. The `mailtriage-tray` archives contain `mailtriage-tray`
+and the license. `mailtriage update` installs a tray archive over a
+`mailtriage-tray` next to the CLI (see [Updates](guide.md#updates)). Linux
+builds use Ubuntu 24.04's GNU libc environment; the macOS executables are
+unsigned and not notarized. Validate the Linux build in the target Hermes
+image before rollout.
 
 The workflow creates a draft while uploading files, then publishes it only
 after assets pass checksum verification. Published release files cannot be

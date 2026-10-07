@@ -85,8 +85,8 @@ The result is `{"schema_version":1,"service":{...}}` (fields in [Service command
 `setup` writes `updates: auto`, so the background service installs every stable release within about a day and switches to it between passes (see [Updates](guide.md#updates)). On a host where provisioning owns the binary, pass `--updates off` (no network calls) or `--updates notify` (report only) to `setup`.
 
 - `mailtriage update --check --json` asks GitHub now and reports `available` and whether the binary may be replaced (`install.replaceable`, `install.reason`, `install.fix`). It exits 0 either way, and 3 when GitHub cannot be reached.
-- `service status --json` carries `service.update`: `installed` for the binary the service runs, `latest`, `available`, `last_error` and `replaceable`. It reads the cache and makes no network call.
-- `mailtriage update --json` installs the newest release. Exit 5 means another update is running: try again later. Exit 3 names the cause; report it to the user. Do not restart the service afterwards; it switches by itself.
+- `service status --json` carries `service.update`: `installed` for the binary the service runs, `latest`, `available`, `last_error` and `replaceable`, plus `tray` when a `mailtriage-tray` sits next to that binary. It reads the cache and makes no network call.
+- `mailtriage update --json` installs the newest release, then updates a `mailtriage-tray` next to the binary. Exit 5 means another update is running: try again later. Exit 3 names the cause; report it to the user. Exit 4 means the CLI is current or was updated but the tray update failed; report `update.tray.error` to the user. Do not restart the service afterwards; it switches by itself.
 
 ### The tray app
 

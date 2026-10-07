@@ -91,14 +91,22 @@ jobs:
           pattern: mailtriage-*
           merge-multiple: true
           path: dist
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          pattern: tray-*
+          merge-multiple: true
+          path: dist
       - name: Check downloaded assets
         run: |
           set -euo pipefail
           cd dist
           archives=(*.tar.gz)
           manifests=(*.tar.gz.sha256)
-          test "${#archives[@]}" -eq 3
-          test "${#manifests[@]}" -eq 3
+          trays=(mailtriage-tray-v*.tar.gz)
+          # Three CLI and three tray archives, each with its checksum file.
+          test "${#archives[@]}" -eq 6
+          test "${#manifests[@]}" -eq 6
+          test "${#trays[@]}" -eq 3
           cat "${manifests[@]}" > SHA256SUMS
           sha256sum --check SHA256SUMS
       - name: Publish GitHub Release

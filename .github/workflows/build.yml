@@ -125,8 +125,8 @@ jobs:
           tar -czf "dist-tray/$archive" -C tray-package mailtriage-tray LICENSE
           cd dist-tray
           shasum -a 256 "$archive" > "$archive.sha256"
-      # Named tray-*, not mailtriage-*: the release job downloads mailtriage-*
-      # and counts three archives until it publishes the tray (Phase B).
+      # Named tray-*, not mailtriage-*: the release job downloads both
+      # patterns and checks three CLI and three tray archives.
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: tray-${{ matrix.platform }}

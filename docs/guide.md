@@ -695,7 +695,7 @@ mailtriage service start --account work --json
 | `last_exit_status` | The last exit status the manager reports, or `null`. |
 | `unit_path`, `log_paths` | The service file and the launchd log files (`log_paths` is empty for systemd). |
 | `last_pass` | The account's latest `sync` or `watch` pass, from the state database: `finished_at`, `partial`, `exit_code` (0, 4 for partial, or the error's exit code), `mode` (`off`, `dry_run` or `live`), `version`, the mailtriage version that ran it (`null` for passes recorded before schema 7), and `reason`, the error's machine-readable reason (see [Output and exit codes](#output-and-exit-codes)), `null` for a pass without one and for a pass recorded before schema 8 or by an older release, so it never names an earlier pass's error. `null` before the first pass. |
-| `update` | The binary the service runs, and whether it is current: `mode` (the config's `updates`); `executable`, decoded from the service file (`null` without one, and then `installed` and `replaceable` describe the binary that runs `service status`); `installed`, its `--version` (`null` when it does not run); `latest`, `available` and `checked_at` from the last release check (`null`, `false` and `null` before the first one); `last_error`, the last failed install of that binary, else the last failed check (`{at, message}` or `null`); `replaceable` and `reason` (see [Binaries mailtriage does not replace](#binaries-mailtriage-does-not-replace)). It reads the update cache and makes no network call. |
+| `update` | The binary the service runs, and whether it is current: `mode` (the config's `updates`); `executable`, decoded from the service file (`null` without one, and then `installed` and `replaceable` describe the binary that runs `service status`); `installed`, its `--version` (`null` when it does not run); `latest`, `available` and `checked_at` from the last release check (`null`, `false` and `null` before the first one); `last_error`, the last failed install of that binary, else the last failed check (`{at, message}` or `null`); `replaceable` and `reason` (see [Binaries mailtriage does not replace](#binaries-mailtriage-does-not-replace)); `tray` when a `mailtriage-tray` sits next to that binary (see [The tray next to the CLI](#the-tray-next-to-the-cli)). It reads the update cache and makes no network call. |
 
 `last_pass` comes from the state database and works without any service. Every `sync` and every `watch` pass records it, including one that finds another worker holding the account lock (exit 5, reason `account_busy`). A healthy service shows `running: true` and a `last_pass.finished_at` no older than a few intervals.
 
@@ -812,6 +812,7 @@ When a step before the rename fails, the binary and `<binary>.previous` are unch
 | `release_url`, `published_at` | The release's GitHub page and publication time. |
 | `checked_at` | When this check ran. |
 | `install` | `path`: the binary `update` would replace. `replaceable`, `reason` and `fix`: see [Binaries mailtriage does not replace](#binaries-mailtriage-does-not-replace). |
+| `tray` | Only with a `mailtriage-tray` next to the binary: its `path`, `installed` version and `available` (see [The tray next to the CLI](#the-tray-next-to-the-cli)). `available` above is the CLI's alone. |
 | `warnings` | Problems that did not stop the command, such as a cache that could not be written. |
 
 Without `--check`:
@@ -831,10 +832,42 @@ Without `--check`:
 
 | Code | Cause |
 | --- | --- |
-| 0 | Updated (also with `warnings`), already current, or `--check` done. |
+| 0 | Updated (also with `warnings`), already current, or `--check` done. A skipped tray still exits 0. |
 | 2 | Invalid flags. |
 | 3 | GitHub could not be reached or answered with an error, including its rate limit; there is no stable release; the release has no archive for this platform or no `SHA256SUMS` line for it; a checksum mismatch; a bad archive; the new binary did not run; the installed binary changed during the update; no cache directory can be found (see [Files](#files)); or, without `--check`, the binary may not be replaced: the message names the reason and its fix. |
+| 4 | The CLI was updated or already current, but updating the `mailtriage-tray` next to it failed (see [The tray next to the CLI](#the-tray-next-to-the-cli)). |
 | 5 | Another update held the installation lock for 60 seconds (`another update is running`). |
+
+### The tray next to the CLI
+
+When a regular file `mailtriage-tray` (not a symlink) is in the same directory as the CLI, `mailtriage update` updates it in the same run, after the CLI. The CLI's directory is taken with symlinks resolved. The tray update uses the same installation lock, download rules and `SHA256SUMS`, and the tray has its own entry in the cache:
+
+1. `update` runs `mailtriage-tray --version`. When that fails, for example on a Linux host without the tray's GTK or AppIndicator libraries, the tray is skipped. Nothing is downloaded, and a skipped tray is not a failure.
+2. When the release is newer than the tray's own version, `update` installs `mailtriage-tray-vX.Y.Z-PLATFORM.tar.gz` with the same steps as the CLI. The new tray must print `mailtriage-tray X.Y.Z`, and the old one is kept as `mailtriage-tray.previous`. A tray that is already current is left alone, even when the release has no tray archive.
+3. A failure leaves the old tray in place and does not undo the CLI. `watch` retries the tray after 1 hour, doubling up to 24 hours, and `update` exits 4.
+
+The CLI comes first. When its part fails, `update` exits as in the table above without trying the tray. A tray that mailtriage may not replace (see [Binaries mailtriage does not replace](#binaries-mailtriage-does-not-replace)) fails the tray part.
+
+`update`'s result adds `tray`:
+
+```json
+{"schema_version":1,"update":{"action":"updated","from":"0.2.0","to":"0.3.0","path":"/Users/alice/.local/bin/mailtriage","previous_path":"/Users/alice/.local/bin/mailtriage.previous","warnings":[],"services":[],"tray":{"action":"updated","from":"0.2.0","to":"0.3.0","error":null}}}
+```
+
+| `tray.action` | `from`, `to` and `error` |
+| --- | --- |
+| `updated` | The tray's version before and after; `error` is `null`. |
+| `current` | Both the tray's version: the release is not newer. |
+| `skipped` | `null`, `null`, and `mailtriage-tray does not run here: …` with the cause. |
+| `failed` | The tray's version, the release's version, and why, for example `checksum mismatch for …` or `release v0.3.0 has no tray archive for linux-arm64`. The result then also has `"partial": true` at the top level, and `update` exits 4. |
+
+`update --check`, `service status` and `doctor` add `"tray":{"path":"/Users/alice/.local/bin/mailtriage-tray","installed":"0.2.0","available":true}`:
+
+- `path`: the tray file.
+- `installed`: what it prints for `--version`, or `null` when it does not run.
+- `available`: whether the release is newer.
+
+`service status` and `doctor` look next to the binary the service runs and read only the cache. Their `available` is `false` while the cached release was checked by a mailtriage that did not know the tray; `watch` then checks again early. The CLI's `available` still means the CLI alone. Without a tray file there is no `tray`.
 
 ### In the background
 
@@ -843,15 +876,15 @@ All of this happens in `watch`; no other command checks for updates by itself. E
 The update step:
 
 1. Reads `updates` from the config at every pass. When the file cannot be read or its `updates` is invalid, `watch` uses the mode it last stored for this config; with none, it skips the step.
-2. With `off`, it stops there. With `notify` or `auto`, it refreshes the release information when the next check is due, about once a day: 24 hours after a successful check, plus up to an hour. Before the request it records the next check one hour ahead, so a `watch` that crashes or is killed during the request does not ask again sooner. A failed check is retried after 1 hour, doubling up to 24 hours (±10 %), or later when GitHub's `Retry-After` or rate-limit reset says so.
-3. With `auto`, when the cached release is newer than the installed binary, was checked at most 48 hours ago, and no earlier attempt waits for its retry, it installs the release as `mailtriage update` does. It tries the installation lock once; when another update holds it, it tries again at the next pass. It records the next attempt one hour ahead before it downloads, and a failed install waits 1 hour, doubling up to 24 hours. After an install, the restart check switches `watch` to the new binary before the pass.
+2. With `off`, it stops there. With `notify` or `auto`, it refreshes the release information when the next check is due, about once a day: 24 hours after a successful check, plus up to an hour. Before the request it records the next check one hour ahead, so a `watch` that crashes or is killed during the request does not ask again sooner. A failed check is retried after 1 hour, doubling up to 24 hours (±10 %), or later when GitHub's `Retry-After` or rate-limit reset says so. When the cached release was checked by a mailtriage that did not know the tray, it checks once early, unless a failed check or a pending request holds the next one off.
+3. With `auto`, when the cached release is newer than the installed binary, was checked at most 48 hours ago, and no earlier attempt waits for its retry, it installs the release as `mailtriage update` does. It tries the installation lock once; when another update holds it, it tries again at the next pass. It records the next attempt one hour ahead before it downloads, and a failed install waits 1 hour, doubling up to 24 hours. After an install, the restart check switches `watch` to the new binary before the pass. A `mailtriage-tray` next to the binary comes after it, under the same rules and with its own retry times, from the cached release only (see [The tray next to the CLI](#the-tray-next-to-the-cli)). After a switch to a new binary, the tray follows at a later pass. A tray that does not run here is skipped, and a tray failure is an `error` event.
 4. With `notify`, or with `auto` when the binary may not be replaced, it prints once per release and config `{"schema_version":1,"update":{"event":"available","current":"0.2.0","latest":"0.3.0","release_url":"…"}}`. For `auto`, the event adds `install` with `reason` and `fix`.
 
 The release information is shared by every `watch` of the same user: a `notify` watcher's check serves an `auto` watcher's install. A cache that cannot be written stops the network work, and `watch` prints one event about it.
 
 ### Status
 
-`mailtriage service status --account NAME` and `mailtriage doctor --account NAME` include an `update` block for the binary the account's service runs (see [Service commands](#service-commands)); `doctor` adds `ready` and `fix`. Both read the cache and make no network call. `mailtriage update --check --json` asks GitHub now.
+`mailtriage service status --account NAME` and `mailtriage doctor --account NAME` include an `update` block for the binary the account's service runs (see [Service commands](#service-commands)); `doctor` adds `ready` and `fix`. With a `mailtriage-tray` next to that binary, the block has `tray` too (see [The tray next to the CLI](#the-tray-next-to-the-cli)). Both read the cache and make no network call. `mailtriage update --check --json` asks GitHub now.
 
 ### How a running service switches
 
@@ -894,7 +927,7 @@ Run `mailtriage service install` again after you move the binary.
 | `update.json` in `~/Library/Caches/mailtriage` (macOS), or in `$XDG_CACHE_HOME/mailtriage` when `XDG_CACHE_HOME` is an absolute path, else `~/.cache/mailtriage` (Linux) | The last release check and when the next one is due, each config's mode and the last `available` event, and each installed binary's version and last install error. `update.lock` beside it guards it. Deleting it is safe; it is rebuilt. |
 | `.mailtriage-update.lock` next to the binary | The installation lock. It is never deleted. |
 | `.mailtriage-update-*` next to the binary | Temporary files of an update; the next update removes leftovers. |
-| `<binary>.previous` | The binary before the last update. |
+| `<binary>.previous` | The binary before the last update; `mailtriage-tray.previous` for the tray. |
 
 Without the cache directory (no `HOME`, and on Linux no absolute `XDG_CACHE_HOME`), `update` exits 3 and `watch` skips its update work.
 

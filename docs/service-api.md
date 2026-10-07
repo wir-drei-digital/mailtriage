@@ -184,10 +184,17 @@ The CLI wraps each in `{"schema_version":1,"service":{...}}`.
   update}`. `last_pass` is `{finished_at, partial, exit_code, mode, version,
   reason}` or `null`.
   `update` is `update::report::update_block(mode, Option<(Manager, unit
-  path)>)`: `{mode, executable, installed, latest, available, checked_at,
-  last_error, replaceable, reason}`. `doctor` adds `update::report::doctor_block`
-  (the same plus `ready`, and `fix` when not ready), and setup step 9 adds an
-  `update` item when that block is not ready.
+  path)>, Option<Cache>)`: `{mode, executable, installed, latest, available,
+  checked_at, last_error, replaceable, reason}`, plus `tray: {path, installed,
+  available}` (`update::report::tray_block`) when a regular file
+  `mailtriage-tray` sits next to the executable it describes. Each tray file
+  is probed once per process. `status_account` passes the cache of the
+  context's home (`Cache::for_home`: `XDG_CACHE_HOME` counts only for the home
+  in `HOME`), so a test `Context` never reads this user's cache; without a
+  context it uses `Cache::for_user()`. `doctor` adds
+  `update::report::doctor_block` (the same with `Cache::for_user()`, plus
+  `ready`, and `fix` when not ready; `tray` included), and setup step 9 adds
+  an `update` item when that block is not ready.
 - `Context::detect()` fails with exit 2 on platforms other than macOS and
   Linux and exit 3 on Linux without `systemctl`; `status` then reports
   `manager:"none"`. Unknown account: exit 2. Unmarked file at the unit path:
@@ -197,14 +204,30 @@ The CLI wraps each in `{"schema_version":1,"service":{...}}`.
 
 `update::command::run(check_only, &dyn Hooks) -> Result<Value>` is
 `mailtriage update [--check]`; it opens no config. Errors are `ServiceError`s:
-3 for network, release, archive, smoke-test and replaceability problems, 5
-when the installation lock stayed held for 60 s. The JSON results are in the
-[guide](guide.md#updates). The code is in `src/update/`: `github` (URL rules,
-release list, downloads), `release` (candidate, archive names,
-`SHA256SUMS`), `cache` (`update.json`), `schedule`, `check` (one refresh),
-`platform` (file identity, replaceability, `--version` probes), `archive`,
-`install` (the transaction under the installation lock), `service_files`
-(decoding service files) and `command`.
+3 for network, release, archive, smoke-test and replaceability problems of the
+CLI, 5 when the installation lock stayed held for 60 s. The JSON results are
+in the [guide](guide.md#updates). The code is in `src/update/`: `github` (URL
+rules, release list, downloads), `release` (candidate, archive names,
+`SHA256SUMS`), `cache` (`update.json`), `schedule`, `check` (one refresh,
+and `due`: when `watch` refreshes), `platform` (file identity,
+replaceability, `--version` probes), `archive`, `install` (the transaction
+under the installation lock), `service_files` (decoding service files) and
+`command`.
+
+The updater installs `update::COMPONENTS`: `CLI` (`mailtriage`) and `TRAY`
+(`mailtriage-tray`, at `update::tray_path(cli)`, used when
+`update::installed_tray(cli)` finds a regular file there). Both go through
+`install::install` with their own `Job { component, path, fallback }`; the
+tray's fallback is its own probed version. `run` handles the CLI first and
+then the tray under the same installation lock. A failed tray part keeps the
+CLI's result and sets top-level `"partial": true` (exit 4); a failed CLI part
+never reaches the tray. Every check records `release.archives` for each
+component (`null` when the release lacks it); a missing key was written by an
+older version and counts as unknown (`CachedRelease::knows`), so `watch`
+refreshes early once (`check::due`) and status reports the tray's `available`
+as false. `Cache::record_install_failure` (backoff), `record_skip` (no
+backoff) and `record_version` are the `installs` writers that `update` and
+`watch` share.
 
 ## Heartbeat (schema v5)
 
@@ -291,8 +314,8 @@ pub struct WatchArgs { pub config: PathBuf, pub interval_seconds: Option<u64> }
 pub fn watch_args(args: &[String]) -> Option<WatchArgs>;
 
 // Decoders: the argument list, `None` when it cannot be read or decoded.
-pub fn plist_arguments(text: &str) -> Option<Vec<String>>;       // ProgramArguments
-pub fn unit_arguments(text: &str) -> Option<Vec<String>>;        // ExecStart= of the unit file
+// The unit file and plist decoders are `update::service_files::{plist_arguments,
+// unit_arguments}`, which `inspect` uses.
 pub fn launchctl_arguments(text: &str) -> Option<Vec<String>>;   // `arguments = {…}` of `launchctl print`
 pub fn exec_start_arguments(value: &str) -> Option<Vec<String>>; // argv[] of `systemctl show -p ExecStart`
 pub fn process_arguments(proc_root: &Path, pid: u32) -> Option<Vec<String>>; // <proc_root>/<pid>/cmdline
@@ -317,8 +340,12 @@ pub fn status(service: &Service, config_path: &Path, account: Option<&str>,
   wherever they stand; `None` when `--config` is missing, has no value or
   appears twice. An `--interval-seconds` that is not a number gives `None` for
   `interval_seconds` only.
-- `plist_arguments` and `unit_arguments` invert `plist` and `systemd_unit`
-  (XML entities; systemd quoting, `%%` and `$$`), so the paths come back exact.
+- `update::service_files::{plist_arguments, unit_arguments}` invert `plist`
+  and `systemd_unit` (XML entities; systemd quoting, `%%` and `$$`), so the
+  paths come back exact. Anything those writers never write (an unknown
+  entity, a raw `<`, a single `%` or `$`, a quote in a bare word) gives
+  `None`, so `inspect` reports the file's config as unknown rather than a
+  wrong one.
 - `process_arguments` reads the start time (field 22 of `stat`) before and
   after `cmdline` and returns `None` when the two differ, so a PID reused in
   between is never read.
