@@ -111,6 +111,19 @@ pub fn exit_code(error: &anyhow::Error) -> i32 {
     3
 }
 
+/// The machine-readable `reason` the CLI reports for `error`, if any: a
+/// `ServiceError`'s kind, or `config_changed` for the engine's
+/// `ConfigChanged`.
+pub fn error_reason(error: &anyhow::Error) -> Option<&'static str> {
+    if let Some(e) = error.downcast_ref::<ServiceError>() {
+        return e.kind.reason();
+    }
+    if error.downcast_ref::<engine::ConfigChanged>().is_some() {
+        return ErrorKind::ConfigChanged.reason();
+    }
+    None
+}
+
 /// Whether `error` means `mailtriage.json` or the mail engine's configuration
 /// changed while the command ran. Rerunning with the current configuration
 /// is the remedy, so `watch` skips such a pass and continues; a changed
@@ -525,34 +538,49 @@ impl Service {
             }
         }
     }
-    /// One pass in the spec's "Sync pass order". A pass that holds the
-    /// account lock and names a configured account records a heartbeat: how
-    /// it ended (0, 4 partial, or the error's exit code) and its mode.
+    /// One pass in the spec's "Sync pass order". A pass with a valid limit
+    /// that names a configured account records a heartbeat: how it ended
+    /// (0, 4 partial, or the error's exit code), its mode and the error's
+    /// reason. A pass that finds another worker holding the account lock
+    /// records one too (exit 5, `account_busy`); the holder's own heartbeat
+    /// replaces it when its pass ends.
     pub fn sync(&mut self, name: &str, limit: usize) -> Result<Value> {
         if !(1..=1000).contains(&limit) {
             return Err(err(2, "sync limit must be 1..=1000"));
         }
-        let _lock = self.lock(name)?;
+        let _lock = match self.lock(name) {
+            Ok(lock) => lock,
+            Err(e) => {
+                self.record_pass(name, false, exit_code(&e), error_reason(&e));
+                return Err(e);
+            }
+        };
         let result = self.sync_locked(name, limit);
-        if let Some(account) = self.config.accounts.get(name) {
-            let mode = if account.engine_config().is_some() {
-                account.filing.mode
-            } else {
-                FilingMode::Off
-            };
-            let (partial, code) = match &result {
-                Ok(value) => {
-                    let partial = value.get("partial").and_then(Value::as_bool) == Some(true);
-                    (partial, if partial { 4 } else { 0 })
-                }
-                Err(e) => (false, exit_code(e)),
-            };
-            // A heartbeat that cannot be written never hides the pass result.
-            let _ = self
-                .store
-                .record_heartbeat(name, partial, code, filing::mode_str(mode));
-        }
+        let (partial, code, reason) = match &result {
+            Ok(value) => {
+                let partial = value.get("partial").and_then(Value::as_bool) == Some(true);
+                (partial, if partial { 4 } else { 0 }, None)
+            }
+            Err(e) => (false, exit_code(e), error_reason(e)),
+        };
+        self.record_pass(name, partial, code, reason);
         result
+    }
+    /// The heartbeat of a pass of a configured account, with its mode (`off`
+    /// without an engine). A heartbeat that cannot be written never hides
+    /// the pass result.
+    fn record_pass(&self, name: &str, partial: bool, code: i32, reason: Option<&str>) {
+        let Some(account) = self.config.accounts.get(name) else {
+            return;
+        };
+        let mode = if account.engine_config().is_some() {
+            account.filing.mode
+        } else {
+            FilingMode::Off
+        };
+        let _ = self
+            .store
+            .record_heartbeat(name, partial, code, filing::mode_str(mode), reason);
     }
     /// The pass itself, under the account lock; the steps Tasks 7 and 8 add
     /// are marked where they belong.
@@ -2132,5 +2160,19 @@ mod error_reasons {
         let e = check_binding(&cfg.accounts["work"], None, "previous").unwrap_err();
         let e = e.downcast_ref::<ServiceError>().unwrap();
         assert_eq!((e.code, e.kind), (5, ErrorKind::BindingConflict));
+    }
+
+    /// The heartbeat's reason is the one the CLI reports.
+    #[test]
+    fn error_reason_names_the_kind_or_the_engine_config_change() {
+        use super::{err, err_kind, error_reason};
+        let busy = err_kind(5, ErrorKind::AccountBusy, "busy");
+        assert_eq!(error_reason(&busy), Some("account_busy"));
+        assert_eq!(
+            error_reason(&crate::engine::ConfigChanged.into()),
+            Some("config_changed")
+        );
+        assert_eq!(error_reason(&err(2, "unknown account")), None);
+        assert_eq!(error_reason(&anyhow::anyhow!("io")), None);
     }
 }

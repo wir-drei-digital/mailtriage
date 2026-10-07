@@ -181,8 +181,8 @@ The CLI wraps each in `{"schema_version":1,"service":{...}}`.
 - `system_service::status_account(&Service, config, account,
   Option<&Context>)`: `{manager:"launchd"|"systemd"|"none", account, installed,
   loaded, running, pid, last_exit_status, unit_path, log_paths, last_pass,
-  update}`. `last_pass` is `{finished_at, partial, exit_code, mode, version}`
-  or `null`.
+  update}`. `last_pass` is `{finished_at, partial, exit_code, mode, version,
+  reason}` or `null`.
   `update` is `update::report::update_block(mode, Option<(Manager, unit
   path)>)`: `{mode, executable, installed, latest, available, checked_at,
   last_error, replaceable, reason}`. `doctor` adds `update::report::doctor_block`
@@ -210,8 +210,10 @@ release list, downloads), `release` (candidate, archive names,
 
 Migration 5 adds `pass_heartbeats(account TEXT PRIMARY KEY, finished_at TEXT
 NOT NULL, partial INTEGER NOT NULL, exit_code INTEGER NOT NULL, mode TEXT NOT
-NULL)`. `Service::sync` upserts one row per pass that took the account lock and
-names a configured account: `exit_code` 0, 4 for partial, else the error's code
+NULL)`. `Service::sync` upserts one row per pass that names a configured
+account, including a pass that finds another worker holding the account lock
+(exit 5, reason `account_busy`; the holder's own heartbeat replaces it when its
+pass ends): `exit_code` 0, 4 for partial, else the error's code
 (the `ServiceError` code, 5 for an engine configuration change, else 3);
 `partial` is false for a failed pass; `mode` is the pass's filing mode (`off`
 without an engine). A failed heartbeat write never changes the pass result.
@@ -465,7 +467,7 @@ Apply result: `{"schema_version":1,"account":"work","marked":N,"waiting_marked":
 
 Errors: 2 for `--apply` outside `live` (`refile --apply requires filing mode live`), an unknown category, a folder that names no category or retired folder (`unknown folder: not a category or retired folder`) or several (`folder name matches several folders; pass the native name: A, B`), a limit outside 1..=500, an unknown account; 3 when the state database is unavailable; 5 when `mailtriage.json` changed (`reason: config_changed`) or the placements kept changing (`placements changed concurrently; retry`).
 
-Schema v6 (migration 6): `placements.refile_once`, `placements.filed_home_folder`/`filed_home_epoch`/`filed_home_uid` (the occurrence a COPYUID-proven mailtriage move produced; kept only while it is the known home), `filing_intents.consumes_refile`, `folders.drain_until_uid` (NULL: frozen; 0: retained in the last pass; N: draining until UID N). The newer-schema guard is `LATEST` (7 since schema v7, below).
+Schema v6 (migration 6): `placements.refile_once`, `placements.filed_home_folder`/`filed_home_epoch`/`filed_home_uid` (the occurrence a COPYUID-proven mailtriage move produced; kept only while it is the known home), `filing_intents.consumes_refile`, `folders.drain_until_uid` (NULL: frozen; 0: retained in the last pass; N: draining until UID N). The newer-schema guard is the public `store::LATEST` (8 since schema v8, below).
 
 Also: `filing status` gains `refile_marked` and `refile_candidates`; `categories apply` gains `hint` (null with filing `off`); `filing plan` refile moves carry `"reason":"refile"`; events `refile_marked`, `refile_cleared {reason}`, `refile_cancelled {intent_id, reason}`, and `moved` with `"reason":"refile"`.
 
@@ -481,3 +483,21 @@ inserting heartbeats on an open connection after another process migrated.
 A process of a release before v7 updates an existing heartbeat row without
 touching `version`, so during a rolling update a row can keep the newer
 process's version until the next pass of a v7-capable process.
+
+## Heartbeat reason (schema v8)
+
+Migration 8 adds two nullable columns, `pass_heartbeats.reason` and
+`pass_heartbeats.reason_at`. `Store::record_heartbeat(account, partial,
+exit_code, mode, reason)` writes `reason` and sets `reason_at` to the
+`finished_at` it writes, in the same upsert. `Service::sync` passes
+`service::error_reason(&error)`, the `reason` the CLI's error object carries
+(a `ServiceError`'s kind, or `config_changed` for the engine's
+`ConfigChanged`), and `None` for a pass that did not fail. So error heartbeats
+carry `config_changed` (the errors `watch` skips), `account_busy` (another
+worker holds the account lock), `binding_conflict` and the other reasons, and
+`null` for an error without one. `Store::heartbeat` returns `reason` only when
+`reason_at` equals `finished_at`, else `null`: rows written before v8 read
+`null`, and so does a row that a process of a release before v8 rewrote after
+the migration (it updates `finished_at` but neither `reason` nor `reason_at`),
+so a reason never outlives its pass. `store::LATEST` is public: tests name the
+latest schema `LATEST` and a newer one `LATEST + 1`.

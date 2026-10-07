@@ -7,7 +7,7 @@ use mailtriage::{
         IntentPatch, LocationState, StageOptions,
     },
     normalize,
-    store::Store,
+    store::{Store, LATEST},
 };
 use std::collections::BTreeMap;
 
@@ -81,6 +81,8 @@ ALTER TABLE placements DROP COLUMN filed_home_uid;
 ALTER TABLE filing_intents DROP COLUMN consumes_refile;
 ALTER TABLE folders DROP COLUMN drain_until_uid;
 ALTER TABLE pass_heartbeats DROP COLUMN version;
+ALTER TABLE pass_heartbeats DROP COLUMN reason;
+ALTER TABLE pass_heartbeats DROP COLUMN reason_at;
 PRAGMA user_version=5;";
 
 /// One placement per migration case, with its move intents (ids ascend in
@@ -124,7 +126,7 @@ INSERT INTO filing_intents(account,message_id,kind,folder,epoch,uid,target,targe
 #[test]
 fn a_fresh_database_is_at_the_latest_schema() {
     let (_d, s) = store();
-    assert_eq!(s.schema_version().unwrap(), 7);
+    assert_eq!(s.schema_version().unwrap(), LATEST);
 }
 
 #[test]
@@ -137,7 +139,7 @@ fn migration_v6_fills_filed_homes_only_from_a_proven_newest_move() {
     db.execute_batch(V5_ROWS).unwrap();
     drop(db);
     let s = Store::open(&path).unwrap();
-    assert_eq!(s.schema_version().unwrap(), 7);
+    assert_eq!(s.schema_version().unwrap(), LATEST);
     let filed = |id: &str| {
         let p = s.placement("work", id).unwrap().unwrap();
         (p.filed_home_folder, p.filed_home_epoch, p.filed_home_uid)

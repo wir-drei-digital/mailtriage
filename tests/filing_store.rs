@@ -2,7 +2,7 @@ use mailtriage::{
     domain::{FilingMode, MailboxSnapshot, SourceEnvelope},
     filing::{LocationState, RescanFilter, StageOptions},
     normalize,
-    store::Store,
+    store::{Store, LATEST},
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -41,8 +41,8 @@ const NOW: &str = "2026-10-04T12:00:00+00:00";
 fn migration_reaches_the_latest_schema_and_is_idempotent() {
     let d = tempfile::tempdir().unwrap();
     let p = d.path().join("db");
-    assert_eq!(Store::open(&p).unwrap().schema_version().unwrap(), 7);
-    assert_eq!(Store::open(&p).unwrap().schema_version().unwrap(), 7);
+    assert_eq!(Store::open(&p).unwrap().schema_version().unwrap(), LATEST);
+    assert_eq!(Store::open(&p).unwrap().schema_version().unwrap(), LATEST);
 }
 
 #[test]
@@ -362,7 +362,7 @@ fn newer_schema_is_rejected() {
     drop(Store::open(&p).unwrap());
     rusqlite::Connection::open(&p)
         .unwrap()
-        .pragma_update(None, "user_version", 8)
+        .pragma_update(None, "user_version", LATEST + 1)
         .unwrap();
     assert!(Store::open(&p).is_err());
 }
@@ -960,7 +960,7 @@ PRAGMA user_version=2;",
 }
 
 fn assert_v2_mail_kept(s: &Store) {
-    assert_eq!(s.schema_version().unwrap(), 7);
+    assert_eq!(s.schema_version().unwrap(), LATEST);
     let r = s.record("work", "msg_1").unwrap().unwrap();
     assert_eq!(r.envelope["subject"], "Hello");
     assert_eq!(r.overrides["urgency"], "high");

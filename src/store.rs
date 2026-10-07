@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 /// Schema migrations: (version reached, SQL). Each runs in its own
 /// `BEGIN IMMEDIATE` transaction that re-reads `user_version` first.
-const MIGRATIONS: [(u32, &str); 7] = [
+const MIGRATIONS: [(u32, &str); 8] = [
     (
         1,
         "CREATE TABLE metadata(key TEXT PRIMARY KEY, value INTEGER NOT NULL);
@@ -103,10 +103,21 @@ UPDATE placements SET filed_home_folder=home_folder,filed_home_epoch=home_epoch,
     // The version that ran each pass; nullable, so processes of the
     // previous release keep inserting heartbeats (spec "Rolling updates").
     (7, "ALTER TABLE pass_heartbeats ADD COLUMN version TEXT;"),
+    // The error's machine-readable reason, and the `finished_at` of the
+    // pass that wrote it: a process of an older release rewrites
+    // `finished_at` without them, and its pass must not show a stale
+    // reason (spec "Heartbeat reason").
+    (
+        8,
+        "ALTER TABLE pass_heartbeats ADD COLUMN reason TEXT;
+ALTER TABLE pass_heartbeats ADD COLUMN reason_at TEXT;",
+    ),
 ];
 
-/// The schema this binary migrates to; a newer database is refused.
-const LATEST: u32 = MIGRATIONS[MIGRATIONS.len() - 1].0;
+/// The schema this binary migrates to (the last migration's version); a
+/// newer database is refused. Public so tests name the latest schema
+/// instead of a number.
+pub const LATEST: u32 = MIGRATIONS[MIGRATIONS.len() - 1].0;
 
 /// Runs one migration under the write lock, unless another process applied
 /// it since this one read `user_version`: the version is re-read inside the
@@ -181,30 +192,50 @@ impl Store {
             )
             .optional()?)
     }
-    /// Records how the account's latest sync pass ended, and the version
-    /// of mailtriage that ran it.
+    /// Records how the account's latest sync pass ended, the version of
+    /// mailtriage that ran it, and the error's machine-readable `reason`
+    /// (`None` for a pass that did not fail or an error without one).
+    /// `reason_at` repeats `finished_at`, marking the reason as this pass's.
     pub fn record_heartbeat(
         &self,
         account: &str,
         partial: bool,
         exit_code: i32,
         mode: &str,
+        reason: Option<&str>,
     ) -> Result<()> {
+        let finished_at = now();
         self.db.execute(
-            "INSERT INTO pass_heartbeats(account,finished_at,partial,exit_code,mode,version) VALUES(?,?,?,?,?,?)
+            "INSERT INTO pass_heartbeats(account,finished_at,partial,exit_code,mode,version,reason,reason_at)
+             VALUES(?,?,?,?,?,?,?,?)
              ON CONFLICT(account) DO UPDATE SET finished_at=excluded.finished_at,partial=excluded.partial,
-             exit_code=excluded.exit_code,mode=excluded.mode,version=excluded.version",
-            params![account, now(), partial, exit_code, mode, env!("CARGO_PKG_VERSION")],
+             exit_code=excluded.exit_code,mode=excluded.mode,version=excluded.version,
+             reason=excluded.reason,reason_at=excluded.reason_at",
+            params![
+                account,
+                finished_at,
+                partial,
+                exit_code,
+                mode,
+                env!("CARGO_PKG_VERSION"),
+                reason,
+                finished_at
+            ],
         )?;
         Ok(())
     }
-    /// The latest pass: `{finished_at, partial, exit_code, mode, version}`;
-    /// `version` is `null` for rows written before schema 7.
+    /// The latest pass: `{finished_at, partial, exit_code, mode, version,
+    /// reason}`. `version` is `null` for rows written before schema 7.
+    /// `reason` is `null` unless the pass that wrote `finished_at` also
+    /// wrote it (`reason_at` equals `finished_at`): rows written before
+    /// schema 8, or rewritten since by an older release, read `null`.
     pub fn heartbeat(&self, account: &str) -> Result<Option<Value>> {
         Ok(self
             .db
             .query_row(
-                "SELECT finished_at,partial,exit_code,mode,version FROM pass_heartbeats WHERE account=?",
+                "SELECT finished_at,partial,exit_code,mode,version,
+                 CASE WHEN reason_at=finished_at THEN reason END
+                 FROM pass_heartbeats WHERE account=?",
                 [account],
                 |r| {
                     Ok(json!({
@@ -213,6 +244,7 @@ impl Store {
                         "exit_code": r.get::<_, i64>(2)?,
                         "mode": r.get::<_, String>(3)?,
                         "version": r.get::<_, Option<String>>(4)?,
+                        "reason": r.get::<_, Option<String>>(5)?,
                     }))
                 },
             )
@@ -738,8 +770,10 @@ pub fn now() -> String {
     Utc::now().to_rfc3339()
 }
 
+/// Migrations 7 and 8 (the heartbeat's `version` and `reason`) and the
+/// newer-schema guard.
 #[cfg(test)]
-mod schema_7 {
+mod schema_latest {
     use super::*;
 
     /// A database migrated only up to `version`, as an older binary left it.
@@ -765,21 +799,26 @@ mod schema_7 {
              ON CONFLICT(account) DO UPDATE SET finished_at=excluded.finished_at,partial=excluded.partial,
              exit_code=excluded.exit_code,mode=excluded.mode";
 
+    /// The heartbeat statement of the release before schema 8.
+    const V7_INSERT: &str = "INSERT INTO pass_heartbeats(account,finished_at,partial,exit_code,mode,version) VALUES(?,?,?,?,?,?)
+             ON CONFLICT(account) DO UPDATE SET finished_at=excluded.finished_at,partial=excluded.partial,
+             exit_code=excluded.exit_code,mode=excluded.mode,version=excluded.version";
+
     #[test]
-    fn every_older_schema_migrates_to_7() {
-        for from in [0, 5, 6] {
+    fn every_older_schema_migrates_to_latest() {
+        for from in [0, 5, 6, 7] {
             let (_dir, path) = database_at(from);
             Store::open(&path).unwrap();
-            assert_eq!(user_version(&path), 7, "from {from}");
+            assert_eq!(user_version(&path), LATEST, "from {from}");
         }
     }
 
     #[test]
-    fn a_database_at_8_is_refused() {
-        let (_dir, path) = database_at(7);
+    fn a_newer_database_is_refused() {
+        let (_dir, path) = database_at(LATEST);
         Connection::open(&path)
             .unwrap()
-            .pragma_update(None, "user_version", 8)
+            .pragma_update(None, "user_version", LATEST + 1)
             .unwrap();
         let error = Store::open(&path).err().unwrap();
         assert_eq!(
@@ -799,7 +838,9 @@ mod schema_7 {
             store.heartbeat("work").unwrap().unwrap()["version"],
             Value::Null
         );
-        store.record_heartbeat("work", false, 0, "off").unwrap();
+        store
+            .record_heartbeat("work", false, 0, "off", None)
+            .unwrap();
         assert_eq!(
             store.heartbeat("work").unwrap().unwrap()["version"],
             env!("CARGO_PKG_VERSION")
@@ -815,7 +856,7 @@ mod schema_7 {
         old.execute(V6_INSERT, params!["home", now(), false, 0, "off"])
             .unwrap();
         let store = Store::open(&path).unwrap();
-        assert_eq!(user_version(&path), 7);
+        assert_eq!(user_version(&path), LATEST);
         old.execute(V6_INSERT, params!["work", now(), true, 4, "live"])
             .unwrap();
         let beat = store.heartbeat("work").unwrap().unwrap();
@@ -823,5 +864,79 @@ mod schema_7 {
             (beat["exit_code"].clone(), beat["version"].clone()),
             (json!(4), Value::Null)
         );
+    }
+
+    #[test]
+    fn a_heartbeat_reports_its_reason_and_old_rows_read_as_null() {
+        let (_dir, path) = database_at(7);
+        let old = Connection::open(&path).unwrap();
+        old.execute(V7_INSERT, params!["work", now(), false, 5, "off", "0.1.0"])
+            .unwrap();
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.heartbeat("work").unwrap().unwrap()["reason"],
+            Value::Null
+        );
+        store
+            .record_heartbeat("work", false, 5, "off", Some("binding_conflict"))
+            .unwrap();
+        assert_eq!(
+            store.heartbeat("work").unwrap().unwrap()["reason"],
+            "binding_conflict"
+        );
+        store
+            .record_heartbeat("work", false, 0, "off", None)
+            .unwrap();
+        assert_eq!(
+            store.heartbeat("work").unwrap().unwrap()["reason"],
+            Value::Null
+        );
+    }
+
+    /// The heartbeat after a pass of this release recorded `config_changed`
+    /// and a process of the release at `from`, whose connection was open
+    /// before the migration, then rewrote the row with `statement`.
+    fn rewritten_by(from: u32, statement: &str, values: &[&dyn rusqlite::ToSql]) -> Value {
+        let (_dir, path) = database_at(from);
+        let old = Connection::open(&path).unwrap();
+        let store = Store::open(&path).unwrap();
+        store
+            .record_heartbeat("work", false, 5, "live", Some("config_changed"))
+            .unwrap();
+        assert_eq!(
+            store.heartbeat("work").unwrap().unwrap()["reason"],
+            "config_changed"
+        );
+        old.execute(statement, values).unwrap();
+        store.heartbeat("work").unwrap().unwrap()
+    }
+
+    /// Rolling updates: a process of an older release rewrites the row's
+    /// `finished_at` but not its `reason`, which then belongs to an earlier
+    /// pass and reads as `null`.
+    #[test]
+    fn a_row_an_older_release_rewrites_hides_the_earlier_reason() {
+        const REWRITTEN_AT: &str = "2026-10-07T12:00:00+00:00";
+        for beat in [
+            rewritten_by(
+                7,
+                V7_INSERT,
+                params!["work", REWRITTEN_AT, false, 5, "live", "0.1.0"],
+            ),
+            rewritten_by(
+                6,
+                V6_INSERT,
+                params!["work", REWRITTEN_AT, false, 5, "live"],
+            ),
+        ] {
+            assert_eq!(
+                (
+                    beat["finished_at"].clone(),
+                    beat["exit_code"].clone(),
+                    beat["reason"].clone()
+                ),
+                (json!(REWRITTEN_AT), json!(5), Value::Null)
+            );
+        }
     }
 }
