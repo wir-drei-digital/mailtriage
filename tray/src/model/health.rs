@@ -599,7 +599,7 @@ mod tests {
             named(&[("a", OtherConfig), ("b", OtherConfig), ("c", Stopped)]),
             "2 accounts run another config"
         );
-        // A running account, attention and no service manager keep their lines.
+        // A running account and attention keep their lines.
         assert_eq!(
             named(&[("daniel", OtherConfig), ("info", Ok)]),
             "1 of 2 accounts running"
