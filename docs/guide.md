@@ -71,6 +71,31 @@ cargo build --release --locked &&
 
 `~/.local/bin` must be on your `PATH`; the examples below assume `mailtriage` is. If `command -v mailtriage` prints nothing, add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile (`~/.zprofile` on macOS, `~/.bashrc` on Linux) and open a new terminal. The background service records the absolute path of the executable that installs it, so install the binary in its final place first.
 
+### `mailtriage self install`
+
+The install script runs this command; you or an agent can run it on a binary you placed yourself:
+
+```sh
+mailtriage self install --dir DIR [--tray-file PATH] [--no-setup] [--yes] [--json]
+```
+
+1. It creates `DIR` and its missing parents with mode 0755. `DIR`, with symlinks resolved, must be yours and not writable by group or others, and each of its parents must pass the rule of [a private Himalaya's](#a-private-himalaya) directory. Otherwise it exits 3 with `unsafe_permissions` and the fix: `chmod go-w DIR`, or another `--dir`.
+2. It never goes back: when `DIR/mailtriage` prints a newer version, it exits 2 and points to [Rolling back by hand](#rolling-back-by-hand).
+3. It installs this binary as `DIR/mailtriage` the way `mailtriage update` installs a release: under the installation lock, from a new file that must run with `--version`, keeping the old binary as `DIR/mailtriage.previous`, with a rename. Running services switch to it by themselves.
+4. With `--tray-file`, it installs that `mailtriage-tray` next to it the same way; it must be the same version. A tray that does not run here (on Linux without GTK, for example) is skipped, any existing tray is kept, and on Linux it names the packages the tray needs.
+5. It records both in the update cache, clearing any earlier install error.
+6. It says when `DIR` is not on your `PATH`, with the line to add for your shell (zsh, bash, fish, or a POSIX `export`), and when another `mailtriage` comes first on your `PATH`: that one stays in use and is not updated by this install.
+7. With a terminal, unless `--no-setup` or `--yes`, it asks `Run mailtriage setup now? [Y/n]` and runs `DIR/mailtriage setup`, so the service it installs runs `DIR/mailtriage`. After a successful setup with the tray installed, it asks `Start the tray at login? [Y/n]` and runs `DIR/mailtriage-tray autostart enable --config CONFIG --mailtriage DIR/mailtriage` with the config setup wrote. Otherwise it prints those commands.
+
+```json
+{"schema_version":1,"self_install":{"dir":"/Users/alice/.local/bin","cli":{"action":"installed","version":"0.3.0","path":"/Users/alice/.local/bin/mailtriage"},"tray":{"action":"installed","error":null},"on_path":true,"shadowed_by":null,"setup":"ran","autostart":"enabled"}}
+```
+
+- `tray`: `null` without `--tray-file`, else `action` `installed`, `skipped` or `failed`, with the reason in `error`.
+- `setup`: `ran`, `skipped` or `failed`. `autostart`: `enabled`, `skipped` or `failed`.
+
+Exit codes: 0; 2 for invalid flags or a refused downgrade; 3 for an unsafe directory, a failed install, a failed tray install, or a failed setup (the binaries stay installed); 5 when another update or install held the installation lock for 60 seconds.
+
 ## Guided setup
 
 ```sh

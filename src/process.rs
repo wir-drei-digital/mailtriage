@@ -186,7 +186,8 @@ pub fn find_on_path(name: &str) -> Option<PathBuf> {
         .and_then(|found| std::path::absolute(found).ok())
 }
 
-fn is_executable(path: &Path) -> bool {
+/// A regular file (symlinks followed) with an execute bit.
+pub(crate) fn is_executable(path: &Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

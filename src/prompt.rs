@@ -91,6 +91,11 @@ impl<'a> Prompter<'a> {
         }
     }
 
+    /// `confirm`, except that the end of input answers `default`.
+    pub fn confirm_or(&mut self, question: &str, default: bool) -> bool {
+        self.confirm(question, default).unwrap_or(default)
+    }
+
     /// A numbered menu (1-based on screen); returns the 0-based index.
     pub fn choose(&mut self, question: &str, options: &[String], default: usize) -> Result<usize> {
         self.menu(question, options, &[default]);

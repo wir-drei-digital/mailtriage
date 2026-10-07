@@ -1,6 +1,6 @@
 #![allow(dead_code)]
-//! Shared by the install tests: a fake Himalaya. Nothing here touches the
-//! real HOME.
+//! Shared by the install tests: fake Himalaya and tray programs. Nothing
+//! here touches the real HOME.
 use std::{fs, os::unix::fs::PermissionsExt, path::Path};
 
 /// A fake Himalaya whose `--version` prints `@VERSION@` (`flip`: 2.1.0 the
@@ -42,6 +42,24 @@ else:
 /// The fake Himalaya printing `version_line` (or `flip`).
 pub fn fake_himalaya(version_line: &str) -> String {
     FAKE_HIMALAYA.replace("@VERSION@", version_line)
+}
+
+/// A fake tray: `--version` prints `mailtriage-tray VERSION`; any other
+/// call appends its arguments to `tray.log` next to the file it runs from.
+/// `quit` prints `quit.json` from there (default: the result `quit`) and
+/// exits with `quit.code` (default 0).
+pub fn fake_tray(version: &str) -> String {
+    format!(
+        r#"#!/bin/sh
+dir="$(dirname "$0")"
+if [ "$1" = --version ]; then echo 'mailtriage-tray {version}'; exit 0; fi
+echo "$*" >> "$dir/tray.log"
+if [ "$1" = quit ]; then
+  if [ -f "$dir/quit.json" ]; then cat "$dir/quit.json"; else echo '{{"schema_version":1,"quit":"quit"}}'; fi
+  exit "$(cat "$dir/quit.code" 2>/dev/null || echo 0)"
+fi
+"#
+    )
 }
 
 /// Writes an executable file, creating its directory.

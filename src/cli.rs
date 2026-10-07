@@ -95,6 +95,35 @@ enum Command {
         #[command(subcommand)]
         command: HimalayaCommand,
     },
+    /// Install this mailtriage into a directory; needs no config.
+    #[command(name = "self")]
+    SelfCmd {
+        #[command(subcommand)]
+        command: SelfCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum SelfCommand {
+    /// Install this binary (and a tray) into DIR with the updater's
+    /// transaction, then offer setup and the tray's login item.
+    Install(SelfInstallArg),
+}
+
+#[derive(Args)]
+struct SelfInstallArg {
+    /// The directory to install into, created when missing.
+    #[arg(long)]
+    dir: PathBuf,
+    /// A mailtriage-tray binary to install next to mailtriage.
+    #[arg(long)]
+    tray_file: Option<PathBuf>,
+    /// Do not offer setup or the login item.
+    #[arg(long)]
+    no_setup: bool,
+    /// Never prompt.
+    #[arg(long)]
+    yes: bool,
 }
 
 #[derive(Subcommand)]
@@ -579,7 +608,13 @@ pub fn run() -> i32 {
         }
     };
     match execute(&cli) {
-        Ok(value) => {
+        Ok(mut value) => {
+            // A result printed with a failure exit code, such as a `self
+            // install` whose setup failed; the key itself is not printed.
+            let code = value
+                .as_object_mut()
+                .and_then(|object| object.remove("exit_code"))
+                .and_then(|code| code.as_i64());
             let partial = value
                 .get("partial")
                 .and_then(Value::as_bool)
@@ -587,10 +622,10 @@ pub fn run() -> i32 {
             if print_value(&value, cli.json).is_err() {
                 return 3;
             }
-            if partial {
-                4
-            } else {
-                0
+            match code {
+                Some(code) => code as i32,
+                None if partial => 4,
+                None => 0,
             }
         }
         Err(error) => {
@@ -736,6 +771,19 @@ fn execute(cli: &Cli) -> Result<Value, CliError> {
         Command::Himalaya {
             command: HimalayaCommand::Install(arg),
         } => distribution::himalaya::run(arg.version.as_deref()).map_err(service_error),
+        Command::SelfCmd {
+            command: SelfCommand::Install(arg),
+        } => {
+            let args = distribution::self_install::Args {
+                dir: arg.dir.clone(),
+                tray_file: arg.tray_file.clone(),
+                no_setup: arg.no_setup,
+                yes: arg.yes,
+            };
+            let mut prompt = Prompter::new(prompt::stdin_unbuffered(), io::stderr(), true);
+            distribution::self_install::run(&args, &update::install::EnvHooks, &mut prompt)
+                .map_err(service_error)
+        }
     }
 }
 
