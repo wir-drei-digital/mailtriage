@@ -255,6 +255,26 @@ fn kill_group(pid: u32) {
 #[cfg(not(unix))]
 fn kill_group(_pid: u32) {}
 
+/// `ETXTBSY` (26 on Linux and macOS): another thread forked while a write
+/// handle to the program was open, and that child still holds it. It clears
+/// once the child execs, so starting is retried briefly.
+const TEXT_FILE_BUSY: i32 = 26;
+const BUSY_RETRIES: u32 = 20;
+const BUSY_PAUSE: Duration = Duration::from_millis(50);
+
+fn spawn(command: &mut Command) -> std::io::Result<std::process::Child> {
+    let mut attempt = 0;
+    loop {
+        match command.spawn() {
+            Err(e) if e.raw_os_error() == Some(TEXT_FILE_BUSY) && attempt < BUSY_RETRIES => {
+                attempt += 1;
+                std::thread::sleep(BUSY_PAUSE);
+            }
+            result => return result,
+        }
+    }
+}
+
 /// Runs `invocation` with stdin closed, killing it (and its process group)
 /// at `timeout`. Only this child's PID is waited for.
 pub fn run(invocation: &Invocation, timeout: Duration) -> Finished {
@@ -275,7 +295,7 @@ pub fn run(invocation: &Invocation, timeout: Duration) -> Finished {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    let mut child = match command.spawn() {
+    let mut child = match spawn(&mut command) {
         Ok(child) => child,
         Err(e) => {
             return finished(
