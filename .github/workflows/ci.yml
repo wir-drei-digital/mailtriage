@@ -29,4 +29,26 @@ jobs:
           persist-credentials: false
       # install.sh runs under any POSIX sh (dash on Ubuntu, bash on macOS).
       - run: shellcheck -s sh install.sh
-      - run: shellcheck scripts/add-himalaya-version.sh
+      - run: shellcheck scripts/add-himalaya-version.sh packaging/homebrew/render.sh packaging/homebrew/publish.sh
+
+  formula:
+    name: Homebrew formula
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      # Under Formula/, as in the tap: brew style applies its formula rules
+      # there, and its rules for Homebrew's own code elsewhere.
+      - name: Render the template with dummy checksums
+        run: |
+          set -euo pipefail
+          for name in mailtriage-v0.0.0-macos-arm64.tar.gz mailtriage-tray-v0.0.0-macos-arm64.tar.gz \
+            mailtriage-v0.0.0-linux-amd64.tar.gz mailtriage-v0.0.0-linux-arm64.tar.gz; do
+            printf '%064d  %s\n' 0 "$name"
+          done > "$RUNNER_TEMP/SHA256SUMS"
+          mkdir -p "$RUNNER_TEMP/Formula"
+          sh packaging/homebrew/render.sh 0.0.0 "$RUNNER_TEMP/SHA256SUMS" > "$RUNNER_TEMP/Formula/mailtriage.rb"
+          ruby -c "$RUNNER_TEMP/Formula/mailtriage.rb"
+      - run: brew style "$RUNNER_TEMP/Formula/mailtriage.rb"

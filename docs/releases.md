@@ -126,14 +126,45 @@ The workflow creates a draft while uploading files, then publishes it only
 after assets pass checksum verification. Published release files cannot be
 overwritten by a rerun. Fixes require a new version/tag.
 
+## Homebrew tap
+
+The release workflow's `homebrew` job updates `Formula/mailtriage.rb` in
+[wir-drei-digital/homebrew-tap](https://github.com/wir-drei-digital/homebrew-tap)
+after a stable release is published:
+
+1. It runs only for the highest published stable release (the same check as
+   the Latest marking), one at a time in the concurrency group
+   `homebrew-tap`. GitHub keeps one waiting run per group, so a newer waiting
+   run replaces an older one; rerun a replaced one only when it was the
+   highest.
+2. It renders `packaging/homebrew/mailtriage.rb.in` with
+   `packaging/homebrew/render.sh VERSION SHA256SUMS`, which fails when an
+   archive is missing from `SHA256SUMS`, and checks the result with `ruby -c`.
+3. It checks out the tap with the secret `HOMEBREW_TAP_TOKEN` and runs
+   `packaging/homebrew/publish.sh`. When the tap already has a higher
+   version, nothing changes; the same version with the same file needs no
+   commit; otherwise it commits `mailtriage X.Y.Z` and pushes, and after a
+   push conflict it fetches, decides again and retries once.
+
+`HOMEBREW_TAP_TOKEN` is a fine-grained personal access token with
+**Contents: Read and write** on `wir-drei-digital/homebrew-tap` only, stored as
+an Actions secret of this repository. Without it the job ends with a notice
+and the release stays published; set it and rerun the job.
+
+The tap's own workflow installs and tests the formula on macOS and Ubuntu
+after every push. Its README and workflow are kept in
+`packaging/homebrew/tap/`. CI here renders the template with dummy checksums
+on macOS and runs `ruby -c` and `brew style` on it.
+
 ## Retry a failed release
 
 Rerun the failed workflow, or dispatch **Release** from GitHub Actions with an
 existing tag. A pre-existing draft can be completed. The workflow never creates
 a missing tag or bypasses version, ancestry, test or build checks.
 
-No additional secret is required: only the publish job receives
-`contents: write` through GitHub's built-in token. Model API keys and mailbox
+Publishing needs no additional secret: only the publish job receives
+`contents: write` through GitHub's built-in token. The Homebrew tap needs
+`HOMEBREW_TAP_TOKEN` (see [Homebrew tap](#homebrew-tap)). Model API keys and mailbox
 credentials are not used in CI or releases.
 
 The repository is public, so installed copies read releases without a token.

@@ -317,3 +317,26 @@ The automated tests use a loopback server instead of GitHub and a script instead
 | Step 7: `~/.local/bin/mailtriage-tray.previous` is kept and prints the older version | | | |
 | Step 8: `watch` replaces the older tray at its next pass (no `error` event in the service log), and the running tray re-executes onto the new file within about 15 s, with its menu and without a second tray | | | |
 | Step 9: `update` exits 0 with `update.tray.action` `skipped` and an `error` starting `mailtriage-tray does not run here:` that names the missing library; nothing is downloaded for the tray: no `mailtriage-tray.previous`, and its `sha256sum` is unchanged | | | |
+
+## Install paths on a real machine (human check)
+
+The automated tests run `install.sh` against a loopback server and never install from Homebrew. After the first release with the install script and the tap formula, check once on macOS arm64 and once on Linux (a desktop for the tray, and a server):
+
+1. On a machine without mailtriage, run the one-line install from the README in a terminal, answer setup's questions, and accept the login item (macOS).
+2. Run `mailtriage --version`, `mailtriage service status --json` and, on macOS, log out and in again.
+3. Run the install line again.
+4. Run it with `-s -- --uninstall` and confirm.
+5. With Homebrew: `brew install wir-drei-digital/tap/mailtriage`, `mailtriage setup` (installing the service), on macOS `mailtriage-tray autostart enable`, then wait for one pass.
+6. After the next release: `brew upgrade mailtriage` with the service running, and wait one interval.
+7. `mailtriage self uninstall --dir "$(brew --prefix)/bin"`.
+
+| Check | Result | Evidence | Date |
+| --- | --- | --- | --- |
+| Step 1: the script installs into `~/.local/bin`, prints the PATH line when it is not on `PATH`, runs setup from `~/.local/bin/mailtriage` (the service file names it), and on macOS enables the login item | | | |
+| Step 1: setup offered the private Himalaya when no tested one was on `PATH`, and the account uses `~/.local/share/mailtriage/himalaya/VERSION/himalaya` | | | |
+| Step 2: the service runs; on macOS the tray starts at login | | | |
+| Step 3: the second run reinstalls the same version; the service restarts onto it (`restarting` event) | | | |
+| Step 4: services, login item, tray and binaries are gone; config, state and the private Himalaya stay | | | |
+| Step 5: the service file and the tray's login item name `$(brew --prefix)/opt/mailtriage/bin/…`; `mailtriage update --check --json` reports `managed_by_homebrew` | | | |
+| Step 6: the running service restarts onto the new version by itself (`restarting` event, `last_pass.version`), and so does the tray | | | |
+| Step 7: refused with `installed by Homebrew; run brew uninstall mailtriage` (exit 2) | | | |

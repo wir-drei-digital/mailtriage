@@ -154,3 +154,64 @@ jobs:
             fi
           fi
           gh release view "$RELEASE_TAG" --json url --jq '.url' >> "$GITHUB_STEP_SUMMARY"
+
+  # The Homebrew tap follows the highest stable release, one update at a
+  # time, and never moves backwards. Without HOMEBREW_TAP_TOKEN (contents
+  # write on wir-drei-digital/homebrew-tap only) it ends with a notice; the
+  # release stays published either way, and this job can be re-run.
+  homebrew:
+    name: Homebrew tap
+    needs: [prepare, publish]
+    if: needs.prepare.outputs.prerelease == 'false'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    concurrency:
+      group: homebrew-tap
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    env:
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          sparse-checkout: |
+            .github/scripts
+            packaging/homebrew
+          persist-credentials: false
+      - name: Only the highest stable release
+        id: highest
+        run: |
+          set -euo pipefail
+          gh release list --exclude-drafts --exclude-pre-releases --limit 1000 \
+            --json tagName > "$RUNNER_TEMP/published-releases.json"
+          if python3 .github/scripts/is_highest_release.py "$RELEASE_TAG" "$RUNNER_TEMP/published-releases.json"; then
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::$RELEASE_TAG is not the highest stable release; the tap keeps its formula"
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Without HOMEBREW_TAP_TOKEN
+        if: steps.highest.outputs.go == 'true' && env.HOMEBREW_TAP_TOKEN == ''
+        run: echo "::notice::HOMEBREW_TAP_TOKEN is not set, so the tap was not updated; set it and re-run this job"
+      - name: Render the formula
+        if: steps.highest.outputs.go == 'true' && env.HOMEBREW_TAP_TOKEN != ''
+        run: |
+          set -euo pipefail
+          gh release download "$RELEASE_TAG" --pattern SHA256SUMS --dir "$RUNNER_TEMP"
+          sh packaging/homebrew/render.sh "$RELEASE_VERSION" "$RUNNER_TEMP/SHA256SUMS" > "$RUNNER_TEMP/mailtriage.rb"
+          ruby -c "$RUNNER_TEMP/mailtriage.rb"
+      - uses: actions/checkout@v7.0.1
+        if: steps.highest.outputs.go == 'true' && env.HOMEBREW_TAP_TOKEN != ''
+        with:
+          repository: wir-drei-digital/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+      - name: Commit and push, never backwards
+        if: steps.highest.outputs.go == 'true' && env.HOMEBREW_TAP_TOKEN != ''
+        run: bash packaging/homebrew/publish.sh tap "$RUNNER_TEMP/mailtriage.rb" "$RELEASE_VERSION"

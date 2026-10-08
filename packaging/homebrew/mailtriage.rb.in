@@ -1,0 +1,51 @@
+# Rendered from packaging/homebrew/mailtriage.rb.in by mailtriage's release
+# workflow (wir-drei-digital/mailtriage); edit the template there.
+class Mailtriage < Formula
+  desc "Local email classification and attention queries for humans and agents"
+  homepage "https://github.com/wir-drei-digital/mailtriage"
+  # The macOS arm64 archive. `on_linux` replaces it, and Intel Macs stop at
+  # `depends_on arch: :arm64`: `brew style` allows no `url` directly in
+  # `on_macos`, and `brew tap` loads the formula for every system.
+  url "https://github.com/wir-drei-digital/mailtriage/releases/download/v@VERSION@/mailtriage-v@VERSION@-macos-arm64.tar.gz"
+  version "@VERSION@"
+  sha256 "@SHA256_MACOS_ARM64@"
+  license "MIT"
+
+  on_macos do
+    depends_on arch: :arm64
+
+    resource "tray" do
+      url "https://github.com/wir-drei-digital/mailtriage/releases/download/v@VERSION@/mailtriage-tray-v@VERSION@-macos-arm64.tar.gz"
+      sha256 "@SHA256_TRAY_MACOS_ARM64@"
+    end
+  end
+
+  on_linux do
+    on_intel do
+      url "https://github.com/wir-drei-digital/mailtriage/releases/download/v@VERSION@/mailtriage-v@VERSION@-linux-amd64.tar.gz"
+      sha256 "@SHA256_LINUX_AMD64@"
+    end
+    on_arm do
+      url "https://github.com/wir-drei-digital/mailtriage/releases/download/v@VERSION@/mailtriage-v@VERSION@-linux-arm64.tar.gz"
+      sha256 "@SHA256_LINUX_ARM64@"
+    end
+  end
+
+  def install
+    bin.install "mailtriage"
+    resource("tray").stage { bin.install "mailtriage-tray" } if OS.mac?
+  end
+
+  def caveats
+    <<~EOS
+      Run `mailtriage setup`: it uses a tested Himalaya on your PATH or installs
+      a private one for mailtriage.
+      Updates come with `brew upgrade mailtriage`.
+      On macOS, `mailtriage-tray autostart enable` starts the tray at login.
+    EOS
+  end
+
+  test do
+    assert_match "mailtriage #{version}", shell_output("#{bin}/mailtriage --version")
+  end
+end

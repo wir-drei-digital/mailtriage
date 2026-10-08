@@ -22,7 +22,13 @@ mailtriage is a local command-line tool that classifies your email. For each mes
 curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/wir-drei-digital/mailtriage/main/install.sh | sh
 ```
 
-The script installs mailtriage, and on macOS the tray app, into `~/.local/bin` (macOS arm64, Linux amd64 or arm64), then offers `mailtriage setup`. Script installs keep themselves up to date. The guide's [Install](docs/guide.md#install) section has the options, building from source and uninstalling.
+or, with Homebrew:
+
+```sh
+brew install wir-drei-digital/tap/mailtriage
+```
+
+The script installs mailtriage, and on macOS the tray app, into `~/.local/bin` (macOS arm64, Linux amd64 or arm64), then offers `mailtriage setup`; script installs keep themselves up to date. Homebrew installs update with `brew upgrade`. The guide's [Install](docs/guide.md#install) section has the options, building from source and uninstalling.
 
 ## Get started
 

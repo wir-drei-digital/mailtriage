@@ -53,7 +53,7 @@ There are three ways to install, and each stays current differently:
 | Way | Installs into | Updated by |
 | --- | --- | --- |
 | [The install script](#the-install-script) | `~/.local/bin` | mailtriage itself ([Updates](#updates)) |
-| Homebrew | Homebrew's prefix | `brew upgrade mailtriage` |
+| [Homebrew](#homebrew) | Homebrew's prefix | `brew upgrade mailtriage` |
 | [From source](#from-source) with Cargo | where you put it | you |
 
 The macOS executables are unsigned and not notarized. See the [release guide](releases.md) for how releases are made. A root-owned or otherwise unsafe install, for example one made with `sudo` into `/usr/local/bin`, is not replaced: mailtriage only reports new releases for it (see [Binaries mailtriage does not replace](#binaries-mailtriage-does-not-replace)).
@@ -94,6 +94,18 @@ It asks only when it can open your terminal:
 The end of input at a question counts as its default. Exit codes: 0 done; 1 a failed step, which the message names: a missing tool, a network error, a checksum mismatch, an unexpected archive or latest-release URL; 2 invalid options, an unsupported platform, or a refused downgrade; any other code is `mailtriage self install`'s. A download that breaks off runs nothing: the whole script is one `{ … }` group, which `sh` reads completely before running it.
 
 The script never downgrades. To go back to an older release, follow [Rolling back by hand](#rolling-back-by-hand).
+
+### Homebrew
+
+```sh
+brew install wir-drei-digital/tap/mailtriage
+```
+
+The formula in [wir-drei-digital/homebrew-tap](https://github.com/wir-drei-digital/homebrew-tap) installs the release archive for macOS arm64, with `mailtriage-tray`, or for Linux amd64 or arm64. It has no Himalaya dependency: `mailtriage setup` uses a tested `himalaya` on your `PATH` or installs a private one. Then:
+
+- `brew upgrade mailtriage` installs new releases. For a Homebrew install mailtriage only reports them (`managed_by_homebrew`).
+- The background service and the tray's login item record `$(brew --prefix)/opt/mailtriage/bin/…`, which `brew upgrade` keeps pointing at the current version; running services and the tray switch to it by themselves.
+- To uninstall, run `mailtriage service uninstall --account NAME` for each account, then on macOS `mailtriage-tray autostart disable` (the login item names the `opt` path that `brew uninstall` removes), then `brew uninstall mailtriage`; `mailtriage self uninstall` refuses a Homebrew install.
 
 ### From source
 
