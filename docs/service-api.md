@@ -105,7 +105,14 @@ stdout:
   state database cannot be opened. `error` and `fix` appear only when `ready`
   is false. A `key` fix for a command key names the current store:
   `mailtriage setup --update --account NAME --key-store pass` (`command` for a
-  command that is no store's read command).
+  command that is no store's read command). A `mail` fix for an untested
+  Himalaya (`transport.tested` false) is `run mailtriage himalaya install, then
+  mailtriage setup --update --account NAME --himalaya-binary PATH`
+  (`setup::himalaya_install_fix`), with the path `himalaya install` would
+  print, or `<the path it prints>` without a data directory. Step 2's failure
+  for a missing or untested Himalaya ends with the same fix, naming
+  `--account` and `--himalaya-account` when known then, and `, or pass
+  --himalaya-install`.
 - `service`: `null` when skipped, or when the `state` item is not ready (setup
   then installs nothing), else the `service install` object below.
 - Printed `mailtriage` commands (fixes, next steps, the categories hint) pass
@@ -129,8 +136,10 @@ Errors are `ServiceError`s. Except for the two abort messages below, the
 message starts with `step N (name): ` and names the flag or command that fixes
 it. Codes: 2 input, missing flag without
 prompts, key flags with `--provider fake`, abort (`setup aborted; nothing was
-changed`, `setup aborted: input ended`); 3 Himalaya, key tool or service
-manager failure, unwritable config; 5 config exists without `--update`, a
+changed` with reason `setup_aborted`, which `self install` reports as
+`setup: "skipped"`; `setup aborted: input ended` without a reason); 3
+Himalaya, key tool or service manager failure, unwritable config; 5 config
+exists without `--update`, a
 binding-changing update, unmarked service file, another command holding the
 config lock (`config_busy`), or a config that changed since step 1 read it
 (`config_changed`); step 8 writes under the exclusive config lock.
@@ -146,6 +155,18 @@ config lock (`config_busy`), or a config that changed since step 1 read it
 `OpenRouter API key environment variable is missing`, or
 `OpenRouter API key environment variable is empty`. For `command`, `doctor` runs
 the key command (once per `Service`; `secrets::KeyCache`).
+
+`transport` carries `configured` and `ready`, and for a configured engine
+`version` (the first line of `himalaya --version`) and `tested` (whether that is
+a tested version). When the version is tested, it also carries
+`alias_conflicts` (the source folders Himalaya resolves to another mailbox,
+which no pass reads from). When it is not ready, `error` is
+`Himalaya X is not a tested version (tested: …)`,
+`Himalaya X was built without IMAP (+imap)`,
+`Himalaya printed no version mailtriage knows (tested: …)`,
+`cannot read the Himalaya configuration: …` (no folder is read), or
+`Himalaya version/config check failed` (then without `version`, `tested` or
+`alias_conflicts`).
 
 ## Classification without a key
 

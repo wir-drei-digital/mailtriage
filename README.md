@@ -12,35 +12,24 @@ mailtriage is a local command-line tool that classifies your email. For each mes
 
 ## Requirements
 
-- [Himalaya v2.1.0](https://github.com/pimalaya/himalaya/releases/tag/v2.1.0) with IMAP support (`himalaya --version` shows `+imap`).
+- [Himalaya](https://github.com/pimalaya/himalaya) with IMAP support, in a version mailtriage is tested with (2.1.0 or 2.2.1). `mailtriage setup` offers to install one for mailtriage when none is found ([Himalaya versions](docs/guide.md#himalaya-versions)).
 - An IMAP account. Filing needs a server with the MOVE extension.
 - An [OpenRouter](https://openrouter.ai) API key.
 - macOS or Linux. The background service uses launchd on macOS and systemd on Linux.
 
 ## Install
 
-From a release (macOS arm64, Linux amd64 or Linux arm64), with the GitHub CLI; on Linux, set `PLATFORM` to `linux-amd64` or `linux-arm64` and use `sha256sum --check` in place of `shasum -a 256 --check`:
-
 ```sh
-VERSION=0.1.0 PLATFORM=macos-arm64
-gh release download "v$VERSION" --repo wir-drei-digital/mailtriage --pattern "mailtriage-v$VERSION-$PLATFORM.tar.gz*" &&
-  shasum -a 256 --check "mailtriage-v$VERSION-$PLATFORM.tar.gz.sha256" &&
-  tar -xzf "mailtriage-v$VERSION-$PLATFORM.tar.gz" &&
-  install -d ~/.local/bin &&
-  install -m 0755 mailtriage ~/.local/bin/mailtriage
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/wir-drei-digital/mailtriage/main/install.sh | sh
 ```
 
-The macOS executable is unsigned and not notarized. `~/.local/bin` must be on your `PATH`: if `command -v mailtriage` prints nothing, add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile (`~/.zprofile` on macOS, `~/.bashrc` on Linux) and open a new terminal.
-
-From source, with a stable Rust toolchain:
+or, with Homebrew:
 
 ```sh
-cargo build --release --locked &&
-  install -d ~/.local/bin &&
-  install -m 0755 target/release/mailtriage ~/.local/bin/mailtriage
+brew install wir-drei-digital/tap/mailtriage
 ```
 
-mailtriage keeps itself up to date: the background service installs new releases by itself, and `mailtriage update` installs one now. A root-owned or otherwise unsafe install, for example one made with `sudo` into `/usr/local/bin`, is not replaced: mailtriage only reports new releases for it ([Binaries mailtriage does not replace](docs/guide.md#binaries-mailtriage-does-not-replace)).
+The script installs mailtriage, and on macOS the tray app, into `~/.local/bin` (macOS arm64, Linux amd64 or arm64), then offers `mailtriage setup`; script installs keep themselves up to date. Homebrew installs update with `brew upgrade`. The guide's [Install](docs/guide.md#install) section has the options, building from source and uninstalling.
 
 ## Get started
 
@@ -68,10 +57,10 @@ mailtriage list --account work
 ## For agents
 
 ```sh
-mailtriage setup --yes --himalaya-account work --key-store env
+mailtriage setup --yes --himalaya-install --himalaya-account work --key-store env
 ```
 
-`--yes` turns prompts off. Each answer then comes from its flag or its default, and a missing required flag exits 2 and names the flag. With `--key-store env`, set `OPENROUTER_API_KEY` in the environment of the process that runs mailtriage. The [agent guide](docs/hermes.md) covers the other flags, exit codes and health checks.
+`--yes` turns prompts off. Each answer then comes from its flag or its default, and a missing required flag exits 2 and names the flag. `--himalaya-install` installs a tested Himalaya for mailtriage when none is found. With `--key-store env`, set `OPENROUTER_API_KEY` in the environment of the process that runs mailtriage. The [agent guide](docs/hermes.md) covers the other flags, exit codes and health checks.
 
 ## Everyday commands
 

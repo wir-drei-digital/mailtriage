@@ -27,6 +27,13 @@ pub enum Sub {
         #[arg(long)]
         account: Option<String>,
     },
+    /// Quit the running tray of this installation; a tray of another
+    /// installation keeps running.
+    Quit {
+        /// Print JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Start the tray when you log in.
     Autostart {
         #[command(subcommand)]

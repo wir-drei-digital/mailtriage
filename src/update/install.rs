@@ -237,62 +237,148 @@ pub fn install(
     if hex(&Sha256::digest(&bytes)) != expected {
         bail!("checksum mismatch for {}", asset.name);
     }
-    // 7. Unpack into an exclusively created file.
+    // 7. Unpack, then place it.
     let binary = archive::extract(&bytes, job.component.name, &archive::RELEASE)
         .map_err(|e| anyhow!("{}: {e}", asset.name))?;
     drop(bytes);
+    let placement = Placement {
+        component: job.component,
+        path,
+        before: Some(installed_identity),
+        version: &candidate,
+        cache: job.cache,
+        hooks: job.hooks,
+        keep_previous: false,
+    };
+    let placed = place(&placement, _lock, &binary)?;
+    Ok(Outcome::Installed(Installed {
+        from: installed,
+        to: candidate,
+        previous_path: placed.previous_path.unwrap_or_else(|| previous_path(path)),
+        warnings: placed.warnings,
+    }))
+}
+
+/// What `place` puts where: an installation path, what it held when its
+/// version was read, and the version the new binary must print.
+pub struct Placement<'a> {
+    pub component: Component,
+    /// The installation path; the held installation lock is its directory's.
+    pub path: &'a Path,
+    /// The installation path's identity when its version was read; `None`
+    /// when there was no file, so there is nothing to back up.
+    pub before: Option<FileIdentity>,
+    /// The new binary must print `<component> <version>`.
+    pub version: &'a Version,
+    /// Where step 10 records the installation; `None` records nothing.
+    pub cache: Option<&'a Cache>,
+    pub hooks: &'a dyn Hooks,
+    /// Skip the backup (9.2 and 9.4) and leave `<path>.previous` as it is:
+    /// `self install` over the same version keeps the release before it
+    /// there. The updater always backs up.
+    pub keep_previous: bool,
+}
+
+/// What `place` did from its commit point on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Placed {
+    /// Where the previous binary is: `<path>.previous`, or the temporary
+    /// backup when publishing it failed; `None` without a previous binary.
+    pub previous_path: Option<PathBuf>,
+    /// Problems after the commit point; the binary counts as installed.
+    pub warnings: Vec<String>,
+}
+
+/// The new binary does not run here (step 8, the smoke test); nothing was
+/// replaced. The cause: `could not start`, `printed version X, expected Y`, …
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DoesNotRun(pub String);
+
+impl std::fmt::Display for DoesNotRun {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the new binary does not run here: {}", self.0)
+    }
+}
+
+impl std::error::Error for DoesNotRun {}
+
+/// Steps 7 to 10 for `binary` (already verified), under the held
+/// installation lock: write it to an exclusively created file next to the
+/// installation path, smoke-test it, revalidate both files, back up the
+/// installed binary when there is one (unless `keep_previous`), rename the
+/// new one over the path (the commit point), publish the backup as
+/// `<path>.previous`, sync the directory and record the installation.
+/// Errors before the commit point leave the path and `<path>.previous`
+/// untouched and remove this attempt's files; a binary that does not run is
+/// a `DoesNotRun` error.
+pub fn place(p: &Placement, _lock: &InstallLock, binary: &[u8]) -> Result<Placed> {
+    let path = p.path;
+    let dir = path
+        .parent()
+        .context("the installation path has no directory")?;
     let mut scratch = Scratch(Vec::new());
     let staged = scratch.add(dir.join(format!("{TEMP_PREFIX}{}.tmp", uuid::Uuid::new_v4())));
-    write_staged(&staged, &binary)
+    write_staged(&staged, binary)
         .map_err(|e| anyhow!("cannot write the new binary into {}: {e}", dir.display()))?;
     let staged_identity = FileIdentity::read(&staged)?;
     // 8. Smoke test.
-    match platform::probe(&staged, job.component) {
-        Ok(found) if found == candidate => {}
+    match platform::probe(&staged, p.component) {
+        Ok(found) if found == *p.version => {}
         Ok(found) => {
-            bail!("the new binary does not run here: printed version {found}, expected {candidate}")
+            return Err(
+                DoesNotRun(format!("printed version {found}, expected {}", p.version)).into(),
+            )
         }
-        Err(cause) => bail!("the new binary does not run here: {cause}"),
+        Err(cause) => return Err(DoesNotRun(cause).into()),
     }
     // 9.1 Revalidate.
-    job.hooks.at("revalidate")?;
-    if FileIdentity::read(path).ok() != Some(installed_identity)
+    p.hooks.at("revalidate")?;
+    if FileIdentity::read(path).ok() != p.before
         || FileIdentity::read(&staged).ok() != Some(staged_identity)
     {
         bail!("the installed binary changed during the update; try again");
     }
     // 9.2 Backup copy; `.previous` is not touched yet.
-    let backup = scratch.add(dir.join(format!("{TEMP_PREFIX}{}.prev", uuid::Uuid::new_v4())));
-    job.hooks
-        .at("backup")
-        .and_then(|_| copy_or_link(path, &backup).map_err(Into::into))
-        .map_err(|e| anyhow!("cannot back up {}: {e}", path.display()))?;
+    let backup = match p.before {
+        Some(_) if !p.keep_previous => {
+            let backup =
+                scratch.add(dir.join(format!("{TEMP_PREFIX}{}.prev", uuid::Uuid::new_v4())));
+            p.hooks
+                .at("backup")
+                .and_then(|_| copy_or_link(path, &backup).map_err(Into::into))
+                .map_err(|e| anyhow!("cannot back up {}: {e}", path.display()))?;
+            Some(backup)
+        }
+        _ => None,
+    };
     // 9.3 The commit point.
-    job.hooks
+    p.hooks
         .at("commit")
         .and_then(|_| fs::rename(&staged, path).map_err(Into::into))
         .map_err(|e| anyhow!("cannot replace {}: {e}", path.display()))?;
     scratch.keep();
     let mut warnings = Vec::new();
     // 9.4 Publish the backup.
-    let previous = previous_path(path);
-    let previous_path = match job
-        .hooks
-        .at("publish")
-        .and_then(|_| fs::rename(&backup, &previous).map_err(Into::into))
-    {
-        Ok(()) => previous,
-        Err(e) => {
-            warnings.push(format!(
-                "installed; the previous binary stays at {} because {} could not be replaced: {e}",
-                backup.display(),
-                previous.display()
-            ));
-            backup
+    let previous_path = backup.map(|backup| {
+        let previous = previous_path(path);
+        match p
+            .hooks
+            .at("publish")
+            .and_then(|_| fs::rename(&backup, &previous).map_err(Into::into))
+        {
+            Ok(()) => previous,
+            Err(e) => {
+                warnings.push(format!(
+                    "installed; the previous binary stays at {} because {} could not be replaced: {e}",
+                    backup.display(),
+                    previous.display()
+                ));
+                backup
+            }
         }
-    };
+    });
     // 9.5 Make the renames durable.
-    if let Err(e) = job
+    if let Err(e) = p
         .hooks
         .at("sync_dir")
         .and_then(|_| File::open(dir)?.sync_all().map_err(Into::into))
@@ -300,13 +386,13 @@ pub fn install(
         warnings.push(format!("installed; syncing {} failed: {e}", dir.display()));
     }
     // 10. Record.
-    if let Some(cache) = job.cache {
+    if let Some(cache) = p.cache {
         let key = install_key(path);
         let identity = FileIdentity::read(path).ok();
-        let recorded = job.hooks.at("record").and_then(|_| {
+        let recorded = p.hooks.at("record").and_then(|_| {
             cache.update(|c| {
                 let entry = c.installs.entry(key).or_default();
-                entry.version = Some(candidate.to_string());
+                entry.version = Some(p.version.to_string());
                 entry.at = Some(schedule::stamp(Utc::now()));
                 entry.last_error = None;
                 entry.failures = 0;
@@ -318,12 +404,10 @@ pub fn install(
             warnings.push(format!("installed; recording the update failed: {e:#}"));
         }
     }
-    Ok(Outcome::Installed(Installed {
-        from: installed,
-        to: candidate,
+    Ok(Placed {
         previous_path,
         warnings,
-    }))
+    })
 }
 
 /// `<path>.previous`.
@@ -334,14 +418,17 @@ pub fn previous_path(path: &Path) -> PathBuf {
 }
 
 /// This attempt's temporary files, removed unless kept.
-struct Scratch(Vec<PathBuf>);
+#[derive(Default)]
+pub struct Scratch(Vec<PathBuf>);
 
 impl Scratch {
-    fn add(&mut self, path: PathBuf) -> PathBuf {
+    /// Removes `path` when this is dropped, unless `keep` was called.
+    pub fn add(&mut self, path: PathBuf) -> PathBuf {
         self.0.push(path.clone());
         path
     }
-    fn keep(&mut self) {
+    /// The files are kept: the commit point was reached.
+    pub fn keep(&mut self) {
         self.0.clear();
     }
 }
@@ -356,7 +443,7 @@ impl Drop for Scratch {
 
 /// Created exclusively with mode 0600 (never following an existing link),
 /// fsynced and closed, then made executable.
-fn write_staged(path: &Path, contents: &[u8]) -> io::Result<()> {
+pub fn write_staged(path: &Path, contents: &[u8]) -> io::Result<()> {
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -385,7 +472,7 @@ fn copy_or_link(path: &Path, backup: &Path) -> io::Result<()> {
     fs::set_permissions(backup, fs::metadata(path)?.permissions())
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 

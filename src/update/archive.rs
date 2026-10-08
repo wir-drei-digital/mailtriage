@@ -24,6 +24,15 @@ pub const RELEASE: Limits = Limits {
     max_path: 255,
 };
 
+/// The limits for pimalaya's Himalaya archives, which also carry man pages,
+/// shell completions and JSON schemas (about 110 entries in 2.2.1).
+pub const HIMALAYA: Limits = Limits {
+    max_entries: 1024,
+    max_total: 256 * 1024 * 1024,
+    max_file: 200 * 1024 * 1024,
+    max_path: 255,
+};
+
 /// The contents of the single top-level regular file `name` in the gzip
 /// tar `data`. The whole stream is read first: more entries than allowed,
 /// more decompressed bytes than allowed, a path that is too long, absolute

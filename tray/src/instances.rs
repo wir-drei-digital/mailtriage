@@ -9,6 +9,9 @@ use std::{
     path::Path,
 };
 
+/// The tray's lock file in the cache directory.
+pub const TRAY_LOCK: &str = "tray.lock";
+
 /// The variable that hands the window PIDs to a re-executed tray.
 pub const WINDOWS_ENV: &str = "MAILTRIAGE_TRAY_WINDOWS";
 
@@ -34,7 +37,7 @@ pub fn try_lock(path: &Path) -> io::Result<Option<File>> {
 
 /// The tray's lock, `tray.lock`.
 pub fn tray_lock(cache: &Path) -> io::Result<Option<File>> {
-    try_lock(&cache.join("tray.lock"))
+    try_lock(&cache.join(TRAY_LOCK))
 }
 
 /// `editor-<first 16 hex of SHA-256 of the absolute config path>`.

@@ -1,0 +1,35 @@
+name: Test the formula
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: brew install and brew test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      # Sets up Homebrew with this repository as the tap under test.
+      - uses: Homebrew/actions/setup-homebrew@main
+        if: hashFiles('Formula/mailtriage.rb') != ''
+      - name: Install
+        if: hashFiles('Formula/mailtriage.rb') != ''
+        run: brew install wir-drei-digital/tap/mailtriage
+      - name: Test
+        if: hashFiles('Formula/mailtriage.rb') != ''
+        run: brew test mailtriage
+      - name: Run it
+        if: hashFiles('Formula/mailtriage.rb') != ''
+        run: mailtriage --version

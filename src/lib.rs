@@ -1,5 +1,6 @@
 pub mod categories;
 pub mod config;
+pub mod distribution;
 pub mod domain;
 pub mod engine;
 pub mod filing;

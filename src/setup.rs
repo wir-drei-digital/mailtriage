@@ -3,12 +3,15 @@
 //! and its state directory: it makes no IMAP changes, never handles the API
 //! key and never selects `live` filing.
 use crate::{
-    config,
+    config, distribution,
     domain::{
         AccountConfig, AppConfig, Category, EngineConfig, FilingConfig, FilingMode, HimalayaConfig,
         ProviderConfig, UpdateMode,
     },
-    engine::{self, himalaya},
+    engine::{
+        self,
+        versions::{self, Tested},
+    },
     filing, process,
     prompt::Prompter,
     provider,
@@ -30,7 +33,6 @@ use std::{
 
 pub const DEFAULT_MODEL: &str = "typesafe/jev-1.13";
 pub const DEFAULT_KEY_ENV: &str = "OPENROUTER_API_KEY";
-const HIMALAYA_VERSION: &str = "2.1.0";
 const HIMALAYA_TIMEOUT: Duration = Duration::from_secs(60);
 const HIMALAYA_MAX_OUTPUT: usize = 1024 * 1024;
 
@@ -49,6 +51,9 @@ pub struct SetupArgs {
     /// Stdin is a terminal, so a key tool can prompt even with `--yes`.
     pub terminal: bool,
     pub himalaya_binary: Option<PathBuf>,
+    /// `--himalaya-install`: answer yes to installing a private Himalaya
+    /// when the one found is missing or untested, also without prompts.
+    pub himalaya_install: bool,
     pub himalaya_config: Option<PathBuf>,
     pub himalaya_account: Option<String>,
     pub account: Option<String>,
@@ -89,6 +94,9 @@ enum Intent {
 
 struct HimalayaChoice {
     binary: PathBuf,
+    /// The tested version `--version` reported, as `X.Y.Z`; written to
+    /// `expected_version`.
+    version: String,
     toml: PathBuf,
     account: String,
     email: Option<String>,
@@ -110,7 +118,12 @@ pub fn run(args: &SetupArgs, path: &Path, p: &mut Prompter) -> Result<Value> {
             .and_then(|account| stored_engine(account, path)),
         _ => None,
     };
-    let h = himalaya_step(args, p, stored.as_ref())?;
+    // Step 2's fix names the account when it is already known.
+    let known = match &intent {
+        Intent::Update(name) => Some(name.as_str()),
+        _ => args.account.as_deref(),
+    };
+    let h = himalaya_step(args, p, stored.as_ref(), path, known)?;
     // 3. Account details.
     let name = account_name(args, p, &h, &cfg, &intent)?;
     let previous = cfg.accounts.get(&name).cloned();
@@ -168,7 +181,7 @@ pub fn run(args: &SetupArgs, path: &Path, p: &mut Prompter) -> Result<Value> {
         config: h.toml.clone(),
         account: h.account.clone(),
         mailboxes: vec!["INBOX".to_owned()],
-        expected_version: HIMALAYA_VERSION.to_owned(),
+        expected_version: h.version.clone(),
         timeout_seconds: old_engine.as_ref().map_or(60, |e| e.timeout_seconds),
         max_output_bytes: old_engine
             .as_ref()
@@ -395,7 +408,11 @@ fn load_target(
             Ok((cfg, Intent::Update(name), Some(bytes)))
         }
         1 => Ok((cfg, Intent::Add, Some(bytes))),
-        _ => Err(err(2, "setup aborted; nothing was changed")),
+        _ => Err(err_kind(
+            2,
+            ErrorKind::SetupAborted,
+            "setup aborted; nothing was changed",
+        )),
     }
 }
 
@@ -423,34 +440,33 @@ fn stored_engine(account: &AccountConfig, config_path: &Path) -> Option<Himalaya
 
 /// Step 2: the Himalaya binary, its config and the account, checked. For
 /// each, a flag wins, then the `stored` settings of an account being
-/// updated, then `HIMALAYA_CONFIG` (config only), then discovery.
+/// updated, then `HIMALAYA_CONFIG` (config only), then discovery. `path`
+/// (the config setup will write) and `account` (the mailtriage account,
+/// when already known) go into the fix for a missing or untested Himalaya.
 fn himalaya_step(
     args: &SetupArgs,
     p: &mut Prompter,
     stored: Option<&HimalayaConfig>,
+    path: &Path,
+    account: Option<&str>,
 ) -> Result<HimalayaChoice> {
-    let binary = match (&args.himalaya_binary, stored) {
-        (Some(binary), _) => absolute(binary, "--himalaya-binary")?,
-        (None, Some(stored)) => stored.binary.clone(),
-        (None, None) => process::find_on_path("himalaya").ok_or_else(|| {
-            err(
-                3,
-                "step 2 (Himalaya): himalaya is not on PATH; install Himalaya v2.1.0 or pass --himalaya-binary",
-            )
-        })?,
+    let found = match (&args.himalaya_binary, stored) {
+        (Some(binary), _) => Some(absolute(binary, "--himalaya-binary")?),
+        (None, Some(stored)) => Some(stored.binary.clone()),
+        (None, None) => process::find_on_path("himalaya"),
     };
-    let version = run_himalaya(&binary, &[OsStr::new("--version")])
-        .and_then(|out| himalaya::check_version_output(&out, HIMALAYA_VERSION))
-        .map_err(|_| {
-            err(
-                3,
-                format!(
-                    "step 2 (Himalaya): {} is not Himalaya v{HIMALAYA_VERSION} with IMAP; install v{HIMALAYA_VERSION} or pass --himalaya-binary",
-                    binary.display()
-                ),
-            )
-        })?;
-    p.say(&format!("Using {version} at {}.", binary.display()));
+    let checked = match &found {
+        Some(binary) => himalaya_version(binary).map(|version| (binary.clone(), version)),
+        None => Err("himalaya is not on PATH".to_owned()),
+    };
+    let (binary, (line, tested)) = match checked {
+        Ok(found) => found,
+        Err(why) => private_himalaya(args, p, &why, path, account)?,
+    };
+    p.say(&format!("Using {line} at {}.", binary.display()));
+    if in_homebrew_keg(&binary) {
+        p.say(BREW_PIN_NOTE);
+    }
     let explicit = match (&args.himalaya_config, stored) {
         (Some(toml), _) => {
             let toml = absolute(toml, "--himalaya-config")?;
@@ -543,11 +559,95 @@ fn himalaya_step(
         let email = account_email(&toml, &name);
         return Ok(HimalayaChoice {
             binary,
+            version: tested.version.clone(),
             toml,
             account: name,
             email,
         });
     }
+}
+
+/// Printed once when the chosen Himalaya is in a Homebrew keg.
+pub const BREW_PIN_NOTE: &str = "Homebrew may upgrade Himalaya to a version mailtriage has not tested; \"brew pin himalaya\" holds it, or run mailtriage himalaya install for a private copy.";
+
+/// The first line of `binary --version` and its tested entry, or why the
+/// binary cannot be used.
+fn himalaya_version(binary: &Path) -> Result<(String, &'static Tested), String> {
+    match run_himalaya(binary, &[OsStr::new("--version")]) {
+        Ok(out) => {
+            versions::check_version_output(&out).map_err(|u| format!("{}: {u}", binary.display()))
+        }
+        Err(_) => Err(format!("{} does not run", binary.display())),
+    }
+}
+
+/// Step 2 for a Himalaya that is missing or untested (`why`): offers the
+/// private copy (default yes); `--himalaya-install` answers yes, also
+/// without prompts. Otherwise the step fails with the fix, which passes
+/// `--config` when needed for `path`, and the account and Himalaya account
+/// known so far.
+fn private_himalaya(
+    args: &SetupArgs,
+    p: &mut Prompter,
+    why: &str,
+    path: &Path,
+    account: Option<&str>,
+) -> Result<(PathBuf, (String, &'static Tested))> {
+    let newest = &versions::newest().version;
+    let wanted = args.himalaya_install
+        || (p.enabled() && {
+            p.say(&format!("{why}."));
+            p.confirm(&format!("Install Himalaya {newest} for mailtriage?"), true)?
+        });
+    if !wanted {
+        let mut known = Vec::new();
+        if let Some(account) = account {
+            known.extend(["--account", account]);
+        }
+        if let Some(himalaya) = args.himalaya_account.as_deref() {
+            known.extend(["--himalaya-account", himalaya]);
+        }
+        let fix = himalaya_install_fix(command_config(path).as_deref(), &known);
+        return Err(err(
+            3,
+            format!("step 2 (Himalaya): {why}; {fix}, or pass --himalaya-install"),
+        ));
+    }
+    p.say(&format!("Installing Himalaya {newest} for mailtriage."));
+    let installed = distribution::himalaya::install_default().map_err(|e| {
+        err(
+            service::exit_code(&e),
+            format!(
+                "step 2 (Himalaya): could not install Himalaya {newest}: {}",
+                error_text(&e)
+            ),
+        )
+    })?;
+    p.say(&format!(
+        "Installed Himalaya {} at {}.",
+        installed.version,
+        installed.path.display()
+    ));
+    let version = himalaya_version(&installed.path)
+        .map_err(|why| err(3, format!("step 2 (Himalaya): {why}")))?;
+    Ok((installed.path, version))
+}
+
+/// The fix for a missing or untested Himalaya: the private copy, then setup
+/// pointed at the path `himalaya install` prints. `config` and `args` go
+/// into the setup command as in [`mailtriage_line`].
+pub fn himalaya_install_fix(config: Option<&Path>, args: &[&str]) -> String {
+    let path = distribution::himalaya::default_data_dir()
+        .map(|data| distribution::himalaya::binary_path(&data, &versions::newest().version));
+    let path = path.map_or_else(|| "<the path it prints>".to_owned(), |p| shell_line(&[p]));
+    let setup = mailtriage_line(config, &["setup", "--update"], args);
+    format!("run mailtriage himalaya install, then {setup} --himalaya-binary {path}")
+}
+
+/// Whether `binary` is in a Homebrew keg: its canonical path contains
+/// `/Cellar/himalaya/`.
+fn in_homebrew_keg(binary: &Path) -> bool {
+    fs::canonicalize(binary).is_ok_and(|p| p.to_string_lossy().contains("/Cellar/himalaya/"))
 }
 
 /// Himalaya v2.1.0's config search order without `--config` (verified on
@@ -1279,23 +1379,25 @@ fn doctor_step(
                 key["key_error"].as_str().map(str::to_owned),
                 key_fix,
             ));
-            items.push(check_item(
-                "mail",
-                report["transport"]["ready"] == true,
-                None,
-                format!(
-                    "run `{}`",
-                    shell_line(&[
-                        engine.binary.as_os_str(),
-                        OsStr::new("--config"),
-                        engine.config.as_os_str(),
-                        OsStr::new("--account"),
-                        OsStr::new(&engine.account),
-                        OsStr::new("account"),
-                        OsStr::new("check"),
-                    ])
-                ),
-            ));
+            let transport = &report["transport"];
+            let (error, fix) = if transport["tested"] == false {
+                (
+                    transport["error"].as_str().map(str::to_owned),
+                    himalaya_install_fix(shown, &["--account", name]),
+                )
+            } else {
+                let check = shell_line(&[
+                    engine.binary.as_os_str(),
+                    OsStr::new("--config"),
+                    engine.config.as_os_str(),
+                    OsStr::new("--account"),
+                    OsStr::new(&engine.account),
+                    OsStr::new("account"),
+                    OsStr::new("check"),
+                ]);
+                (None, format!("run `{check}`"))
+            };
+            items.push(check_item("mail", transport["ready"] == true, error, fix));
             if let Some(filing) = report.get("filing") {
                 let problems = filing["problems"].as_array().map_or(0, Vec::len);
                 items.push(check_item(
@@ -1523,18 +1625,12 @@ fn install_command(args: &SetupArgs, path: &Path, name: &str) -> String {
 /// commands run here without `--config` find `path` (canonical). Warns
 /// once when a `./mailtriage.json` in the working directory shadows it.
 fn printed_config(p: &mut Prompter, path: &Path) -> Option<PathBuf> {
-    let env = std::env::var_os("MAILTRIAGE_CONFIG");
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let shown = command_config(path)?;
     let Ok(cwd) = std::env::current_dir() else {
-        return Some(path.to_owned());
+        return Some(shown);
     };
-    let found = config::resolve_path(None, env.as_deref(), &cwd, home.as_deref())
-        .ok()
-        .and_then(|found| fs::canonicalize(found).ok());
-    if found.as_deref() == Some(path) {
-        return None;
-    }
     let local = cwd.join(config::CONFIG_FILE);
+    let env = std::env::var_os("MAILTRIAGE_CONFIG");
     if env.as_deref().is_none_or(OsStr::is_empty) && local.exists() {
         p.say(&format!(
             "Warning: {} takes precedence over {} for commands run in {} without --config, so the commands below pass --config.",
@@ -1543,7 +1639,46 @@ fn printed_config(p: &mut Prompter, path: &Path) -> Option<PathBuf> {
             cwd.display()
         ));
     }
-    Some(path.to_owned())
+    Some(shown)
+}
+
+/// `printed_config` without the warning, also for a config not written
+/// yet: `None` when commands run here without `--config` find `path`, else
+/// `path` as it is or will be once written (see [`settled`]).
+fn command_config(path: &Path) -> Option<PathBuf> {
+    let path = settled(path);
+    let Ok(cwd) = std::env::current_dir() else {
+        return Some(path);
+    };
+    let env = std::env::var_os("MAILTRIAGE_CONFIG");
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let found = config::resolve_path(None, env.as_deref(), &cwd, home.as_deref())
+        .ok()
+        .map(|found| settled(&found));
+    (found.as_deref() != Some(path.as_path())).then_some(path)
+}
+
+/// `path` made absolute, with its deepest existing ancestor resolved by
+/// `fs::canonicalize`: its canonical path once the rest is created. An
+/// existing path is simply canonical.
+fn settled(path: &Path) -> PathBuf {
+    let Ok(path) = std::path::absolute(path) else {
+        return path.to_owned();
+    };
+    let mut rest = Vec::new();
+    let mut base = path.as_path();
+    loop {
+        if let Ok(real) = fs::canonicalize(base) {
+            return rest.iter().rev().fold(real, |p, name| p.join(name));
+        }
+        match (base.parent(), base.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name);
+                base = parent;
+            }
+            _ => return path.clone(),
+        }
+    }
 }
 
 /// A `mailtriage` command for messages: the subcommand `words`, then

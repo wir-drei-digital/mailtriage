@@ -4,17 +4,23 @@ Hermes, or any other agent, calls `mailtriage` as an ordinary process. It needs 
 
 ## Host setup
 
-1. Install a release binary on the same host as the state directory (see [Install](guide.md#install)). The examples use `/opt/mailtriage/mailtriage`.
+1. Install mailtriage on the same host as the state directory, as the user that will run it, without prompts:
+
+   ```sh
+   curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/wir-drei-digital/mailtriage/main/install.sh | sh -s -- --yes --no-tray --no-setup --dir /opt/mailtriage
+   ```
+
+   `/opt/mailtriage` must exist and belong to the user that runs mailtriage; create it once as root, for example with `install -d -o USER /opt/mailtriage`. Without `--dir` the script installs into `~/.local/bin`. It prints the [`self install`](guide.md#mailtriage-self-install) result; exit 0 means done, 1 a failed download or check, 2 invalid options, an unsupported platform or a refused downgrade, 3 an unsafe or foreign directory (stderr says `mailtriage: unsafe_permissions: …`, for example when `/opt/mailtriage` does not belong to the user) or a failed install, 5 another install or update holds the directory's installation lock (try again later). The examples use `/opt/mailtriage/mailtriage`.
 2. Run setup without prompts, as the user that will run mailtriage:
 
    ```sh
-   /opt/mailtriage/mailtriage setup --yes --himalaya-account work --key-store pass --key-stored --json
+   /opt/mailtriage/mailtriage setup --yes --himalaya-install --himalaya-account work --key-store pass --key-stored --json
    ```
 
    This example assumes a person has stored the key with `pass insert mailtriage/openrouter` as that user.
 
    - `--yes` turns prompts off. Each answer comes from its flag or its default.
-   - `--himalaya-account NAME` is required: an account with IMAP in the Himalaya configuration. Add `--himalaya-binary PATH` when `himalaya` is not on the agent's `PATH`, and `--himalaya-config PATH` when the file is not in Himalaya's default location. Setup stores both as absolute paths.
+   - `--himalaya-account NAME` is required: an account with IMAP in the Himalaya configuration. Add `--himalaya-install` to install a tested Himalaya for mailtriage when none is found or the one found is untested, `--himalaya-binary PATH` when `himalaya` is not on the agent's `PATH`, and `--himalaya-config PATH` when the file is not in Himalaya's default location. Setup stores the Himalaya binary, a private one included, and the config file as absolute paths.
    - The key, preferably from a key store or a key command, so no process needs it in its environment:
      - `--key-store keychain`, `secret-service` or `pass` with `--key-stored`: a person has already stored the key with that store's command (see [Key stores](guide.md#key-stores)). Setup records the read command and checks that it prints a key.
      - `--key-command 'COMMAND'`: a shell command that prints the key. Setup runs it once to check it.
@@ -28,8 +34,8 @@ Hermes, or any other agent, calls `mailtriage` as an ordinary process. It needs 
 
    | Code | Cause | What to do |
    | --- | --- | --- |
-   | 2 | A required flag is missing, a value is invalid, key flags conflict or are given with `--provider fake`, or a key tool needs a terminal. | Add or correct the flag named in the message, then run setup again. Do not repeat the same call. |
-   | 3 | Himalaya is missing or not v2.1.0, `himalaya account check` failed, the folders could not be listed, a key tool or key command failed, or `launchctl`/`systemctl` failed. | Report the message to the user. It names the command that shows the cause; fixing it needs a person (credentials, Himalaya, the key store). |
+   | 2 | A required flag is missing, a value is invalid, key flags conflict or are given with `--provider fake`, a key tool needs a terminal, or the private Himalaya cannot be installed because pimalaya has no build for this platform. | Add or correct the flag named in the message, then run setup again. Do not repeat the same call. For the platform, report the message to the user: a person installs a tested Himalaya, then setup runs with `--himalaya-binary`. |
+   | 3 | Himalaya is missing or not a tested version and `--himalaya-install` was not given (see [Himalaya versions](guide.md#himalaya-versions)), installing the private Himalaya failed on a supported platform, `himalaya account check` failed, the folders could not be listed, a key tool or key command failed, or `launchctl`/`systemctl` failed. | Report the message to the user. It names the command that shows the cause; fixing it needs a person (credentials, Himalaya, the key store). |
    | 5 | The config already exists, the account is bound to another mailbox (`step 3 (account): account NAME is bound to its previous mailbox …`; nothing was written), or a service file exists that mailtriage did not write. | For the config, add `--update` if the user wants it changed. For a bound account, keep its identity, Himalaya account and IMAP server, or ask the user before setting the mailbox up under a new name with `--account NEW`. For a service file, report the path to the user. |
 
 3. Give the user that runs mailtriage read and write access to `state_dir` and to the directory that holds `mailtriage.json`. mailtriage creates `mailtriage.lock` there and rewrites the file for `filing enable`, `filing disable` and `categories apply`. That user also needs read access to the Himalaya configuration and whatever its password command reads.

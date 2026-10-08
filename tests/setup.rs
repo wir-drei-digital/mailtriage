@@ -519,6 +519,21 @@ fn choosing_abort_changes_nothing() {
     assert_eq!(fs::read(f.config_path()).unwrap(), before);
 }
 
+/// Abort carries the reason `setup_aborted`, which `self install` reads;
+/// input that ends (a later step may have written the config) does not.
+#[test]
+fn only_choosing_abort_carries_the_reason_setup_aborted() {
+    let f = Fixture::new();
+    assert_eq!(f.run(&WORK_ENV, "").0.status.code(), Some(0));
+    let (out, v) = f.run(&["setup", "--interactive", "--json"], "3\n");
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(v["error"]["reason"], "setup_aborted", "{v}");
+    let (out, v) = f.run(&["setup", "--interactive", "--json"], "");
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(message(&v), "setup aborted: input ended");
+    assert!(v["error"].get("reason").is_none(), "{v}");
+}
+
 #[test]
 fn without_an_account_setup_runs_himalaya_configure() {
     let f = Fixture::new();

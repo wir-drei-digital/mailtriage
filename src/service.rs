@@ -26,6 +26,10 @@ use std::{
     fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
     rc::Rc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
 /// What a `ServiceError` is about, for callers that react to a class of
@@ -51,6 +55,11 @@ pub enum ErrorKind {
     ServiceConfigUnknown,
     /// Another service command for the account held the service lock.
     ServiceBusy,
+    /// A directory mailtriage would install a program into fails the
+    /// protected path rule.
+    UnsafePermissions,
+    /// The user chose Abort in setup's menu; nothing was changed.
+    SetupAborted,
 }
 
 impl ErrorKind {
@@ -67,6 +76,8 @@ impl ErrorKind {
             Self::ServiceConfigMismatch => Some("service_config_mismatch"),
             Self::ServiceConfigUnknown => Some("service_config_unknown"),
             Self::ServiceBusy => Some("service_busy"),
+            Self::UnsafePermissions => Some("unsafe_permissions"),
+            Self::SetupAborted => Some("setup_aborted"),
         }
     }
 }
@@ -185,6 +196,9 @@ pub struct Service {
     pub store: Store,
     engine_override: Option<Rc<dyn MailEngine>>,
     key: KeyCache,
+    /// Set by `watch` on SIGTERM or Ctrl-C: a running pass stops taking new
+    /// messages and skips its filing steps, so it ends within one message.
+    stop: Option<Arc<AtomicBool>>,
 }
 impl Service {
     pub fn open(path: &Path) -> Result<Self> {
@@ -219,7 +233,16 @@ impl Service {
             store,
             engine_override: None,
             key: KeyCache::default(),
+            stop: None,
         })
+    }
+    /// Lets `stop` end a running pass early (see `Service::stop`).
+    pub fn with_stop(mut self, stop: Arc<AtomicBool>) -> Self {
+        self.stop = Some(stop);
+        self
+    }
+    fn stopping(&self) -> bool {
+        self.stop.as_ref().is_some_and(|s| s.load(Ordering::SeqCst))
     }
     /// Like `open`, but every account with an engine config uses `engine`.
     pub fn open_with_engine(path: &Path, engine: Rc<dyn MailEngine>) -> Result<Self> {
@@ -339,10 +362,10 @@ impl Service {
             )
         };
         let key_present = key_error.is_none();
-        let transport = match self.engine(&account).map(|e| e.map(|e| e.version())) {
+        let transport = match self.engine(&account) {
             Ok(None) => json!({"configured":false,"ready":true}),
-            Ok(Some(Ok(v))) => json!({"configured":true,"ready":true,"version":v}),
-            _ => {
+            Ok(Some(engine)) => transport_report(engine.as_ref(), &account),
+            Err(_) => {
                 json!({"configured":true,"ready":false,"error":"Himalaya version/config check failed"})
             }
         };
@@ -594,7 +617,7 @@ impl Service {
         let now = now();
         self.store.sync_filing_mode(name, mode, &now)?;
         if let Some(h) = &engine {
-            h.version().map_err(abort_on_config_change)?;
+            h.version().map_err(version_error)?;
         }
         let verify_binding = self.binding_verifier(name, &account)?;
         // `Some` only with filing on.
@@ -616,8 +639,12 @@ impl Service {
             mode: filing::mode_str(mode).into(),
             ..Default::default()
         };
-        // 2. Folder resolution.
-        let map = resolve_or_sources(&mut self.store, filing, &account, &mut summary)?;
+        // 2. Folder resolution, and the read check of whatever it did not
+        // check (filing off, or a resolution that failed).
+        let mut map = resolve_or_sources(&mut self.store, filing, &account, &mut summary)?;
+        if let Some(h) = engine.as_deref() {
+            guard_reads(h, &mut map, &mut summary)?;
+        }
         // 3–4. Discovery and reconciliation of every watched folder; the
         // messages whose occurrence reconciliation removed are re-evaluated.
         let mut removed = Vec::new();
@@ -640,17 +667,17 @@ impl Service {
             self.recover_intents(ctx, &map, &mut summary)?;
         }
         // 6. Fetch and classify, skipped while the key is unavailable.
-        let (done, skipped) = self.fetch_and_classify(
-            name,
-            &account,
-            &generation,
-            engine.as_deref(),
-            filing.map(|_| &map),
-            limit,
-        )?;
+        let from = Fetching {
+            engine: engine.as_deref(),
+            map: &map,
+            filing: filing.is_some(),
+        };
+        let (done, skipped) = self.fetch_and_classify(name, &account, &generation, &from, limit)?;
         // 7–10. Arrivals and re-evaluation, bootstrap and hydration, plan and
-        // apply, done inference.
-        if let Some(ctx) = filing {
+        // apply, done inference. A pass asked to stop leaves them to the next
+        // pass: every filing step resumes from stored state.
+        let stopped = self.stopping();
+        if let Some(ctx) = filing.filter(|_| !stopped) {
             self.locate_and_file(ctx, &map, &removed, &mut summary)?;
         }
         // 11. Summary.
@@ -662,6 +689,10 @@ impl Service {
             filing.map(|_| &summary),
         )?;
         mark_skipped(&mut out, skipped);
+        if stopped {
+            out["stopped"] = json!(true);
+            out["partial"] = json!(true);
+        }
         Ok(out)
     }
     /// Steps 7–10 with filing on: arrival resolution, then re-evaluation of
@@ -870,31 +901,39 @@ impl Service {
         self.store
             .reconcile_range_ids(scan.name, folder, epoch, cursor, end, &uids, end == through)
     }
-    /// Step 5: fetch and classify queued messages. With `map` (filing on), a
-    /// message with an occurrence in a source folder gets its placement (mail
-    /// seen only in a category folder is placed by arrival resolution), and a
-    /// message whose fetch would read through a conflicting alias stays queued.
-    /// With jobs to lease and the key unavailable, nothing is leased and the
-    /// key error is returned as the reason classification was skipped.
+    /// Step 5: fetch and classify queued messages. A message whose fetch
+    /// would read through a conflicting alias stays queued, in every filing
+    /// mode, and so does every message that needs a fetch while reads are
+    /// blocked. With filing on, a message with an occurrence in a source
+    /// folder gets its placement (mail seen only in a category folder is
+    /// placed by arrival resolution). With jobs to lease and the key
+    /// unavailable, nothing is leased and the key error is returned as the
+    /// reason classification was skipped.
     fn fetch_and_classify(
         &mut self,
         name: &str,
         account: &AccountConfig,
         generation: &str,
-        h: Option<&dyn MailEngine>,
-        map: Option<&FolderMap>,
+        from: &Fetching,
         limit: usize,
     ) -> Result<(Processed, Option<String>)> {
         let mut done = Processed::default();
-        let no_conflicts = BTreeSet::new();
-        let blocked = map.map_or(&no_conflicts, |m| &m.alias_conflicts);
-        let ids = self.store.queued_outside(name, limit, blocked)?;
+        let (h, map) = (from.engine, from.map);
+        let ids = if map.reads_blocked {
+            self.store.queued_fetched(name, limit)?
+        } else {
+            self.store
+                .queued_outside(name, limit, &map.alias_conflicts)?
+        };
         if !ids.is_empty() {
             if let Some(reason) = self.classification_skipped() {
                 return Ok((done, Some(reason)));
             }
         }
         for id in ids {
+            if self.stopping() {
+                break;
+            }
             let needed_fetch = self.required(name, &id)?.normalized.is_none();
             match self
                 .process_one(name, account, generation, &id, h)?
@@ -909,7 +948,8 @@ impl Service {
             if needed_fetch && row.normalized.is_some() {
                 done.fetched += 1;
             }
-            if let Some(sources) = map.map(|m| m.sources.as_slice()) {
+            if from.filing {
+                let sources = map.sources.as_slice();
                 let occurrences = self.store.occurrences_of(name, &row.id)?;
                 if occurrences.iter().any(|(f, _, _)| sources.contains(f)) {
                     self.store.ensure_placement(name, &row.id, sources)?;
@@ -1905,6 +1945,46 @@ fn config_changed() -> anyhow::Error {
     config_err("mail engine configuration changed during operation")
 }
 
+/// `doctor`'s transport block for a configured engine: the version check
+/// (`tested`), then the alias check of the source folders, which every mode
+/// reads from. A configuration that cannot be read or parsed makes the
+/// transport not ready, since no folder would be read.
+fn transport_report(engine: &dyn MailEngine, account: &AccountConfig) -> Value {
+    let version = match engine.version() {
+        Ok(version) => version,
+        Err(e) => {
+            return match e.downcast_ref::<engine::versions::Untested>() {
+                Some(untested) => {
+                    json!({"configured":true,"ready":false,"version":untested.line,"tested":false,"error":untested.to_string()})
+                }
+                None => {
+                    json!({"configured":true,"ready":false,"error":"Himalaya version/config check failed"})
+                }
+            }
+        }
+    };
+    match engine.alias_conflicts(&observe::sources_of(account)) {
+        Ok(conflicts) => {
+            json!({"configured":true,"ready":true,"version":version,"tested":true,"alias_conflicts":conflicts})
+        }
+        Err(e) => {
+            let message = e
+                .downcast_ref::<ServiceError>()
+                .map_or_else(|| e.to_string(), |s| s.message.clone());
+            json!({"configured":true,"ready":false,"version":version,"tested":true,"alias_conflicts":[],"error":message})
+        }
+    }
+}
+
+/// A Himalaya that is not a tested version fails the pass with exit 3 and
+/// says which versions are tested; any other version error is as before.
+fn version_error(e: anyhow::Error) -> anyhow::Error {
+    match e.downcast_ref::<engine::versions::Untested>() {
+        Some(untested) => err(3, untested.to_string()),
+        None => abort_on_config_change(e),
+    }
+}
+
 fn abort_on_config_change(e: anyhow::Error) -> anyhow::Error {
     if filing::is_config_changed(&e) {
         config_changed()
@@ -1921,6 +2001,44 @@ fn step_failed(e: anyhow::Error, code: &str, summary: &mut FilingSummary) -> Res
     }
     summary.errors += 1;
     summary.problems.push(code.into());
+    Ok(())
+}
+
+/// Where step 6 fetches from: the engine, the pass's folder map (alias
+/// conflicts, blocked reads, sources) and whether filing is on.
+struct Fetching<'a> {
+    engine: Option<&'a dyn MailEngine>,
+    map: &'a FolderMap,
+    filing: bool,
+}
+
+/// The read check for a map that resolution did not check (filing off, or
+/// a resolution that failed): a source whose effective target is another
+/// mailbox is not read, and a mail engine configuration that cannot be read
+/// or parsed blocks every read (fail closed). A configuration change during
+/// the check aborts the pass, as elsewhere.
+fn guard_reads(
+    engine: &dyn MailEngine,
+    map: &mut FolderMap,
+    summary: &mut FilingSummary,
+) -> Result<()> {
+    if map.alias_checked {
+        return Ok(());
+    }
+    match engine.alias_conflicts(&map.sources) {
+        Ok(conflicts) => {
+            for folder in &conflicts {
+                summary.problems.push(format!("alias_conflict:{folder}"));
+            }
+            map.alias_conflicts = conflicts.into_iter().collect();
+            map.alias_checked = true;
+        }
+        Err(e) if filing::is_config_changed(&e) => return Err(config_changed()),
+        Err(_) => {
+            map.reads_blocked = true;
+            summary.problems.push("engine_config_unreadable".into());
+        }
+    }
     Ok(())
 }
 
@@ -2241,6 +2359,10 @@ mod error_reasons {
             Some("service_config_unknown")
         );
         assert_eq!(ErrorKind::ServiceBusy.reason(), Some("service_busy"));
+        assert_eq!(
+            ErrorKind::UnsafePermissions.reason(),
+            Some("unsafe_permissions")
+        );
     }
 
     /// A mailbox identity that changed mid-operation is a binding conflict.

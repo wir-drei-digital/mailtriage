@@ -1,7 +1,10 @@
 //! Which `mailtriage` and which config: resolved once at start, made
 //! absolute and canonical, and passed explicitly to every command, window
 //! and login item.
-use crate::cli::{self, Cli, Failure, Request};
+use crate::{
+    brew,
+    cli::{self, Cli, Failure, Request},
+};
 use std::{
     ffi::{OsStr, OsString},
     io,
@@ -107,20 +110,24 @@ pub fn canonical(path: &Path, cwd: &Path) -> io::Result<PathBuf> {
 }
 
 /// `--mailtriage` when given, else `mailtriage` next to this program's
-/// canonical path, else the first `mailtriage` on `PATH`; canonicalized.
+/// canonical path, else the first `mailtriage` on `PATH`; canonicalized,
+/// and for a Homebrew keg its `opt` path, which outlives `brew upgrade`.
 /// On failure, the places looked at.
 pub fn resolve_cli(flag: Option<&Path>, env: &Env) -> Result<PathBuf, Vec<String>> {
     if let Some(flag) = flag {
         return canonical(flag, &env.cwd)
             .ok()
             .filter(|p| is_executable(p))
+            .map(|p| brew::launch_path(&p))
             .ok_or_else(|| vec![flag.display().to_string()]);
     }
     let mut looked = vec![];
     if let Some(dir) = env.own_exe.as_deref().and_then(Path::parent) {
         let next = dir.join("mailtriage");
         if is_executable(&next) {
-            return canonical(&next, &env.cwd).map_err(|_| vec![next.display().to_string()]);
+            return canonical(&next, &env.cwd)
+                .map(|p| brew::launch_path(&p))
+                .map_err(|_| vec![next.display().to_string()]);
         }
         looked.push(next.display().to_string());
     }
@@ -129,7 +136,7 @@ pub fn resolve_cli(flag: Option<&Path>, env: &Env) -> Result<PathBuf, Vec<String
             let candidate = dir.join("mailtriage");
             if is_executable(&candidate) {
                 if let Ok(found) = canonical(&candidate, &env.cwd) {
-                    return Ok(found);
+                    return Ok(brew::launch_path(&found));
                 }
             }
         }

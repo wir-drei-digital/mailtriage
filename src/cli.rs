@@ -1,6 +1,6 @@
 use clap::{ArgGroup, Args, Parser, Subcommand};
 use mailtriage::{
-    config,
+    config, distribution,
     domain::{Category, FilingMode, UpdateMode},
     engine::ConfigChanged,
     prompt::{self, Prompter},
@@ -90,6 +90,67 @@ enum Command {
     },
     /// Install the newest stable release from GitHub; needs no config.
     Update(UpdateArg),
+    /// The Himalaya mailtriage runs.
+    Himalaya {
+        #[command(subcommand)]
+        command: HimalayaCommand,
+    },
+    /// Install this mailtriage into a directory; needs no config.
+    #[command(name = "self")]
+    SelfCmd {
+        #[command(subcommand)]
+        command: SelfCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum SelfCommand {
+    /// Install this binary (and a tray) into DIR with the updater's
+    /// transaction, then offer setup and the tray's login item.
+    Install(SelfInstallArg),
+    /// Remove the installation in DIR: its services, the tray's login item,
+    /// the running tray, then its programs. Config, state and mail stay.
+    Uninstall(SelfUninstallArg),
+}
+
+#[derive(Args)]
+struct SelfUninstallArg {
+    /// The installation's directory (default: this program's directory).
+    #[arg(long)]
+    dir: Option<PathBuf>,
+    /// Do not ask for confirmation.
+    #[arg(long)]
+    yes: bool,
+}
+
+#[derive(Args)]
+struct SelfInstallArg {
+    /// The directory to install into, created when missing.
+    #[arg(long)]
+    dir: PathBuf,
+    /// A mailtriage-tray binary to install next to mailtriage.
+    #[arg(long)]
+    tray_file: Option<PathBuf>,
+    /// Do not offer setup or the login item.
+    #[arg(long)]
+    no_setup: bool,
+    /// Never prompt.
+    #[arg(long)]
+    yes: bool,
+}
+
+#[derive(Subcommand)]
+enum HimalayaCommand {
+    /// Install a tested Himalaya release for mailtriage only, under
+    /// ~/.local/share/mailtriage/himalaya; needs no config.
+    Install(HimalayaInstallArg),
+}
+
+#[derive(Args)]
+struct HimalayaInstallArg {
+    /// A tested version (default: the newest tested one).
+    #[arg(long = "version", value_name = "X.Y.Z")]
+    version: Option<String>,
 }
 
 #[derive(Args)]
@@ -112,6 +173,10 @@ struct SetupArg {
     interactive: bool,
     #[arg(long)]
     himalaya_binary: Option<PathBuf>,
+    /// Install a tested Himalaya for mailtriage when the one found is
+    /// missing or untested, without asking.
+    #[arg(long)]
+    himalaya_install: bool,
     #[arg(long)]
     himalaya_config: Option<PathBuf>,
     #[arg(long)]
@@ -164,6 +229,7 @@ impl SetupArg {
             update: self.update,
             terminal,
             himalaya_binary: self.himalaya_binary.clone(),
+            himalaya_install: self.himalaya_install,
             himalaya_config: self.himalaya_config.clone(),
             himalaya_account: self.himalaya_account.clone(),
             account: self.account.clone(),
@@ -573,7 +639,13 @@ pub fn run() -> i32 {
         }
     };
     match execute(&cli) {
-        Ok(value) => {
+        Ok(mut value) => {
+            // A result printed with a failure exit code, such as a `self
+            // install` whose setup failed; the key itself is not printed.
+            let code = value
+                .as_object_mut()
+                .and_then(|object| object.remove("exit_code"))
+                .and_then(|code| code.as_i64());
             let partial = value
                 .get("partial")
                 .and_then(Value::as_bool)
@@ -581,10 +653,10 @@ pub fn run() -> i32 {
             if print_value(&value, cli.json).is_err() {
                 return 3;
             }
-            if partial {
-                4
-            } else {
-                0
+            match code {
+                Some(code) => code as i32,
+                None if partial => 4,
+                None => 0,
             }
         }
         Err(error) => {
@@ -726,6 +798,33 @@ fn execute(cli: &Cli) -> Result<Value, CliError> {
         Command::Service { command } => service_command(&cli.config_path()?, command),
         Command::Update(arg) => {
             update::command::run(arg.check, &update::install::EnvHooks).map_err(service_error)
+        }
+        Command::Himalaya {
+            command: HimalayaCommand::Install(arg),
+        } => distribution::himalaya::run(arg.version.as_deref()).map_err(service_error),
+        Command::SelfCmd {
+            command: SelfCommand::Install(arg),
+        } => {
+            let args = distribution::self_install::Args {
+                dir: arg.dir.clone(),
+                tray_file: arg.tray_file.clone(),
+                no_setup: arg.no_setup,
+                yes: arg.yes,
+            };
+            let mut prompt = Prompter::new(prompt::stdin_unbuffered(), io::stderr(), true);
+            distribution::self_install::run(&args, &update::install::EnvHooks, &mut prompt)
+                .map_err(service_error)
+        }
+        Command::SelfCmd {
+            command: SelfCommand::Uninstall(arg),
+        } => {
+            let args = distribution::self_uninstall::Args {
+                dir: arg.dir.clone(),
+                yes: arg.yes,
+            };
+            let mut prompt = Prompter::new(prompt::stdin_unbuffered(), io::stderr(), true);
+            distribution::self_uninstall::run(&args, &update::install::EnvHooks, &mut prompt)
+                .map_err(service_error)
         }
     }
 }
@@ -928,7 +1027,11 @@ fn watch(cli: &Cli, arg: &WatchArg) -> Result<Value, CliError> {
             Moment::BeforePass => updates.before_pass(&path, &stopped),
             Moment::Waiting => updates.while_waiting(&stopped),
         },
-        || Service::open(&path)?.sync(&arg.account, arg.limit),
+        || {
+            Service::open(&path)?
+                .with_stop(Arc::clone(&stop))
+                .sync(&arg.account, arg.limit)
+        },
     )?;
     let partial = tally.partial_passes > 0 || tally.skipped_passes > 0;
     Ok(
@@ -1142,6 +1245,7 @@ mod tests {
             || service_err(5, ErrorKind::ServiceConfigMismatch),
             || service_err(5, ErrorKind::ServiceConfigUnknown),
             || service_err(5, ErrorKind::ServiceBusy),
+            || service_err(3, ErrorKind::UnsafePermissions),
             || service_err(2, ErrorKind::Other),
             || ConfigChanged.into(),
             || anyhow::Error::from(ConfigChanged).context("during a pass"),

@@ -4,8 +4,9 @@
 #
 #   MT_E2E_HIMALAYA=/path/to/himalaya bash tests/e2e/run.sh flat|prefix PORT
 #
-# Needs Docker, python3, cargo and a Himalaya v2.1.0 binary. The container is
-# reachable on 127.0.0.1:PORT only and is always stopped when this script exits.
+# Needs Docker, python3, cargo and a Himalaya binary of a version listed in
+# src/engine/himalaya-versions.json. The container is reachable on
+# 127.0.0.1:PORT only and is always stopped when this script exits.
 set -euo pipefail
 
 fail() {
@@ -26,21 +27,24 @@ case "$port" in '' | *[!0-9]*) usage ;; esac
 # Resolve the Himalaya binary before changing directory; the test runs
 # mailtriage from a temporary directory, so the path must be absolute.
 himalaya=${MT_E2E_HIMALAYA:-}
-[ -n "$himalaya" ] || fail "set MT_E2E_HIMALAYA to a Himalaya v2.1.0 binary"
+[ -n "$himalaya" ] || fail "set MT_E2E_HIMALAYA to a tested Himalaya binary"
 case "$himalaya" in
   */*) ;;
   *) himalaya=$(command -v "$himalaya") || fail "MT_E2E_HIMALAYA not found on PATH: $MT_E2E_HIMALAYA" ;;
 esac
 [ -f "$himalaya" ] && [ -x "$himalaya" ] || fail "MT_E2E_HIMALAYA is not an executable file: $himalaya"
 himalaya="$(cd "$(dirname "$himalaya")" && pwd)/$(basename "$himalaya")"
+command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 version=$("$himalaya" --version) || fail "$himalaya --version failed"
 version=${version%%$'\n'*}
-case "$version" in
-  "himalaya v2.1.0 "*) ;;
-  *) fail "expected Himalaya v2.1.0, got: $version" ;;
-esac
-
-command -v python3 >/dev/null 2>&1 || fail "python3 is required"
+data="$(cd "$(dirname "$0")/../.." && pwd)/src/engine/himalaya-versions.json"
+listed=$(python3 -c 'import json, sys; print(" ".join(v["version"] for v in json.load(open(sys.argv[1]))["versions"]))' "$data") ||
+  fail "cannot read $data"
+tested=
+for v in $listed; do
+  case "$version" in "himalaya v$v "*) tested=$v ;; esac
+done
+[ -n "$tested" ] || fail "expected a tested Himalaya ($listed), got: $version"
 command -v cargo >/dev/null 2>&1 || fail "cargo is required"
 command -v docker >/dev/null 2>&1 || fail "the docker CLI is required for the Dovecot container"
 docker info >/dev/null 2>&1 ||

@@ -5,8 +5,9 @@ following the [implementation plan](implementation-plan.md). Independent review
 reports: [core](review-core.md) and [integration](review-cli-integration.md).
 
 Completed: Rust library/CLI; all three decisions; editable taxonomy; RFC822/JSON
-normalization; OpenRouter Decisions and explicit fake providers; Himalaya 2.1.0
-adapter; SQLite jobs, retry and lease recovery; source binding and UID epochs;
+normalization; OpenRouter Decisions and explicit fake providers; Himalaya
+adapter for the tested versions in `src/engine/himalaya-versions.json`; SQLite
+jobs, retry and lease recovery; source binding and UID epochs;
 bounded discovery/reconciliation; corrections, Done/reopen, query cursors and
 export; Hermes guide and cross-platform CI/release workflows.
 
@@ -58,17 +59,18 @@ an inspection/interchange artifact.
 ## Dovecot end to end
 
 `.github/workflows/e2e.yml` runs `tests/e2e_dovecot.rs` on every push to
-`main`, on pull requests and on demand. It uses the real `mailtriage` binary,
-the official Himalaya v2.1.0 Linux x86_64 release (`himalaya.x86_64-linux.tgz`,
-SHA-256 `683a2ab8e1534f01e6bda3a69e204d564c31fbfbe20511fc7bc60b67f2e85884`) and
-a `dovecot/dovecot:2.3.21` container in two namespace layouts: no prefix with
+`main`, on pull requests and on demand, once for every Himalaya version in
+`src/engine/himalaya-versions.json`. It uses the real `mailtriage` binary, the
+official Linux x86_64 release of that version (`himalaya.x86_64-linux.tgz`,
+pinned by the SHA-256 in the same file) and a `dovecot/dovecot:2.3.21`
+container in two namespace layouts: no prefix with
 separator `/` (`tests/e2e/dovecot-flat.conf`) and prefix `INBOX.` with
 separator `.` (`tests/e2e/dovecot-prefix.conf`). The test enables `live` filing
 and checks: filing into category folders with read state preserved and
 `\Flagged` added, a client move as a category correction, a client move back
 to `INBOX` as a pin, a client delete as done, and an `INBOX` UIDVALIDITY reset
 that keeps the pinned message known and open. To run it locally, you need
-Docker with a running daemon, Python 3, Cargo and a Himalaya v2.1.0 binary.
+Docker with a running daemon, Python 3, Cargo and a Himalaya binary of a tested version.
 Pass the binary in `MT_E2E_HIMALAYA`, the layout (`flat` or `prefix`) and a
 free local port:
 
@@ -319,3 +321,26 @@ The automated tests use a loopback server instead of GitHub and a script instead
 | Step 7: `~/.local/bin/mailtriage-tray.previous` is kept and prints the older version | | | |
 | Step 8: `watch` replaces the older tray at its next pass (no `error` event in the service log), and the running tray re-executes onto the new file within about 15 s, with its menu and without a second tray | | | |
 | Step 9: `update` exits 0 with `update.tray.action` `skipped` and an `error` starting `mailtriage-tray does not run here:` that names the missing library; nothing is downloaded for the tray: no `mailtriage-tray.previous`, and its `sha256sum` is unchanged | | | |
+
+## Install paths on a real machine (human check)
+
+The automated tests run `install.sh` against a loopback server and never install from Homebrew. After the first release with the install script and the tap formula, check once on macOS arm64 and once on Linux (a desktop for the tray, and a server):
+
+1. On a machine without mailtriage, run the one-line install from the README in a terminal, answer setup's questions, and accept the login item (macOS).
+2. Run `mailtriage --version`, `mailtriage service status --json` and, on macOS, log out and in again.
+3. Run the install line again.
+4. Run it with `-s -- --uninstall` and confirm.
+5. With Homebrew: `brew install wir-drei-digital/tap/mailtriage`, `mailtriage setup` (installing the service), on macOS `mailtriage-tray autostart enable`, then wait for one pass.
+6. After the next release: `brew upgrade mailtriage` with the service running, and wait one interval.
+7. `mailtriage self uninstall --dir "$(brew --prefix)/bin"`.
+
+| Check | Result | Evidence | Date |
+| --- | --- | --- | --- |
+| Step 1: the script installs into `~/.local/bin`, prints the PATH line when it is not on `PATH`, runs setup from `~/.local/bin/mailtriage` (the service file names it), and on macOS enables the login item | | | |
+| Step 1: setup offered the private Himalaya when no tested one was on `PATH`, and the account uses `~/.local/share/mailtriage/himalaya/VERSION/himalaya` | | | |
+| Step 2: the service runs; on macOS the tray starts at login | | | |
+| Step 3: the second run reinstalls the same version; the service restarts onto it (`restarting` event) | | | |
+| Step 4: services, login item, tray and binaries are gone; config, state and the private Himalaya stay | | | |
+| Step 5: the service file and the tray's login item name `$(brew --prefix)/opt/mailtriage/bin/…`; `mailtriage update --check --json` reports `managed_by_homebrew` | | | |
+| Step 6: the running service restarts onto the new version by itself (`restarting` event, `last_pass.version`), and so does the tray | | | |
+| Step 7: refused with `installed by Homebrew; run brew uninstall mailtriage` (exit 2) | | | |

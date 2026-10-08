@@ -15,15 +15,35 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # Official Himalaya v2.1.0 release asset, pinned by SHA-256.
-  HIMALAYA_URL: https://github.com/pimalaya/himalaya/releases/download/v2.1.0/himalaya.x86_64-linux.tgz
-  HIMALAYA_SHA256: 683a2ab8e1534f01e6bda3a69e204d564c31fbfbe20511fc7bc60b67f2e85884
 
 jobs:
+  versions:
+    name: Tested Himalaya versions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.read.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      # Every version in the data file, with its x86_64-linux archive digest;
+      # this workflow never changes when a version is added.
+      - id: read
+        run: |
+          set -euo pipefail
+          matrix="$(python3 .github/scripts/himalaya_matrix.py src/engine/himalaya-versions.json)"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
   dovecot:
-    name: Dovecot (flat and INBOX. prefix)
+    name: Dovecot, Himalaya ${{ matrix.version }} (flat and INBOX. prefix)
+    needs: versions
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.versions.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -32,13 +52,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: e2e
-      - name: Install pinned Himalaya v2.1.0
+      - name: Install Himalaya ${{ matrix.version }}, pinned by SHA-256
+        env:
+          HIMALAYA_VERSION: ${{ matrix.version }}
+          HIMALAYA_SHA256: ${{ matrix.sha256 }}
         run: |
           set -euo pipefail
-          dir="$RUNNER_TEMP/himalaya-v2.1.0"
+          dir="$RUNNER_TEMP/himalaya-v$HIMALAYA_VERSION"
           mkdir -p "$dir"
           cd "$dir"
-          curl -fsSL -o himalaya.x86_64-linux.tgz "$HIMALAYA_URL"
+          curl --proto '=https' --tlsv1.2 -fsSL -o himalaya.x86_64-linux.tgz \
+            "https://github.com/pimalaya/himalaya/releases/download/v$HIMALAYA_VERSION/himalaya.x86_64-linux.tgz"
           echo "$HIMALAYA_SHA256  himalaya.x86_64-linux.tgz" | sha256sum -c -
           tar -xzf himalaya.x86_64-linux.tgz himalaya
           ./himalaya --version

@@ -3,6 +3,7 @@
 //! it and send actions back.
 pub mod args;
 pub mod autostart;
+pub mod brew;
 pub mod cli;
 pub mod controller;
 pub mod editor;
@@ -10,5 +11,6 @@ pub mod icons;
 pub mod instances;
 pub mod model;
 pub mod paths;
+pub mod quit;
 pub mod restart;
 pub mod tray;

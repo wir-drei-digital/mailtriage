@@ -352,6 +352,19 @@ impl Store {
         Ok(rows)
     }
 
+    /// `queued`, but only messages that need no fetch: while every read is
+    /// blocked, the others stay queued without a lease or attempt.
+    pub fn queued_fetched(&self, account: &str, limit: usize) -> Result<Vec<String>> {
+        let mut st = self.db.prepare("SELECT j.message_id FROM jobs j JOIN messages m ON m.id=j.message_id WHERE m.account=?1
+ AND ((j.state IN ('queued','retry') AND j.next_after<=?2) OR (j.state='leased' AND j.lease_until<=?2))
+ AND m.normalized IS NOT NULL
+ ORDER BY m.observed_at,j.message_id LIMIT ?3")?;
+        let rows = st
+            .query_map(params![account, now(), limit as i64], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     /// Folders named by any rescan-set row.
     pub fn rescan_folders(&self, account: &str) -> Result<BTreeSet<String>> {
         let mut st = self

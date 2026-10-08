@@ -11,6 +11,7 @@ This guide is the full reference: setup, configuration, the OpenRouter key, the 
 - [The OpenRouter key](#the-openrouter-key)
 - [Background service](#background-service)
 - [Updates](#updates)
+- [Himalaya versions](#himalaya-versions)
 - [Daily use](#daily-use)
 - [Categories](#categories)
 - [Filing into folders](#filing-into-folders)
@@ -41,25 +42,74 @@ mailtriage list --account work --view attention --json
 You need:
 
 - macOS arm64, Linux amd64 or Linux arm64,
-- Himalaya v2.1.0 with IMAP support,
 - an IMAP account whose server supports UID and UIDVALIDITY (the MOVE extension too, if you want filing),
 - an OpenRouter API key,
 - for the background service: launchd (macOS) or systemd (Linux).
 
-From a GitHub release: each release carries `mailtriage-vVERSION-linux-amd64.tar.gz`, `-linux-arm64.tar.gz` and `-macos-arm64.tar.gz`, a `.sha256` file per archive and a combined `SHA256SUMS`. Each archive holds the `mailtriage` executable, the README and the license. For example, with the GitHub CLI; on Linux, set `PLATFORM` to `linux-amd64` or `linux-arm64` and use `sha256sum --check` in place of `shasum -a 256 --check`:
+mailtriage reads mail through Himalaya, in a [tested version](#himalaya-versions) with IMAP support; setup installs one for mailtriage when none is found.
+
+There are three ways to install, and each stays current differently:
+
+| Way | Installs into | Updated by |
+| --- | --- | --- |
+| [The install script](#the-install-script) | `~/.local/bin` | mailtriage itself ([Updates](#updates)) |
+| [Homebrew](#homebrew) | Homebrew's prefix | `brew upgrade mailtriage` |
+| [From source](#from-source) with Cargo | where you put it | you |
+
+The macOS executables are unsigned and not notarized. See the [release guide](releases.md) for how releases are made. A root-owned or otherwise unsafe install, for example one made with `sudo` into `/usr/local/bin`, is not replaced: mailtriage only reports new releases for it (see [Binaries mailtriage does not replace](#binaries-mailtriage-does-not-replace)).
+
+### The install script
 
 ```sh
-VERSION=0.1.0 PLATFORM=macos-arm64
-gh release download "v$VERSION" --repo wir-drei-digital/mailtriage --pattern "mailtriage-v$VERSION-$PLATFORM.tar.gz*" &&
-  shasum -a 256 --check "mailtriage-v$VERSION-$PLATFORM.tar.gz.sha256" &&
-  tar -xzf "mailtriage-v$VERSION-$PLATFORM.tar.gz" &&
-  install -d ~/.local/bin &&
-  install -m 0755 mailtriage ~/.local/bin/mailtriage
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/wir-drei-digital/mailtriage/main/install.sh | sh
 ```
 
-The macOS executable is unsigned and not notarized. See the [release guide](releases.md) for how releases are made. A root-owned or otherwise unsafe install, for example one made with `sudo` into `/usr/local/bin`, is not replaced: mailtriage only reports new releases for it (see [Binaries mailtriage does not replace](#binaries-mailtriage-does-not-replace)).
+The script downloads the newest release's archive and `SHA256SUMS` over HTTPS from GitHub, checks the archive's checksum and that it holds exactly `mailtriage`, `LICENSE` and `README.md`, and hands over to the downloaded binary's [`mailtriage self install`](#mailtriage-self-install), which installs it into `~/.local/bin` and offers setup. It needs `curl`, `tar`, `mktemp`, `uname`, and `sha256sum` or `shasum`. It never uses `sudo`, never edits your shell's startup files, and never touches a `himalaya`. Each release also carries `install.sh` with that release as its default version.
 
-From source, with a stable Rust toolchain:
+Options follow `sh -s --`, for example:
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/wir-drei-digital/mailtriage/main/install.sh | sh -s -- --version 0.3.0 --no-tray
+```
+
+| Option | Environment | Meaning |
+| --- | --- | --- |
+| `--version X.Y.Z` | `MAILTRIAGE_VERSION` | Install this release instead of the newest. Never a downgrade. |
+| `--dir DIR` | `MAILTRIAGE_INSTALL_DIR` | The install directory, default `~/.local/bin`. A leading `~/` or a bare `~` that reaches the script unexpanded means your `HOME`. |
+| `--tray` / `--no-tray` | `MAILTRIAGE_TRAY=1` / `0` | Install the tray app, or not. Default: yes on macOS; on Linux only when `DISPLAY` or `WAYLAND_DISPLAY` is set. |
+| `--no-setup` | `MAILTRIAGE_NO_SETUP=1` | Do not offer setup or the login item. |
+| `--yes` | `MAILTRIAGE_YES=1` | Never ask. |
+| `--uninstall` | | Uninstall the installation in `DIR`; see [Uninstall](#uninstall). |
+
+It asks only when it can open your terminal:
+
+| Question | Terminal | `--yes` | No terminal |
+| --- | --- | --- | --- |
+| Downgrade below the installed version | refused (exit 2) | refused (exit 2) | refused (exit 2) |
+| Run setup now | asks, default yes | no; prints the command | no; prints the command |
+| Install a private Himalaya (inside setup) | asks, default yes | not reached | not reached |
+| Start the tray at login (after setup succeeded) | asks, default yes | no; prints the command | no; prints the command |
+| Uninstall | asks, default no | yes | refused (exit 2; use `--yes`) |
+
+The end of input at a question counts as its default. Exit codes: 0 done; 1 a failed step, which the message names: a missing tool, a network error, a checksum mismatch, an unexpected archive or latest-release URL; 2 invalid options, an unsupported platform, or a refused downgrade; 126 when the downloaded program could not be run, usually because the temporary directory is mounted `noexec` (run the script again with `TMPDIR=<a directory that allows running programs>` before `sh`); any other code is `mailtriage self install`'s. A download that breaks off runs nothing: the whole script is one `{ … }` group, which `sh` reads completely before running it.
+
+The script never downgrades. To go back to an older release, follow [Rolling back by hand](#rolling-back-by-hand).
+
+### Homebrew
+
+```sh
+brew install wir-drei-digital/tap/mailtriage
+```
+
+The formula in [wir-drei-digital/homebrew-tap](https://github.com/wir-drei-digital/homebrew-tap) installs the release archive for macOS arm64, with `mailtriage-tray`, or for Linux amd64 or arm64. It has no Himalaya dependency: `mailtriage setup` uses a tested `himalaya` on your `PATH` or installs a private one. Then:
+
+- `brew upgrade mailtriage` installs new releases. For a Homebrew install mailtriage only reports them (`managed_by_homebrew`).
+- The background service and the tray's login item record `$(brew --prefix)/opt/mailtriage/bin/…`, which `brew upgrade` keeps pointing at the current version; running services and the tray switch to it by themselves.
+- To uninstall, run `mailtriage service uninstall --account NAME` for each account, then on macOS `mailtriage-tray autostart disable` (the login item names the `opt` path that `brew uninstall` removes), then `brew uninstall mailtriage`; `mailtriage self uninstall` refuses a Homebrew install.
+
+### From source
+
+With a stable Rust toolchain:
 
 ```sh
 cargo build --release --locked &&
@@ -69,6 +119,57 @@ cargo build --release --locked &&
 ```
 
 `~/.local/bin` must be on your `PATH`; the examples below assume `mailtriage` is. If `command -v mailtriage` prints nothing, add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile (`~/.zprofile` on macOS, `~/.bashrc` on Linux) and open a new terminal. The background service records the absolute path of the executable that installs it, so install the binary in its final place first.
+
+### `mailtriage self install`
+
+The install script runs this command; you or an agent can run it on a binary you placed yourself:
+
+```sh
+mailtriage self install --dir DIR [--tray-file PATH] [--no-setup] [--yes] [--json]
+```
+
+1. It creates `DIR` and its missing parents with mode 0755. `DIR`, with symlinks resolved, must be yours and not writable by group or others, and each of its parents must pass the rule of [a private Himalaya's](#a-private-himalaya) directory. Otherwise it exits 3 with `unsafe_permissions` and the fix: `chmod go-w DIR`, or another `--dir`.
+2. It never goes back: when `DIR/mailtriage` prints a newer version, it exits 2 and points to [Rolling back by hand](#rolling-back-by-hand).
+3. It installs this binary as `DIR/mailtriage` the way `mailtriage update` installs a release: under the installation lock, from a new file that must run with `--version`, keeping the old binary as `DIR/mailtriage.previous`, with a rename. Running services switch to it by themselves. When `DIR/mailtriage` already prints this version (a reinstall), it is still replaced, but an existing `DIR/mailtriage.previous` stays as it is, so the release before it remains there for [rolling back by hand](#rolling-back-by-hand); the tray's `.previous` is kept the same way.
+4. With `--tray-file`, it installs that `mailtriage-tray` next to it the same way; it must be the same version. A tray that does not run here (on Linux without GTK, for example) is skipped, any existing tray is kept, and on Linux it names the packages the tray needs.
+5. It records both in the update cache, clearing any earlier install error.
+6. It says when `DIR` is not on your `PATH`, with the line to add for your shell (zsh, bash, fish, or a POSIX `export`), and when another `mailtriage` comes first on your `PATH`: that one stays in use and is not updated by this install.
+7. With a terminal, unless `--no-setup` or `--yes`, it asks `Run mailtriage setup now? [Y/n]` and runs `DIR/mailtriage setup`, so the service it installs runs `DIR/mailtriage`. After a successful setup with the tray installed, it asks `Start the tray at login? [Y/n]` and runs `DIR/mailtriage-tray autostart enable --config CONFIG --mailtriage DIR/mailtriage` with the config setup wrote. Otherwise it prints those commands.
+
+```json
+{"schema_version":1,"self_install":{"dir":"/Users/alice/.local/bin","cli":{"action":"installed","version":"0.3.0","path":"/Users/alice/.local/bin/mailtriage"},"tray":{"action":"installed","error":null},"on_path":true,"shadowed_by":null,"setup":"ran","autostart":"enabled"}}
+```
+
+- `tray`: `null` without `--tray-file`, else `action` `installed`, `skipped` or `failed`, with the reason in `error`.
+- `setup`: `ran`, `skipped` or `failed`. Choosing "Abort" in setup's menu (a re-run with an existing config) changes nothing and counts as `skipped`, not as a failed setup. `autostart`: `enabled`, `skipped` or `failed`.
+
+Exit codes: 0; 2 for invalid flags or a refused downgrade; 3 for an unsafe directory, a failed install, a failed tray install, or a failed setup (the binaries stay installed); 5 when another update or install held the installation lock for 60 seconds.
+
+### Uninstall
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/wir-drei-digital/mailtriage/main/install.sh | sh -s -- --uninstall
+mailtriage self uninstall [--dir DIR] [--yes] [--json]
+```
+
+The script's `--uninstall` runs `DIR/mailtriage self uninstall --dir DIR`, with `--yes` when given, and downloads nothing; it asks through your terminal like the install does. `self uninstall` removes the installation in `DIR`, by default the directory of the `mailtriage` that runs it, and nothing else:
+
+1. A Homebrew install is refused: `installed by Homebrew; run brew uninstall mailtriage` (exit 2). Without `--yes` it asks first (default no); without a terminal it needs `--yes` (exit 2).
+2. It takes the installation lock, waiting up to 60 seconds (else exit 5), so no update recreates the binaries meanwhile.
+3. It uninstalls every background service whose executable is `DIR/mailtriage`, as `service uninstall` does, under each account's service lock. Services of other installations, Homebrew's included, stay.
+4. It removes the tray's login item when that starts `DIR/mailtriage-tray` (on macOS it also stops the login job), then runs `DIR/mailtriage-tray quit`. Close any open categories window yourself.
+5. Only when all of that worked, it deletes `DIR/mailtriage-tray`, the `.previous` copies and then `DIR/mailtriage`, and the update cache's entry of each program it deleted. When a step failed, it deletes no program file (services and a login item it already removed stay removed), lists the failures and exits 3. When a file cannot be deleted, it keeps `DIR/mailtriage`, so you can run `self uninstall` again, lists the failure and exits 3.
+
+It keeps the installation lock file, the private Himalaya under `~/.local/share/mailtriage/himalaya` (other configs may use it; it prints how to delete it), and your config, state and logs (`~/.config/mailtriage/` by default). No mail is touched.
+
+```json
+{"schema_version":1,"self_uninstall":{"dir":"/Users/alice/.local/bin","services":[{"account":"work","unit_path":"/Users/alice/Library/LaunchAgents/digital.wirdrei.mailtriage.work.plist","action":"uninstalled","error":null}],"tray":"quit","removed":["/Users/alice/Library/LaunchAgents/digital.wirdrei.mailtriage-tray.plist","/Users/alice/.local/bin/mailtriage-tray","/Users/alice/.local/bin/mailtriage.previous","/Users/alice/.local/bin/mailtriage"],"kept":["/Users/alice/.local/bin/.mailtriage-update.lock","/Users/alice/.config/mailtriage"],"failures":[]}}
+```
+
+- `services[].action`: `uninstalled`, `skipped` (by the time its lock was held, the file named another executable) or `failed`, with `error`.
+- `tray`: `quit`, `not_running`, `other_installation` (another installation's tray, which keeps running), `not_installed`, or `failed`.
+
+Exit codes: 0; 2 for a Homebrew install, a refused confirmation, no terminal without `--yes`, or `HOME` not set (nothing is changed); 3 for a failed service or tray step (no program file was deleted) or a file that could not be deleted (`DIR/mailtriage` stays); 5 when the installation lock was held for 60 seconds.
 
 ## Guided setup
 
@@ -90,7 +191,7 @@ mailtriage setup
 | Step | What happens | Flags |
 | --- | --- | --- |
 | 1. Config | If the config exists: update an account, add an account, or abort. Other accounts are never changed. | `--config`, `--update`, `--account` |
-| 2. Himalaya | Finds the Himalaya binary, its config file and the account, and runs `himalaya account check`. Can create an account with `himalaya configure`. | `--himalaya-binary`, `--himalaya-config`, `--himalaya-account` |
+| 2. Himalaya | Finds the Himalaya binary, its config file and the account, and runs `himalaya account check`. Can install a tested Himalaya for mailtriage, and create an account with `himalaya configure`. | `--himalaya-binary`, `--himalaya-install`, `--himalaya-config`, `--himalaya-account` |
 | 3. Account | The account name in mailtriage, your address, time zone and a one-line brief. | `--account`, `--identity`, `--timezone`, `--brief` |
 | 4. Folders | Lists the server's folders; you choose which to watch. | `--mailbox` |
 | 5. Classifier | OpenRouter or the offline `fake` provider, the model, and where the key lives. | `--provider`, `--model`, `--key-store`, `--key-command`, `--key-env`, `--key-stored` |
@@ -109,7 +210,9 @@ mailtriage setup
 
 **Step 2, Himalaya.**
 
-- Binary: `--himalaya-binary`, else the stored binary of the account being updated, else the first `himalaya` on `PATH`. Setup stores it as an absolute path. Its `--version` must report `himalaya v2.1.0` with `+imap`; otherwise setup exits 3.
+- Binary: `--himalaya-binary`, else the stored binary of the account being updated, else the first `himalaya` on `PATH`. Setup stores it as an absolute path. Its `--version` must report a [tested version](#himalaya-versions) with `+imap`. Setup writes the version it found into `expected_version`.
+- When that Himalaya is missing or untested, setup says why and asks `Install Himalaya 2.2.1 for mailtriage? [Y/n]` (default yes). It then installs a [private Himalaya](#a-private-himalaya) and uses it. Without prompts, `--himalaya-install` answers yes; otherwise setup exits 3 with the fix `run mailtriage himalaya install, then mailtriage setup --update --account NAME --himalaya-account NAME --himalaya-binary PATH`, naming the accounts known at that point (`--account` when given or being updated, `--himalaya-account` when given) and `--config` when needed. With a tested Himalaya found, `--himalaya-install` changes nothing.
+- When the chosen Himalaya is in a Homebrew keg (its path with symlinks resolved contains `/Cellar/himalaya/`), setup prints once: `Homebrew may upgrade Himalaya to a version mailtriage has not tested; "brew pin himalaya" holds it, or run mailtriage himalaya install for a private copy.`
 - Config file: `--himalaya-config`, else the stored file of the account being updated, else `HIMALAYA_CONFIG`, else Himalaya's default. `HIMALAYA_CONFIG` must name one file; several `:`-separated files exit 2.
 - Himalaya's default is the first existing file of: `~/Library/Application Support/himalaya/config.toml` on macOS, or `$XDG_CONFIG_HOME/himalaya/config.toml` on Linux when `XDG_CONFIG_HOME` is an absolute path; then `~/.config/himalaya/config.toml`; then `~/.himalayarc`.
 - Account: setup offers only accounts with an IMAP backend. The default is the account being updated, else Himalaya's default account.
@@ -148,7 +251,7 @@ mailtriage setup
 
 **Step 8, write.** `--updates auto|notify|off` sets [`updates`](#updates), with no prompt: a new config gets `auto`, and an existing one keeps its value unless `--updates` is given. Setup validates the whole config and writes it atomically with mode 0600, under the configuration lock (`mailtriage.lock`). When another command holds that lock, setup exits 5 (reason `config_busy`); when the file changed since step 1 read it, setup exits 5 (reason `config_changed`). Either way it writes nothing; run it again. The state directory is created with mode 0700. If the result is invalid, setup exits 2 and writes nothing. If the state directory already holds a binding for the account and the new answers would change it, setup exits 5 and writes nothing; see [Updating an account](#updating-an-account).
 
-**Step 9, check.** Setup runs `doctor` for the account. It prints each item (`provider`, `key`, `mail`, `filing` when filing is on, and `update` when `updates` is `auto` but the binary may not be replaced) as `ok`, or as `not ready` with the one command that fixes it. The `update` item does not make `doctor.ready` false, as in `doctor` itself. If `doctor` itself fails, for example because the state database cannot be opened, setup reports a single not-ready `state` item instead. Setup exits 0 even when an item is not ready.
+**Step 9, check.** Setup runs `doctor` for the account. It prints each item (`provider`, `key`, `mail`, `filing` when filing is on, and `update` when `updates` is `auto` but the binary may not be replaced) as `ok`, or as `not ready` with the one command that fixes it. The `update` item does not make `doctor.ready` false, as in `doctor` itself. If `doctor` itself fails, for example because the state database cannot be opened, setup reports a single not-ready `state` item instead. For an untested Himalaya, the `mail` item's fix is `run mailtriage himalaya install, then mailtriage setup --update --account NAME --himalaya-binary PATH`, with the path that command installs to and `--config` when needed. Setup exits 0 even when an item is not ready.
 
 **Step 10, service.** With prompts on macOS or Linux, setup asks whether to run `watch` in the background (default yes); on other platforms it skips this step. When the key comes from an environment variable, the default is no, because the service does not inherit the variable; setup says so and prints the command that moves the key into a key store. Without prompts, `--service install` installs it and `--service skip` (the default) does not. `--interval-seconds` (1 to 86400, default 60) and `--limit` (1 to 500, default 100) are passed to `watch`. When step 9 reported a not-ready `state` item, setup installs no service, since every pass would fail; it prints the `service install` command to run once that is fixed. See [Background service](#background-service).
 
@@ -204,7 +307,7 @@ This keeps the model, endpoint, timeout and `api_key_env`, so no mail is classif
 - Prompts are on when stdin is a terminal, or with `--interactive` (answers from a pipe, as the tests do). Otherwise setup runs as with `--yes`.
 - `--yes` turns prompts off. Each value comes from its flag or its default. A value without a default, such as `--himalaya-account`, exits 2 and names the flag.
 - A flag always answers its question; setup does not ask it.
-- Choosing "Abort" in step 1 exits 2 with `setup aborted; nothing was changed`.
+- Choosing "Abort" in step 1 exits 2 with `setup aborted; nothing was changed` and the reason `setup_aborted`.
 - End of input exits 2 with `setup aborted: input ended`. The config is written in step 8, so an abort at the service question keeps it. Run `mailtriage service install --account NAME` for the service.
 
 ### Updating an account
@@ -250,8 +353,8 @@ Progress and the check summary go to stderr. stdout carries one result object, o
 | Code | Cases |
 | --- | --- |
 | 0 | Setup finished. `doctor` items that are not ready are listed in the result. |
-| 2 | Invalid input; a required flag missing without prompts; an invalid account name; conflicting key flags, or key flags with `--provider fake`; a key tool not on `PATH`; a tool store without a terminal; setup aborted; the service on an unsupported platform. |
-| 3 | Himalaya missing or not v2.1.0 with IMAP; `account check` failed; the folders could not be listed; a key tool or key command failed; the config could not be written; `launchctl` or `systemctl` failed. |
+| 2 | Invalid input; a required flag missing without prompts; an invalid account name; conflicting key flags, or key flags with `--provider fake`; a key tool not on `PATH`; a tool store without a terminal; setup aborted; the service on an unsupported platform; the private Himalaya on a platform for which pimalaya has no build mailtriage can use. |
+| 3 | Himalaya missing or not a tested version with IMAP, and the private Himalaya declined or, without prompts, `--himalaya-install` not given; the private Himalaya could not be installed (except on a platform pimalaya has no build for, exit 2); `account check` failed; the folders could not be listed; a key tool or key command failed; the config could not be written; `launchctl` or `systemctl` failed. |
 | 5 | The config exists and `--update` was not given (without prompts); the account is bound to another mailbox (its identity, Himalaya account or IMAP server would change); a service file exists that mailtriage did not write; another command is editing the config (`config_busy`), or it changed since setup read it (`config_changed`). |
 
 Every error except the two abort messages (`setup aborted; nothing was changed`, `setup aborted: input ended`) starts with `step N (name): ` and names the flag or command that fixes it, for example `step 2 (Himalaya): --himalaya-account is required without prompts`. Step 10 errors (`step 10 (service): `) happen after the config is written; they name the `mailtriage service install` command, with `--config` and this run's `--interval-seconds` and `--limit`, to run once the cause is fixed. On a platform without launchd or systemd the fix is to drop `--service install` instead.
@@ -262,7 +365,7 @@ Write the configuration yourself when you want full control, for example on a se
 
 ### 1. Set up Himalaya
 
-mailtriage runs the `himalaya` executable for every mailbox operation. It accepts only Himalaya v2.1.0 with IMAP support: the first line of `himalaya --version` must start with `himalaya v2.1.0` and contain `+imap`. Install it from the [v2.1.0 release](https://github.com/pimalaya/himalaya/releases/tag/v2.1.0) or a package manager, then check:
+mailtriage runs the `himalaya` executable for every mailbox operation. It accepts only the [tested versions](#himalaya-versions) with IMAP support: the first line of `himalaya --version` must start with `himalaya v` and a tested version, such as `himalaya v2.2.1`, and contain `+imap`. Install one from [Himalaya's releases](https://github.com/pimalaya/himalaya/releases) or a package manager, then check:
 
 ```sh
 himalaya --version
@@ -283,7 +386,7 @@ imap.sasl.plain.password.cmd = "security find-generic-password -s imap.example.o
 - `imap.server`: `imaps://HOST:993` for TLS. A bare `HOST` also means `imaps://`. For STARTTLS on port 143, use `imap://HOST:143` with `imap.starttls = true`.
 - Credentials use Himalaya's own mechanism. `password.cmd` (also spelled `password.command`) runs a command that prints the password. The example reads it from the macOS keychain; store it there once with `security add-generic-password -s imap.example.org -a alice@example.org -w`, which prompts for the password. On Linux, a command such as `pass show mail/work` works the same way. `password.raw` stores the password in the file; avoid it. For OAuth servers, Himalaya offers `imap.sasl.oauthbearer` and `imap.sasl.xoauth2`; see [Himalaya's sample configuration](https://github.com/pimalaya/himalaya/blob/v2.1.0/config.sample.toml).
 - mailtriage starts Himalaya with no terminal input and passes on its own environment. The password command must not prompt, and the commands it calls must be found on that environment's `PATH`.
-- Do not add a `mailbox.alias` entry to this account that maps a watched folder or category folder name to a different mailbox. With filing on, mailtriage stops scanning such a folder and makes no filing writes until the alias is removed.
+- Do not add a `mailbox.alias` entry, globally or for this account, that maps a watched folder or category folder name to a different mailbox. mailtriage never reads mail from such a folder, whatever the filing mode; its mail waits until the alias is removed. With filing on, it also stops scanning the folder and makes no filing writes. See [Folder names Himalaya resolves](#folder-names-himalaya-resolves).
 
 Check the login and the folder names. These commands contact the server:
 
@@ -336,8 +439,10 @@ Run it in the same environment as the command you are checking. `doctor` exits 0
 | `provider.key_present` | `true` | The key command printed a key, or the variable named in `api_key_env` is set and not blank in this process. Always `true` for `fake`. |
 | `provider.key_error` | absent | Present only when the key is missing: one of the fixed messages in [Key command rules](#key-command-rules), or `OpenRouter API key environment variable is missing`, or `OpenRouter API key environment variable is empty`. |
 | `transport.configured` | `true` | The account has an `engine`. Without one, `transport.ready` is `true` as well. |
-| `transport.ready` | `true` | The Himalaya configuration file was read and `himalaya --version` reported v2.1.0 with `+imap`. Otherwise `transport.error` is set. |
-| `transport.version` | `himalaya v2.1.0 ...` | The first line of `himalaya --version`. |
+| `transport.ready` | `true` | The Himalaya configuration file was read and `himalaya --version` reported a [tested version](#himalaya-versions) with `+imap`. Otherwise `transport.error` is set. |
+| `transport.version` | `himalaya v2.2.1 ...` | The first line of `himalaya --version`. |
+| `transport.tested` | `true` | The version is one mailtriage is tested with. `false` makes the transport not ready, with `transport.error` `Himalaya X is not a tested version (tested: 2.1.0, 2.2.1)`. |
+| `transport.alias_conflicts` | `[]` | Source folders that Himalaya would resolve to another mailbox; mailtriage reads no mail from them. When the Himalaya configuration cannot be parsed, `transport.ready` is `false` and `transport.error` says why: no folder is read. |
 | `live_checks_performed` | `false` | Always `false`. |
 | `update.ready` | `true` | `update` is the block [`service status`](#service-commands) shows, plus `ready`: `false` only when `updates` is `auto` and the binary may not be replaced, and then `fix` says what to do. The top-level `ready` ignores it. |
 
@@ -526,11 +631,11 @@ Engine (`accounts.NAME.engine`):
 | `config` | Path to the Himalaya configuration file: absolute, or relative to `mailtriage.json`. `~` is not expanded. |
 | `account` | The account name in that file (`[accounts.work]` means `"work"`). |
 | `mailboxes` | The source folders to watch, usually `["INBOX"]`, spelled as `himalaya imap list --all` prints them. With filing on, each must be printable ASCII without `\`, `"` or `&` and must not start with `-`. |
-| `expected_version` | `"2.1.0"`. Other values are refused. |
+| `expected_version` | The Himalaya version setup found, such as `"2.2.1"`. It must not be empty, but it is not compared: any [tested version](#himalaya-versions) is accepted whatever it says. The field stays so that older mailtriage versions can read the config. |
 | `timeout_seconds` | Time limit for each Himalaya call, 1 to 600. |
 | `max_output_bytes` | Output limit for each Himalaya call, 1 to 268435456 (256 MiB). A message larger than this cannot be fetched and is recorded as a failed fetch. |
 
-`doctor` reports an engine whose `expected_version`, `timeout_seconds` or `max_output_bytes` is out of range as `transport.ready: false`. Configurations written before schema 2 have a `himalaya` block instead of `engine`. mailtriage still reads it and writes it back as `engine` the next time it saves the file. An account cannot have both.
+`doctor` reports an engine whose `timeout_seconds` or `max_output_bytes` is out of range as `transport.ready: false`. Configurations written before schema 2 have a `himalaya` block instead of `engine`. mailtriage still reads it and writes it back as `engine` the next time it saves the file. An account cannot have both.
 
 Provider (`provider`):
 
@@ -631,7 +736,7 @@ mailtriage service uninstall --account work
 /usr/local/bin/mailtriage watch --config /Users/alice/.config/mailtriage/mailtriage.json --account work --interval-seconds 60 --limit 100 --json
 ```
 
-`--interval-seconds` (1 to 86400, default 60) and `--limit` (1 to 500, default 100) are passed to `watch`. The executable is the one that ran `service install`. `mailtriage setup` runs the same install in its last step.
+`--interval-seconds` (1 to 86400, default 60) and `--limit` (1 to 500, default 100) are passed to `watch`. The executable is the one that ran `service install`; for a Homebrew install it is its `opt` path, `$(brew --prefix)/opt/mailtriage/bin/mailtriage`, which `brew upgrade` keeps pointing at the current version. `mailtriage setup` runs the same install in its last step.
 
 | | macOS (launchd) | Linux (systemd user unit) |
 | --- | --- | --- |
@@ -897,6 +1002,8 @@ The release information is shared by every `watch` of the same user: a `notify` 
 
 It never does this during a pass, and after Ctrl-C or SIGTERM it stops instead. It works in every `updates` mode and needs no `service install`; moving the binary to another path does need `service install`.
 
+A Homebrew install keeps each version in its own directory, and `brew upgrade` deletes the old one. `watch` therefore also follows `$(brew --prefix)/opt/mailtriage/bin/mailtriage`: when that leads to another file than the running one, it runs `--version` on it and re-executes the `opt` path, between passes, as above.
+
 When the new binary does not run, or the switch fails, `watch` prints one `{"schema_version":1,"update":{"event":"error","message":"…"}}` per file and kind of failure, keeps running the old code, and tries again after 1 minute, doubling up to 1 hour, or at once when the file changes again (for example after `chmod +x`). On Linux, a process whose binary file was replaced uses its absolute `argv[0]` to find the path; when that does not exist either, `watch` prints one error event and does not switch.
 
 Without `--json`, events are one line of text, for example `update: restarting onto 0.3.0 (was 0.2.0, pid 1234)`.
@@ -911,14 +1018,13 @@ Without `--json`, events are one line of text, for example `update: restarting o
 | `unsafe_permissions` | The binary or its directory is not owned by you, or is writable by group or others. | Install mailtriage into a directory only you own and can write, such as `~/.local/bin`, or set `updates` to `notify`. |
 | `not_writable` | You cannot create files in the binary's directory. | Make the directory writable for you, or set `updates` to `notify`. |
 
-A binary installed with `sudo install … /usr/local/bin/mailtriage` belongs to root, so it is `unsafe_permissions`: mailtriage reports new releases for it but does not replace it. For automatic updates, install it as your own user and put `~/.local/bin` on your `PATH` (see [Install](#install)):
+A binary installed with `sudo install … /usr/local/bin/mailtriage` belongs to root, so it is `unsafe_permissions`: mailtriage reports new releases for it but does not replace it. For automatic updates, install it as your own user into `~/.local/bin`, with [the install script](#the-install-script) or with the binary you have:
 
 ```sh
-install -d ~/.local/bin &&
-  install -m 0755 mailtriage ~/.local/bin/mailtriage
+/usr/local/bin/mailtriage self install --dir ~/.local/bin
 ```
 
-Run `mailtriage service install` again after you move the binary.
+[`self install`](#mailtriage-self-install) says when `~/.local/bin` is not on your `PATH` and when another `mailtriage`, such as the root-owned one, comes first there. Run `~/.local/bin/mailtriage service install --account NAME` again after you move the binary.
 
 ### Files
 
@@ -971,6 +1077,48 @@ There is no rollback command; a bad release is normally fixed by a newer one. To
 
 This works only when the newer release did not migrate the state database. An older binary refuses a newer database (`database schema is newer than this binary`); then roll forward to a fixed release instead.
 
+## Himalaya versions
+
+mailtriage runs Himalaya for every mailbox operation and accepts only the versions it is tested with: **2.1.0** and **2.2.1**. The list, with the SHA-256 of each version's release archives, is compiled into mailtriage from `src/engine/himalaya-versions.json`; a newer mailtriage release can add versions.
+
+- The first line of `himalaya --version` must name a tested version, such as `himalaya v2.2.1 …`, and contain `+imap`. Any other version, a newer patch release included, is refused until a mailtriage release tests it.
+- Setup writes the version it found into `engine.expected_version`, but mailtriage does not compare it: a config that says `2.1.0` works with Himalaya 2.2.1.
+- `doctor` reports `transport.tested`. An untested Himalaya makes the transport not ready, with `"error": "Himalaya 2.2.2 is not a tested version (tested: 2.1.0, 2.2.1)"`. `sync` and `watch` passes exit 3 with that message, and setup refuses it in step 2.
+
+### Folder names Himalaya resolves
+
+mailtriage gives `--mailbox` only to `message read`, which fetches a message's text, and Himalaya resolves that name before it opens a mailbox:
+
+1. through the merged alias map: the global `mailbox.alias` table, overridden key by key by the account's `accounts.NAME.mailbox.alias`. Keys compare case-insensitively, and `mailbox.aliases` is the same table;
+2. then, from 2.2 on, through the version's mailbox roles: 2.2.1 maps only `inbox` to `INBOX` for IMAP;
+3. else the name itself.
+
+A watched folder or category folder whose result is another mailbox (with `INBOX` compared case-insensitively) is an alias conflict. mailtriage never reads mail from it, in every filing mode; its mail stays queued without using a retry attempt. With filing on, the pass also reports `alias_conflict:FOLDER`, stops scanning the folder and makes no filing writes. Two alias keys that differ only in case and name different mailboxes count as a conflict too. When the Himalaya configuration cannot be parsed, mailtriage reads no folder at all, and `doctor` reports why in `transport.error`.
+
+### A private Himalaya
+
+```sh
+mailtriage himalaya install [--version X.Y.Z] [--json]
+```
+
+installs a tested Himalaya release for mailtriage alone; it never touches another `himalaya`.
+
+- It installs the newest tested version, or `--version`, which must be tested (else exit 2), into `DATA/mailtriage/himalaya/VERSION/himalaya`. `DATA` is `$XDG_DATA_HOME` when that is an absolute path, else `~/.local/share`, on macOS too.
+- It downloads that version's `himalaya.PLATFORM.tgz` from pimalaya's GitHub releases over HTTPS, with the same URL rules as `mailtriage update`, and checks it against the SHA-256 compiled into mailtriage. It unpacks only the `himalaya` executable into a new file, checks that it runs and prints that version with `+imap`, and moves it into place with a rename.
+- The directories are created with mode 0755. Before anything is written there, the version's directory and each of its parents must be safe: no symlink, owned by you or root, and not writable by group or others; a world-writable directory with the sticky bit, such as `/tmp`, is fine above one of yours. Otherwise it exits 3 with the reason `unsafe_permissions`, the directory and the fix, such as `chmod go-w DIR`.
+- Run again, it reports `current` and downloads nothing.
+- Point an account at it with `mailtriage setup --update --himalaya-binary PATH`, using the path it printed. Setup offers this itself when it finds no tested Himalaya (step 2).
+
+```json
+{"schema_version":1,"himalaya":{"action":"installed","version":"2.2.1","path":"/Users/alice/.local/share/mailtriage/himalaya/2.2.1/himalaya"}}
+```
+
+`action` is `installed` or `current`. Exit codes: 0; 2 for a version that is not tested, or a platform for which pimalaya has no build mailtriage can use; 3 for a network error, a checksum mismatch, a bad archive, a binary that does not run, an unsafe directory, or another `himalaya install` that held its directory's lock for 60 seconds.
+
+### Homebrew's Himalaya
+
+`brew upgrade` may move Homebrew's `himalaya` to a version mailtriage has not tested; mailtriage then refuses it until a mailtriage release tests that version. Either hold it with `brew pin himalaya` (and `brew unpin himalaya` once mailtriage tests the newer one), or give mailtriage its own copy with `mailtriage himalaya install` and `mailtriage setup --update --himalaya-binary PATH`. Setup says so when the Himalaya it uses is Homebrew's.
+
 ## Daily use
 
 The commands below omit `--config`; see [Where mailtriage finds the config](#where-mailtriage-finds-the-config). Pass it explicitly in scripts and supervised jobs.
@@ -984,7 +1132,7 @@ mailtriage watch --account work --limit 100 --interval-seconds 60 --json
 
 `sync` runs one bounded pass: it scans the watched folders, fetches new messages, classifies queued ones and, with filing on, files them. Its result reports `discovered`, `fetched`, `classified`, `cached`, `failed`, `pending` and `scan_errors`, plus `coverage`, with filing on `filing`, and, when the OpenRouter key is unavailable, `classification` (`{"skipped": true, "reason": "..."}`; see [The OpenRouter key](#the-openrouter-key)). `--limit` is 1 to 500 (default 100).
 
-`watch` repeats the pass every `--interval-seconds` (1 to 86400, default 60) until Ctrl-C or SIGTERM. With `--json` it prints one JSON line per pass and a final stop object with `passes`, `partial_passes` and `skipped_passes`. A partial pass does not stop `watch`. A pass that `mailtriage.json` or the Himalaya configuration changed under is skipped: `watch` prints its error object (code 5), counts it in `skipped_passes` and runs the next pass with the current configuration. Any other error, including a changed account binding or a second worker, ends `watch` with that error's exit code. After a graceful stop `watch` exits 0, or 4 if any pass was partial or skipped. Run it under a supervisor that restarts it, such as the [background service](#background-service).
+`watch` repeats the pass every `--interval-seconds` (1 to 86400, default 60) until Ctrl-C or SIGTERM. A pass that is running when the signal arrives takes no further message and skips its filing steps, so it ends after the message it is on; that pass carries `"stopped": true` and is partial, and the next pass resumes from stored state. The systemd unit allows 120 seconds to stop (`TimeoutStopSec=120`), for a Himalaya or provider call that runs to its timeout. With `--json` it prints one JSON line per pass and a final stop object with `passes`, `partial_passes` and `skipped_passes`. A partial pass does not stop `watch`. A pass that `mailtriage.json` or the Himalaya configuration changed under is skipped: `watch` prints its error object (code 5), counts it in `skipped_passes` and runs the next pass with the current configuration. Any other error, including a changed account binding or a second worker, ends `watch` with that error's exit code. After a graceful stop `watch` exits 0, or 4 if any pass was partial or skipped. Run it under a supervisor that restarts it, such as the [background service](#background-service).
 
 Only one worker runs per account at a time. `sync`, `classify`, `reclassify` and each `watch` pass take a lock in `state_dir`; a second one exits 5 with `an account worker is already running`. Run either `watch` or scheduled `sync` for an account, never both.
 
@@ -1251,11 +1399,12 @@ Before you use `live` on a real mailbox, the live provider check in the [filing 
 mailtriage-tray [--config PATH] [--mailtriage PATH]
 mailtriage-tray categories [--account NAME] [--config PATH] [--mailtriage PATH]
 mailtriage-tray autostart enable|disable|status [--config PATH] [--mailtriage PATH] [--json]
+mailtriage-tray quit [--json]
 ```
 
 ### What the tray runs
 
-The tray uses the `mailtriage` next to its own executable, else the first on your `PATH`; `--mailtriage PATH` overrides both. It uses the config that `mailtriage service status` finds (see [Where mailtriage finds the config](#where-mailtriage-finds-the-config)); `--config PATH` overrides it. Both are resolved once at start and made absolute. A later change of `PATH`, the working directory or a symlink therefore never redirects a running tray; restart it to follow one.
+The tray uses the `mailtriage` next to its own executable, else the first on your `PATH`; `--mailtriage PATH` overrides both. For a Homebrew install it uses the `opt` path, `$(brew --prefix)/opt/mailtriage/bin/mailtriage`, which outlives `brew upgrade`. It uses the config that `mailtriage service status` finds (see [Where mailtriage finds the config](#where-mailtriage-finds-the-config)); `--config PATH` overrides it. Both are resolved once at start and made absolute. A later change of `PATH`, the working directory or a symlink therefore never redirects a running tray; restart it to follow one.
 
 Every command ends with `--config CONFIG`, the absolute path of the tray's config:
 
@@ -1280,7 +1429,9 @@ Every command ends with `--config CONFIG`, the absolute path of the tray's confi
 
 ### Install the tray
 
-Each release also carries `mailtriage-tray-vVERSION-macos-arm64.tar.gz`, `-linux-amd64.tar.gz` and `-linux-arm64.tar.gz`, each with a `.sha256` file and listed in `SHA256SUMS`. The archive holds `mailtriage-tray` and the license. Use the same release as `mailtriage`, verify the archive like the CLI's, and install the tray in the same directory as `mailtriage` (`~/.local/bin` in [Install](#install)). On Linux, set `PLATFORM` to `linux-amd64` or `linux-arm64` and use `sha256sum --check` in place of `shasum -a 256 --check`:
+The [install script](#the-install-script) installs the tray next to `mailtriage`: by default on macOS, and on Linux with `--tray` or when `DISPLAY` or `WAYLAND_DISPLAY` is set.
+
+Each release also carries `mailtriage-tray-vVERSION-macos-arm64.tar.gz`, `-linux-amd64.tar.gz` and `-linux-arm64.tar.gz`, each with a `.sha256` file and listed in `SHA256SUMS`. The archive holds `mailtriage-tray` and the license. Use the same release as `mailtriage`, verify the archive's checksum, and install the tray in the same directory as `mailtriage` (`~/.local/bin` in [Install](#install)). On Linux, set `PLATFORM` to `linux-amd64` or `linux-arm64` and use `sha256sum --check` in place of `shasum -a 256 --check`:
 
 ```sh
 VERSION=0.1.0 PLATFORM=macos-arm64
@@ -1311,7 +1462,8 @@ mailtriage-tray
 The icon appears in the menu bar (macOS, without a Dock icon) or the system tray (Linux), and stays until you choose Quit.
 
 - One tray runs per user. A second start prints `mailtriage-tray is already running` and exits 0.
-- When `mailtriage-tray` is replaced on disk by a version that runs, the running tray restarts itself onto it within about 15 s, with the same config and `mailtriage`. An open categories window keeps running.
+- `mailtriage-tray quit` quits the running tray of this installation, as its menu's Quit does, and prints `quit`, `not_running` (no tray runs) or `other_installation` (the running tray belongs to a `mailtriage-tray` elsewhere, which keeps running); with `--json`, `{"schema_version":1,"quit":"quit"}`. It talks to the tray over `tray.sock` next to `tray.lock` in the cache directory and signals no process. It exits 3 with `the tray does not respond; quit it from its menu` when a tray holds its lock but does not answer within 5 seconds. Open categories windows keep running.
+- When `mailtriage-tray` is replaced on disk by a version that runs, the running tray restarts itself onto it within about 15 s, with the same config and `mailtriage`. An open categories window keeps running. After `brew upgrade`, a Homebrew tray restarts onto its `opt` path.
 
 ### Start at login
 
@@ -1324,7 +1476,7 @@ mailtriage-tray autostart disable
 ```
 
 - `enable` writes a login item: `~/Library/LaunchAgents/digital.wirdrei.mailtriage-tray.plist` on macOS, `$XDG_CONFIG_HOME/autostart/mailtriage-tray.desktop` on Linux (`~/.config/autostart/mailtriage-tray.desktop` when `XDG_CONFIG_HOME` is unset or not absolute).
-- The login item records the tray's absolute path with `--config` and `--mailtriage`, both absolute and resolved as above. Without `--config`, `enable` runs `mailtriage service status --json` once to learn the config. On macOS it also records your current `PATH`, as `service install` does. Run `enable` again after you move `mailtriage`, the tray or the config.
+- The login item records the tray's absolute path with `--config` and `--mailtriage`, both absolute and resolved as above. Without `--config`, `enable` runs `mailtriage service status --json` once to learn the config. On macOS it also records your current `PATH`, as `service install` does. Run `enable` again after you move `mailtriage`, the tray or the config. For a Homebrew install it records the `opt` paths of both, which survive `brew upgrade`.
 - macOS: the tray starts at login and restarts after a crash, but Quit stays quit until the next login (`RunAtLoad`, `KeepAlive` with `SuccessfulExit` false). `enable` also runs `launchctl enable gui/<uid>/digital.wirdrei.mailtriage-tray`. It does not start a second tray.
 - `disable` deletes the file and leaves the running tray alone.
 - `status` reports `enabled: true` when the file exists and, on macOS, launchd has not disabled the label.
@@ -1444,7 +1596,7 @@ The summary line, and the categories window, show these:
 
 With `--json`, every result is one line of JSON on stdout, and so is every error: `{"schema_version":1,"error":{"code":N,"message":"..."}}`. Without `--json`, results are pretty-printed JSON and errors go to stderr as `mailtriage: MESSAGE`. Every result has a `schema_version`. Error messages omit message bodies and credentials.
 
-Some errors also carry a machine-readable `reason` in the error object, for scripts that react to a class of error rather than to its message: `config_changed` (`mailtriage.json` or the Himalaya configuration changed during the command), `config_busy` (another command is editing `mailtriage.json`), `account_busy` (another worker for the account is running), `binding_conflict` (the account binding changed, see [Account binding](#account-binding)), `categories_changed` (`categories apply --expect-digest` found other categories), `service_config_mismatch` (the account's service runs another config, see [Service commands](#service-commands)), `service_config_unknown` (the config of the account's service cannot be told) and `service_busy` (another service command for the account held the service lock for 30 s). An error without a reason has no `reason` key.
+Some errors also carry a machine-readable `reason` in the error object, for scripts that react to a class of error rather than to its message: `config_changed` (`mailtriage.json` or the Himalaya configuration changed during the command), `config_busy` (another command is editing `mailtriage.json`), `account_busy` (another worker for the account is running), `binding_conflict` (the account binding changed, see [Account binding](#account-binding)), `categories_changed` (`categories apply --expect-digest` found other categories), `service_config_mismatch` (the account's service runs another config, see [Service commands](#service-commands)), `service_config_unknown` (the config of the account's service cannot be told), `service_busy` (another service command for the account held the service lock for 30 s), `unsafe_permissions` (a directory mailtriage would install a program into is not safe; see [A private Himalaya](#a-private-himalaya)) and `setup_aborted` (you chose "Abort" in setup's menu; nothing was changed). An error without a reason has no `reason` key.
 
 | Code | Meaning |
 | --- | --- |
@@ -1454,7 +1606,7 @@ Some errors also carry a machine-readable `reason` in the error object, for scri
 | 4 | Partial result: a pass, `classify` or `reclassify` with failed messages or scan errors, or whose classification was skipped because the key is unavailable; a pass with filing errors; `watch` at stop after a partial or skipped pass. |
 | 5 | Conflict: the configuration changed during the command, another worker is running, the account binding changed, a cursor expired, a placement changed concurrently, or the categories changed since their export (`categories_changed`). |
 
-`setup` and `service` have their own cases; see [Setup exit codes](#setup-exit-codes) and [Background service](#background-service).
+`setup`, `service`, `himalaya install`, `self install` and `self uninstall` have their own cases; see [Setup exit codes](#setup-exit-codes), [Background service](#background-service), [A private Himalaya](#a-private-himalaya), [`mailtriage self install`](#mailtriage-self-install) and [Uninstall](#uninstall).
 
 ### Account binding
 

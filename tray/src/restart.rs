@@ -1,6 +1,8 @@
 //! The update spec's restart rule for the tray process: when the tray's
 //! file is replaced by one that runs, re-execute it with the paths resolved
-//! at start, never the original arguments.
+//! at start, never the original arguments. A tray in a Homebrew keg also
+//! follows its `opt` path, which `brew upgrade` retargets to a new keg, and
+//! always re-executes that path.
 use crate::{instances::Windows, paths::Resolved};
 use std::{
     io,
@@ -88,6 +90,8 @@ pub fn installation() -> Option<(PathBuf, Identity)> {
 pub struct Restarter {
     path: PathBuf,
     image: Identity,
+    /// For a Homebrew keg, its `opt` path.
+    launch: Option<PathBuf>,
     /// Restart at the first check (macOS: the file printed another version
     /// at start).
     at_once: bool,
@@ -98,9 +102,11 @@ pub struct Restarter {
 
 impl Restarter {
     pub fn new(path: PathBuf, image: Identity) -> Self {
+        let launch = crate::brew::opt_path(&path).filter(|opt| opt.exists());
         Self {
             path,
             image,
+            launch,
             at_once: false,
             failures: 0,
             retry_at: None,
@@ -124,21 +130,38 @@ impl Restarter {
         &self.path
     }
 
-    /// The path to re-execute when the file changed and the new one runs;
-    /// after a failure it waits 1 minute, doubling up to 1 hour, unless the
-    /// file changes again.
+    /// The path the tray starts windows from and re-executes: the `opt`
+    /// path of a keg, else its own path.
+    pub fn launch_path(&self) -> PathBuf {
+        self.launch.clone().unwrap_or_else(|| self.path.clone())
+    }
+
+    /// The file to watch, and whether a keg's `opt` path now leads to
+    /// another file than the running one.
+    fn watched(&self) -> (PathBuf, bool) {
+        match &self.launch {
+            Some(opt) if std::fs::canonicalize(opt).ok().as_deref() != Some(&*self.path) => {
+                (opt.clone(), true)
+            }
+            _ => (self.path.clone(), false),
+        }
+    }
+
+    /// The path to re-execute when the file changed (or a keg's `opt` was
+    /// retargeted) and the new one runs; after a failure it waits 1 minute,
+    /// doubling up to 1 hour, unless the file changes again.
     pub fn check(&mut self, now: Instant) -> Option<PathBuf> {
-        let current = identity(&self.path).ok();
-        if current == Some(self.image) && !self.at_once {
+        let (file, retargeted) = self.watched();
+        let current = identity(&file).ok();
+        if current == Some(self.image) && !self.at_once && !retargeted {
             return None;
         }
         if self.retry_at.is_some_and(|at| now < at) && current == self.failed {
             return None;
         }
-        let ready =
-            current.is_some() && probe(&self.path).is_ok() && identity(&self.path).ok() == current;
+        let ready = current.is_some() && probe(&file).is_ok() && identity(&file).ok() == current;
         if ready {
-            return Some(self.path.clone());
+            return Some(self.launch_path());
         }
         self.fail(now, current);
         None
@@ -147,7 +170,7 @@ impl Restarter {
     /// The `exec` of the path `check` returned failed: the old code keeps
     /// running, and the file waits as after a failed probe.
     pub fn exec_failed(&mut self, now: Instant) {
-        let current = identity(&self.path).ok();
+        let current = identity(&self.watched().0).ok();
         self.fail(now, current);
     }
 

@@ -12,6 +12,10 @@ use std::{fmt, io::Read, time::Duration};
 
 /// The API base URL.
 pub const API_BASE: &str = "https://api.github.com";
+/// Where release assets are downloaded from.
+pub const DOWNLOAD_BASE: &str = "https://github.com";
+/// The repository Himalaya releases come from.
+pub const HIMALAYA_REPO: &str = "pimalaya/himalaya";
 /// The hidden variable that replaces `API_BASE` in tests; honoured only for
 /// a loopback host.
 pub const URL_OVERRIDE: &str = "MAILTRIAGE_UPDATE_URL";
@@ -65,6 +69,22 @@ impl Endpoint {
         let base = self.api_base.path().trim_end_matches('/').to_owned();
         url.set_path(&format!("{base}/repos/{}/releases", super::REPO));
         url.set_query(Some("per_page=30"));
+        url
+    }
+
+    /// A Himalaya release asset:
+    /// `https://github.com/pimalaya/himalaya/releases/download/v<version>/<asset>`,
+    /// below the loopback base instead when the override is set.
+    pub fn himalaya_asset_url(&self, version: &str, asset: &str) -> Url {
+        let mut url = self
+            .loopback
+            .clone()
+            .unwrap_or_else(|| Url::parse(DOWNLOAD_BASE).expect("DOWNLOAD_BASE is a URL"));
+        let base = url.path().trim_end_matches('/').to_owned();
+        url.set_path(&format!(
+            "{base}/{HIMALAYA_REPO}/releases/download/v{version}/{asset}"
+        ));
+        url.set_query(None);
         url
     }
 
@@ -425,6 +445,23 @@ mod tests {
             Endpoint::github().releases_url().as_str(),
             "https://api.github.com/repos/wir-drei-digital/mailtriage/releases?per_page=30"
         );
+    }
+
+    #[test]
+    fn himalaya_assets_come_from_pimalayas_releases() {
+        assert_eq!(
+            Endpoint::github()
+                .himalaya_asset_url("2.2.1", "himalaya.x86_64-linux.tgz")
+                .as_str(),
+            "https://github.com/pimalaya/himalaya/releases/download/v2.2.1/himalaya.x86_64-linux.tgz"
+        );
+        let local = Endpoint::with_override(Some("http://127.0.0.1:9/base"));
+        let url = local.himalaya_asset_url("2.1.0", "himalaya.aarch64-darwin.tgz");
+        assert_eq!(
+            url.as_str(),
+            "http://127.0.0.1:9/base/pimalaya/himalaya/releases/download/v2.1.0/himalaya.aarch64-darwin.tgz"
+        );
+        assert!(local.allows(&url));
     }
 
     #[test]

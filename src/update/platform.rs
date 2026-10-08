@@ -193,23 +193,7 @@ fn writable(dir: &Path) -> bool {
 /// not start`, `killed by signal N`, `timed out`, `exited with N`, or
 /// `printed "…"`, each with the first line of stderr when there is one.
 pub fn probe(program: &Path, component: Component) -> Result<Version, String> {
-    let mut attempt = 0;
-    let out = loop {
-        match process::run_captured(
-            program,
-            &["--version"],
-            PROBE_TIMEOUT,
-            PROBE_MAX_STDOUT,
-            PROBE_MAX_STDERR,
-        ) {
-            Ok(out) => break out,
-            Err(e) if e.raw_os_error() == Some(TEXT_FILE_BUSY) && attempt < BUSY_RETRIES => {
-                attempt += 1;
-                std::thread::sleep(BUSY_PAUSE);
-            }
-            Err(_) => return Err("could not start".to_owned()),
-        }
-    };
+    let out = run_version(program).map_err(|_| "could not start".to_owned())?;
     let cause = match out.ending {
         Ending::TimedOut => "timed out".to_owned(),
         Ending::Overflowed => "printed too much".to_owned(),
@@ -234,6 +218,28 @@ pub fn probe(program: &Path, component: Component) -> Result<Version, String> {
     match stderr.lines().map(str::trim).find(|l| !l.is_empty()) {
         Some(line) => Err(format!("{cause}; stderr: {}", shorten(line, 200))),
         None => Err(cause),
+    }
+}
+
+/// `program --version` with a 10 s limit and at most 4 KB of stdout and of
+/// stderr; a start that meets `ETXTBSY` is retried briefly. `Err` only when
+/// the program cannot be started.
+pub fn run_version(program: &Path) -> std::io::Result<process::Captured> {
+    let mut attempt = 0;
+    loop {
+        match process::run_captured(
+            program,
+            &["--version"],
+            PROBE_TIMEOUT,
+            PROBE_MAX_STDOUT,
+            PROBE_MAX_STDERR,
+        ) {
+            Err(e) if e.raw_os_error() == Some(TEXT_FILE_BUSY) && attempt < BUSY_RETRIES => {
+                attempt += 1;
+                std::thread::sleep(BUSY_PAUSE);
+            }
+            result => return result,
+        }
     }
 }
 

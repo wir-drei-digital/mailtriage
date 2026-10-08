@@ -1,8 +1,12 @@
-//! Narrow Himalaya v2.1.0 IMAP adapter. Its only writes are folder create and
+//! Narrow Himalaya IMAP adapter for the tested versions in
+//! `himalaya-versions.json`. Its only writes are folder create and
 //! subscribe, UID MOVE, adding \Flagged, and adding \Seen to approved
 //! answered mail, the last three through `imap raw`.
 use super::{
-    raw, ConfigChanged, EngineCapabilities, FolderInfo, MailEngine, WriteOutcome, SPECIAL_USE_ROLES,
+    raw,
+    targets::Resolver,
+    versions::{self, Tested},
+    ConfigChanged, EngineCapabilities, FolderInfo, MailEngine, WriteOutcome, SPECIAL_USE_ROLES,
 };
 use crate::domain::{Address, HimalayaConfig, MailboxSnapshot, SourceEnvelope};
 use crate::process::{read_bounded, terminate};
@@ -29,6 +33,8 @@ pub struct Himalaya {
     /// SHA-256 of the TOML read at open; every spawn re-checks it.
     config_hash: String,
     caps: OnceCell<EngineCapabilities>,
+    /// The tested version `--version` reported, once read.
+    tested: OnceCell<&'static Tested>,
     /// Folders beyond `config.mailboxes` that this pass may touch.
     scope: RefCell<BTreeSet<String>>,
 }
@@ -65,9 +71,6 @@ impl Himalaya {
         if config.account.trim().is_empty() || config.mailboxes.is_empty() {
             bail!("Himalaya account and mailboxes must be configured");
         }
-        if config.expected_version != "2.1.0" {
-            bail!("Himalaya compatibility target must be 2.1.0");
-        }
         if config.timeout_seconds == 0 || config.timeout_seconds > 600 {
             bail!("Himalaya timeout must be between 1 and 600 seconds");
         }
@@ -83,15 +86,30 @@ impl Himalaya {
             config: config.clone(),
             config_hash: sha256_hex(&toml),
             caps: OnceCell::new(),
+            tested: OnceCell::new(),
             scope: RefCell::new(BTreeSet::new()),
         })
     }
 
+    /// The first line of `--version`, when it names a tested version with
+    /// `+imap`; otherwise a `versions::Untested` error. `expected_version`
+    /// is not compared: any tested version is accepted.
     pub fn version(&self) -> Result<String> {
-        check_version_output(
-            &self.run(&["--version"], false)?,
-            &self.config.expected_version,
-        )
+        let (line, tested) = versions::check_version_output(&self.run(&["--version"], false)?)?;
+        let _ = self.tested.set(tested);
+        Ok(line)
+    }
+
+    /// The tested version this binary reports, read once.
+    pub fn tested(&self) -> Result<&'static Tested> {
+        if let Some(tested) = self.tested.get() {
+            return Ok(tested);
+        }
+        self.version()?;
+        self.tested
+            .get()
+            .copied()
+            .ok_or_else(|| anyhow!("Himalaya version unknown"))
     }
 
     pub fn snapshot(&self, mailbox: &str) -> Result<MailboxSnapshot> {
@@ -162,6 +180,7 @@ impl Himalaya {
         if uid >= before.uid_next {
             bail!("UID is outside mailbox snapshot");
         }
+        self.check_read(mailbox)?;
         let uid_text = uid.to_string();
         // No --json: raw mode writes the exact RFC 5322 bytes. No --seen.
         let raw = self.run(
@@ -176,6 +195,34 @@ impl Himalaya {
             bail!("Himalaya returned an empty raw message");
         }
         Ok(raw)
+    }
+
+    /// `message read --mailbox` resolves aliases and roles: refuses a folder
+    /// whose effective target is another mailbox, and reads nothing when
+    /// the TOML cannot be read or parsed. Every `message read` passes here,
+    /// whatever the filing mode.
+    fn check_read(&self, mailbox: &str) -> Result<()> {
+        if self.resolver()?.conflicts(&[mailbox.to_owned()]).is_empty() {
+            return Ok(());
+        }
+        Err(err(
+            3,
+            format!("alias_conflict:{mailbox}: Himalaya resolves this folder to another mailbox (an alias or role); mailtriage does not read it"),
+        ))
+    }
+
+    /// The account's resolver: the TOML read at open (unchanged since) and
+    /// the reported version's roles.
+    fn resolver(&self) -> Result<Resolver> {
+        let toml = String::from_utf8(self.current_config()?).map_err(|_| {
+            err(
+                2,
+                "cannot read the Himalaya configuration: it is not valid TOML",
+            )
+        })?;
+        let roles = &self.tested()?.roles;
+        Resolver::from_toml(&toml, &self.config.account, roles)
+            .map_err(|why| err(2, format!("cannot read the Himalaya configuration: {why}")))
     }
 
     /// Passes for a configured source mailbox or a folder in the watch scope.
@@ -561,46 +608,12 @@ impl MailEngine for Himalaya {
         *self.scope.borrow_mut() = folders.iter().cloned().collect();
     }
 
+    /// The folders whose effective target (merged aliases, then the
+    /// version's roles, then the name) is another mailbox. `Err` when the
+    /// TOML cannot be read or parsed.
     fn alias_conflicts(&self, folders: &[String]) -> Result<Vec<String>> {
-        let toml = String::from_utf8(self.current_config()?)
-            .map_err(|_| err(2, "invalid Himalaya TOML configuration"))?;
-        let parsed: toml::Value =
-            toml::from_str(&toml).map_err(|_| err(2, "invalid Himalaya TOML configuration"))?;
-        let Some(aliases) = parsed
-            .get("accounts")
-            .and_then(|v| v.get(&self.config.account))
-            .and_then(|v| v.get("mailbox"))
-            .and_then(|v| v.get("alias"))
-        else {
-            return Ok(Vec::new());
-        };
-        let aliases = aliases
-            .as_table()
-            .ok_or_else(|| err(2, "invalid Himalaya mailbox alias table"))?
-            .iter()
-            .map(|(key, native)| {
-                native
-                    .as_str()
-                    .map(|native| (key.as_str(), native))
-                    .ok_or_else(|| err(2, "invalid Himalaya mailbox alias table"))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        Ok(folders
-            .iter()
-            .filter(|folder| {
-                aliases.iter().any(|(key, native)| {
-                    key.eq_ignore_ascii_case(folder) && !same_mailbox(native, folder)
-                })
-            })
-            .cloned()
-            .collect())
+        Ok(self.resolver()?.conflicts(folders))
     }
-}
-
-/// Whether two native names select the same mailbox: equal, or both INBOX,
-/// whose name IMAP treats case-insensitively (RFC 3501 5.1).
-fn same_mailbox(a: &str, b: &str) -> bool {
-    a == b || (a.eq_ignore_ascii_case("INBOX") && b.eq_ignore_ascii_case("INBOX"))
 }
 
 /// Maps one SELECT-plus-command session. `Err` means the SELECT result was not
@@ -635,21 +648,6 @@ pub(crate) fn check_write_uids(uids: &[u64]) -> Result<()> {
         bail!("UID must be positive");
     }
     Ok(())
-}
-
-/// The version line of `himalaya --version` when it is `expected` with IMAP.
-pub fn check_version_output(output: &[u8], expected: &str) -> Result<String> {
-    let text = std::str::from_utf8(output).context("invalid Himalaya version output")?;
-    let version = text.lines().next().unwrap_or_default().trim();
-    let mut words = version.split_ascii_whitespace();
-    let wanted = format!("v{expected}");
-    if words.next() != Some("himalaya")
-        || words.next() != Some(wanted.as_str())
-        || !words.any(|feature| feature == "+imap")
-    {
-        bail!("unsupported Himalaya version; expected {expected}");
-    }
-    Ok(version.to_owned())
 }
 
 /// Parses `imap list` JSON: an array of rows or an object with `mailboxes`.

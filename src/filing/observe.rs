@@ -66,6 +66,11 @@ pub struct FolderMap {
     /// Folders a client-side alias resolves elsewhere: neither discovered nor
     /// fetched from while the conflict lasts.
     pub alias_conflicts: BTreeSet<String>,
+    /// `alias_conflicts` was established in this pass.
+    pub alias_checked: bool,
+    /// The mail engine's configuration cannot be read or parsed: no folder
+    /// is read (fetched) in this pass.
+    pub reads_blocked: bool,
 }
 
 impl FolderMap {
@@ -151,6 +156,7 @@ pub fn resolve_folders(
         map.writes_allowed = false;
     }
     map.alias_conflicts = conflicts.clone();
+    map.alias_checked = true;
     let folders = ctx.engine.list_folders()?;
     map.listed = folders.iter().map(|f| f.name.clone()).collect();
     map.caps = Some(caps);
