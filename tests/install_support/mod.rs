@@ -1,7 +1,49 @@
 #![allow(dead_code)]
-//! Shared by the install tests: fake Himalaya and tray programs. Nothing
-//! here touches the real HOME.
-use std::{fs, os::unix::fs::PermissionsExt, path::Path};
+//! Shared by the install tests: fake Himalaya and tray programs, and
+//! starting a copied binary. Nothing here touches the real HOME.
+use std::{
+    fs,
+    os::unix::fs::PermissionsExt,
+    path::Path,
+    process::{Child, Command, Output},
+    thread,
+    time::Duration,
+};
+
+/// `ETXTBSY` (26 on Linux and macOS): another test thread forked while this
+/// test's copy of a program was open for writing, and that child holds the
+/// handle until it execs. Starting the program is retried briefly, as
+/// `src/update/platform.rs` does.
+const TEXT_FILE_BUSY: i32 = 26;
+const BUSY_RETRIES: u32 = 20;
+const BUSY_PAUSE: Duration = Duration::from_millis(50);
+
+/// `command.spawn()`, retried while the program is busy.
+pub fn spawn(command: &mut Command) -> Child {
+    for _ in 0..BUSY_RETRIES {
+        match command.spawn() {
+            Err(e) if e.raw_os_error() == Some(TEXT_FILE_BUSY) => thread::sleep(BUSY_PAUSE),
+            result => return result.unwrap(),
+        }
+    }
+    command.spawn().unwrap()
+}
+
+/// `command.output()`, retried while the program is busy, or while the
+/// program a shell `exec`s is (exit 126, "Text file busy"): it never ran.
+pub fn output(command: &mut Command) -> Output {
+    for _ in 0..BUSY_RETRIES {
+        match command.output() {
+            Err(e) if e.raw_os_error() == Some(TEXT_FILE_BUSY) => {}
+            Ok(out)
+                if out.status.code() == Some(126)
+                    && String::from_utf8_lossy(&out.stderr).contains("Text file busy") => {}
+            result => return result.unwrap(),
+        }
+        thread::sleep(BUSY_PAUSE);
+    }
+    command.output().unwrap()
+}
 
 /// A fake Himalaya whose `--version` prints `@VERSION@` (`flip`: 2.1.0 the
 /// first time, 2.2.2 afterwards). `flip` is for tests that run under their
