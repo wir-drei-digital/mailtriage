@@ -4,11 +4,17 @@ Hermes, or any other agent, calls `mailtriage` as an ordinary process. It needs 
 
 ## Host setup
 
-1. Install a release binary on the same host as the state directory (see [Install](guide.md#install)). The examples use `/opt/mailtriage/mailtriage`.
+1. Install mailtriage on the same host as the state directory, as the user that will run it, without prompts:
+
+   ```sh
+   curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/wir-drei-digital/mailtriage/main/install.sh | sh -s -- --yes --no-tray --no-setup --dir /opt/mailtriage
+   ```
+
+   `/opt/mailtriage` must exist and belong to the user that runs mailtriage; create it once as root, for example with `install -d -o USER /opt/mailtriage`. Without `--dir` the script installs into `~/.local/bin`. It prints the [`self install`](guide.md#mailtriage-self-install) result; exit 0 means done, 1 a failed download or check, 2 invalid options, an unsupported platform or a refused downgrade. The examples use `/opt/mailtriage/mailtriage`.
 2. Run setup without prompts, as the user that will run mailtriage:
 
    ```sh
-   /opt/mailtriage/mailtriage setup --yes --himalaya-account work --key-store pass --key-stored --json
+   /opt/mailtriage/mailtriage setup --yes --himalaya-install --himalaya-account work --key-store pass --key-stored --json
    ```
 
    This example assumes a person has stored the key with `pass insert mailtriage/openrouter` as that user.

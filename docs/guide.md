@@ -42,25 +42,62 @@ mailtriage list --account work --view attention --json
 You need:
 
 - macOS arm64, Linux amd64 or Linux arm64,
-- Himalaya with IMAP support, in a [tested version](#himalaya-versions) (2.1.0 or 2.2.1),
 - an IMAP account whose server supports UID and UIDVALIDITY (the MOVE extension too, if you want filing),
 - an OpenRouter API key,
 - for the background service: launchd (macOS) or systemd (Linux).
 
-From a GitHub release: each release carries `mailtriage-vVERSION-linux-amd64.tar.gz`, `-linux-arm64.tar.gz` and `-macos-arm64.tar.gz`, a `.sha256` file per archive and a combined `SHA256SUMS`. Each archive holds the `mailtriage` executable, the README and the license. For example, with the GitHub CLI; on Linux, set `PLATFORM` to `linux-amd64` or `linux-arm64` and use `sha256sum --check` in place of `shasum -a 256 --check`:
+mailtriage reads mail through Himalaya, in a [tested version](#himalaya-versions) with IMAP support; setup installs one for mailtriage when none is found.
+
+There are three ways to install, and each stays current differently:
+
+| Way | Installs into | Updated by |
+| --- | --- | --- |
+| [The install script](#the-install-script) | `~/.local/bin` | mailtriage itself ([Updates](#updates)) |
+| Homebrew | Homebrew's prefix | `brew upgrade mailtriage` |
+| [From source](#from-source) with Cargo | where you put it | you |
+
+The macOS executables are unsigned and not notarized. See the [release guide](releases.md) for how releases are made. A root-owned or otherwise unsafe install, for example one made with `sudo` into `/usr/local/bin`, is not replaced: mailtriage only reports new releases for it (see [Binaries mailtriage does not replace](#binaries-mailtriage-does-not-replace)).
+
+### The install script
 
 ```sh
-VERSION=0.1.0 PLATFORM=macos-arm64
-gh release download "v$VERSION" --repo wir-drei-digital/mailtriage --pattern "mailtriage-v$VERSION-$PLATFORM.tar.gz*" &&
-  shasum -a 256 --check "mailtriage-v$VERSION-$PLATFORM.tar.gz.sha256" &&
-  tar -xzf "mailtriage-v$VERSION-$PLATFORM.tar.gz" &&
-  install -d ~/.local/bin &&
-  install -m 0755 mailtriage ~/.local/bin/mailtriage
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/wir-drei-digital/mailtriage/main/install.sh | sh
 ```
 
-The macOS executable is unsigned and not notarized. See the [release guide](releases.md) for how releases are made. A root-owned or otherwise unsafe install, for example one made with `sudo` into `/usr/local/bin`, is not replaced: mailtriage only reports new releases for it (see [Binaries mailtriage does not replace](#binaries-mailtriage-does-not-replace)).
+The script downloads the newest release's archive and `SHA256SUMS` over HTTPS from GitHub, checks the archive's checksum and that it holds exactly `mailtriage`, `LICENSE` and `README.md`, and hands over to the downloaded binary's [`mailtriage self install`](#mailtriage-self-install), which installs it into `~/.local/bin` and offers setup. It needs `curl`, `tar`, `mktemp`, `uname`, and `sha256sum` or `shasum`. It never uses `sudo`, never edits your shell's startup files, and never touches a `himalaya`. Each release also carries `install.sh` with that release as its default version.
 
-From source, with a stable Rust toolchain:
+Options follow `sh -s --`, for example:
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/wir-drei-digital/mailtriage/main/install.sh | sh -s -- --version 0.3.0 --no-tray
+```
+
+| Option | Environment | Meaning |
+| --- | --- | --- |
+| `--version X.Y.Z` | `MAILTRIAGE_VERSION` | Install this release instead of the newest. Never a downgrade. |
+| `--dir DIR` | `MAILTRIAGE_INSTALL_DIR` | The install directory, default `~/.local/bin`. |
+| `--tray` / `--no-tray` | `MAILTRIAGE_TRAY=1` / `0` | Install the tray app, or not. Default: yes on macOS; on Linux only when `DISPLAY` or `WAYLAND_DISPLAY` is set. |
+| `--no-setup` | `MAILTRIAGE_NO_SETUP=1` | Do not offer setup or the login item. |
+| `--yes` | `MAILTRIAGE_YES=1` | Never ask. |
+| `--uninstall` | | Uninstall the installation in `DIR`; see [Uninstall](#uninstall). |
+
+It asks only when it can open your terminal:
+
+| Question | Terminal | `--yes` | No terminal |
+| --- | --- | --- | --- |
+| Downgrade below the installed version | refused (exit 2) | refused (exit 2) | refused (exit 2) |
+| Run setup now | asks, default yes | no; prints the command | no; prints the command |
+| Install a private Himalaya (inside setup) | asks, default yes | not reached | not reached |
+| Start the tray at login (after setup succeeded) | asks, default yes | no; prints the command | no; prints the command |
+| Uninstall | asks, default no | yes | refused (exit 2; use `--yes`) |
+
+The end of input at a question counts as its default. Exit codes: 0 done; 1 a failed step, which the message names: a missing tool, a network error, a checksum mismatch, an unexpected archive or latest-release URL; 2 invalid options, an unsupported platform, or a refused downgrade; any other code is `mailtriage self install`'s. A download that breaks off runs nothing: the whole script is one `{ … }` group, which `sh` reads completely before running it.
+
+The script never downgrades. To go back to an older release, follow [Rolling back by hand](#rolling-back-by-hand).
+
+### From source
+
+With a stable Rust toolchain:
 
 ```sh
 cargo build --release --locked &&
@@ -99,10 +136,11 @@ Exit codes: 0; 2 for invalid flags or a refused downgrade; 3 for an unsafe direc
 ### Uninstall
 
 ```sh
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/wir-drei-digital/mailtriage/main/install.sh | sh -s -- --uninstall
 mailtriage self uninstall [--dir DIR] [--yes] [--json]
 ```
 
-`self uninstall` removes the installation in `DIR`, by default the directory of the `mailtriage` that runs it, and nothing else:
+The script's `--uninstall` runs `DIR/mailtriage self uninstall --dir DIR`, with `--yes` when given, and downloads nothing; it asks through your terminal like the install does. `self uninstall` removes the installation in `DIR`, by default the directory of the `mailtriage` that runs it, and nothing else:
 
 1. A Homebrew install is refused: `installed by Homebrew; run brew uninstall mailtriage` (exit 2). Without `--yes` it asks first (default no); without a terminal it needs `--yes` (exit 2).
 2. It takes the installation lock, waiting up to 60 seconds (else exit 5), so no update recreates the binaries meanwhile.
@@ -1357,7 +1395,9 @@ Every command ends with `--config CONFIG`, the absolute path of the tray's confi
 
 ### Install the tray
 
-Each release also carries `mailtriage-tray-vVERSION-macos-arm64.tar.gz`, `-linux-amd64.tar.gz` and `-linux-arm64.tar.gz`, each with a `.sha256` file and listed in `SHA256SUMS`. The archive holds `mailtriage-tray` and the license. Use the same release as `mailtriage`, verify the archive like the CLI's, and install the tray in the same directory as `mailtriage` (`~/.local/bin` in [Install](#install)). On Linux, set `PLATFORM` to `linux-amd64` or `linux-arm64` and use `sha256sum --check` in place of `shasum -a 256 --check`:
+The [install script](#the-install-script) installs the tray next to `mailtriage`: by default on macOS, and on Linux with `--tray` or when `DISPLAY` or `WAYLAND_DISPLAY` is set.
+
+Each release also carries `mailtriage-tray-vVERSION-macos-arm64.tar.gz`, `-linux-amd64.tar.gz` and `-linux-arm64.tar.gz`, each with a `.sha256` file and listed in `SHA256SUMS`. The archive holds `mailtriage-tray` and the license. Use the same release as `mailtriage`, verify the archive's checksum, and install the tray in the same directory as `mailtriage` (`~/.local/bin` in [Install](#install)). On Linux, set `PLATFORM` to `linux-amd64` or `linux-arm64` and use `sha256sum --check` in place of `shasum -a 256 --check`:
 
 ```sh
 VERSION=0.1.0 PLATFORM=macos-arm64

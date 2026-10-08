@@ -81,6 +81,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Cone mode also checks out the files at the root, install.sh included.
       - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ needs.prepare.outputs.sha }}
@@ -109,6 +110,14 @@ jobs:
           test "${#trays[@]}" -eq 3
           cat "${manifests[@]}" > SHA256SUMS
           sha256sum --check SHA256SUMS
+      # The copy attached to the release installs that release by default.
+      - name: Attach install.sh
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          sed "s/^default_version=''\$/default_version='$RELEASE_VERSION'/" install.sh > dist/install.sh
+          grep -qx "default_version='$RELEASE_VERSION'" dist/install.sh
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -118,7 +127,7 @@ jobs:
           PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
         run: |
           set -euo pipefail
-          assets=(dist/*.tar.gz dist/*.sha256 dist/SHA256SUMS)
+          assets=(dist/*.tar.gz dist/*.sha256 dist/SHA256SUMS dist/install.sh)
           if gh release view "$RELEASE_TAG" --json isDraft > /tmp/existing-release.json 2>/dev/null; then
             jq -e '.isDraft == true' /tmp/existing-release.json > /dev/null || {
               echo 'Release is already published; assets will not be overwritten.' >&2

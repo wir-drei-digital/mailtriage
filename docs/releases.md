@@ -102,6 +102,17 @@ Each release contains:
 - `mailtriage-tray-vVERSION-macos-arm64.tar.gz`
 - A `.sha256` file for each archive, and a combined `SHA256SUMS` that lists
   all six archives.
+- `install.sh`, the install script, with this release as its default version.
+
+The build checks that every archive holds exactly its files at the top level
+(`mailtriage`, `LICENSE`, `README.md`; the tray's `mailtriage-tray`,
+`LICENSE`), because the install script refuses anything else. macOS builds
+pack them with `COPYFILE_DISABLE=1`, so no `._*` metadata entries appear.
+
+After a release, run **Install check** (`install-check.yml`) from GitHub
+Actions. It runs the install script from `main` against that release on
+Linux amd64, Linux arm64 and macOS with `--yes --no-setup`, then
+`mailtriage --version` and `mailtriage himalaya install`.
 
 The `mailtriage` archives contain the executable, README and license, and stay
 free of GUI libraries. The `mailtriage-tray` archives contain `mailtriage-tray`

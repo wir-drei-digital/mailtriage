@@ -95,10 +95,13 @@ jobs:
           "$binary" list --account work --view all --json
           tray="$GITHUB_WORKSPACE/target/release/mailtriage-tray"
           test "$("$tray" --version)" = "mailtriage-tray $VERSION"
+      # COPYFILE_DISABLE keeps macOS tar from adding ._* metadata entries:
+      # install.sh accepts exactly the release layout.
       - name: Package binary and checksum
         env:
           VERSION: ${{ steps.version.outputs.version }}
           PLATFORM: ${{ matrix.platform }}
+          COPYFILE_DISABLE: 1
         run: |
           set -euo pipefail
           mkdir -p dist package
@@ -117,6 +120,7 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
           PLATFORM: ${{ matrix.platform }}
+          COPYFILE_DISABLE: 1
         run: |
           set -euo pipefail
           mkdir -p dist-tray tray-package
@@ -125,6 +129,13 @@ jobs:
           tar -czf "dist-tray/$archive" -C tray-package mailtriage-tray LICENSE
           cd dist-tray
           shasum -a 256 "$archive" > "$archive.sha256"
+      # The layout install.sh checks: top-level regular files, nothing else.
+      - name: Check the archives' layout
+        run: |
+          set -euo pipefail
+          layout() { tar -tzvf "$1" | awk '{print substr($1, 1, 1), $NF}' | LC_ALL=C sort; }
+          test "$(layout dist/mailtriage-v*.tar.gz)" = "$(printf -- '- LICENSE\n- README.md\n- mailtriage')"
+          test "$(layout dist-tray/mailtriage-tray-v*.tar.gz)" = "$(printf -- '- LICENSE\n- mailtriage-tray')"
       # Named tray-*, not mailtriage-*: the release job downloads both
       # patterns and checks three CLI and three tray archives.
       - uses: actions/upload-artifact@v7.0.1

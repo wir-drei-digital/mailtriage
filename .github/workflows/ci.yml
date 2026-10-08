@@ -18,3 +18,15 @@ jobs:
     uses: ./.github/workflows/build.yml
     with:
       ref: ${{ github.sha }}
+
+  shell:
+    name: Shell scripts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      # install.sh runs under any POSIX sh (dash on Ubuntu, bash on macOS).
+      - run: shellcheck -s sh install.sh
+      - run: shellcheck scripts/add-himalaya-version.sh

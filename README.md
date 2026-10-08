@@ -18,28 +18,11 @@ mailtriage is a local command-line tool that classifies your email. For each mes
 
 ## Install
 
-From a release (macOS arm64, Linux amd64 or Linux arm64), with the GitHub CLI; on Linux, set `PLATFORM` to `linux-amd64` or `linux-arm64` and use `sha256sum --check` in place of `shasum -a 256 --check`:
-
 ```sh
-VERSION=0.1.0 PLATFORM=macos-arm64
-gh release download "v$VERSION" --repo wir-drei-digital/mailtriage --pattern "mailtriage-v$VERSION-$PLATFORM.tar.gz*" &&
-  shasum -a 256 --check "mailtriage-v$VERSION-$PLATFORM.tar.gz.sha256" &&
-  tar -xzf "mailtriage-v$VERSION-$PLATFORM.tar.gz" &&
-  install -d ~/.local/bin &&
-  install -m 0755 mailtriage ~/.local/bin/mailtriage
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/wir-drei-digital/mailtriage/main/install.sh | sh
 ```
 
-The macOS executable is unsigned and not notarized. `~/.local/bin` must be on your `PATH`: if `command -v mailtriage` prints nothing, add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile (`~/.zprofile` on macOS, `~/.bashrc` on Linux) and open a new terminal.
-
-From source, with a stable Rust toolchain:
-
-```sh
-cargo build --release --locked &&
-  install -d ~/.local/bin &&
-  install -m 0755 target/release/mailtriage ~/.local/bin/mailtriage
-```
-
-mailtriage keeps itself up to date: the background service installs new releases by itself, and `mailtriage update` installs one now. A root-owned or otherwise unsafe install, for example one made with `sudo` into `/usr/local/bin`, is not replaced: mailtriage only reports new releases for it ([Binaries mailtriage does not replace](docs/guide.md#binaries-mailtriage-does-not-replace)).
+The script installs mailtriage, and on macOS the tray app, into `~/.local/bin` (macOS arm64, Linux amd64 or arm64), then offers `mailtriage setup`. Script installs keep themselves up to date. The guide's [Install](docs/guide.md#install) section has the options, building from source and uninstalling.
 
 ## Get started
 
