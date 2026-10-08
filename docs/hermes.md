@@ -10,7 +10,7 @@ Hermes, or any other agent, calls `mailtriage` as an ordinary process. It needs 
    curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/wir-drei-digital/mailtriage/main/install.sh | sh -s -- --yes --no-tray --no-setup --dir /opt/mailtriage
    ```
 
-   `/opt/mailtriage` must exist and belong to the user that runs mailtriage; create it once as root, for example with `install -d -o USER /opt/mailtriage`. Without `--dir` the script installs into `~/.local/bin`. It prints the [`self install`](guide.md#mailtriage-self-install) result; exit 0 means done, 1 a failed download or check, 2 invalid options, an unsupported platform or a refused downgrade. The examples use `/opt/mailtriage/mailtriage`.
+   `/opt/mailtriage` must exist and belong to the user that runs mailtriage; create it once as root, for example with `install -d -o USER /opt/mailtriage`. Without `--dir` the script installs into `~/.local/bin`. It prints the [`self install`](guide.md#mailtriage-self-install) result; exit 0 means done, 1 a failed download or check, 2 invalid options, an unsupported platform or a refused downgrade, 3 an unsafe or foreign directory (the message on stderr starts with `unsafe_permissions:`, for example when `/opt/mailtriage` does not belong to the user) or a failed install, 5 another install or update holds the directory's installation lock (try again later). The examples use `/opt/mailtriage/mailtriage`.
 2. Run setup without prompts, as the user that will run mailtriage:
 
    ```sh

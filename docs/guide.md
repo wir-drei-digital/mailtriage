@@ -1018,14 +1018,13 @@ Without `--json`, events are one line of text, for example `update: restarting o
 | `unsafe_permissions` | The binary or its directory is not owned by you, or is writable by group or others. | Install mailtriage into a directory only you own and can write, such as `~/.local/bin`, or set `updates` to `notify`. |
 | `not_writable` | You cannot create files in the binary's directory. | Make the directory writable for you, or set `updates` to `notify`. |
 
-A binary installed with `sudo install … /usr/local/bin/mailtriage` belongs to root, so it is `unsafe_permissions`: mailtriage reports new releases for it but does not replace it. For automatic updates, install it as your own user and put `~/.local/bin` on your `PATH` (see [Install](#install)):
+A binary installed with `sudo install … /usr/local/bin/mailtriage` belongs to root, so it is `unsafe_permissions`: mailtriage reports new releases for it but does not replace it. For automatic updates, install it as your own user into `~/.local/bin`, with [the install script](#the-install-script) or with the binary you have:
 
 ```sh
-install -d ~/.local/bin &&
-  install -m 0755 mailtriage ~/.local/bin/mailtriage
+/usr/local/bin/mailtriage self install --dir ~/.local/bin
 ```
 
-Run `mailtriage service install` again after you move the binary.
+[`self install`](#mailtriage-self-install) says when `~/.local/bin` is not on your `PATH` and when another `mailtriage`, such as the root-owned one, comes first there. Run `~/.local/bin/mailtriage service install --account NAME` again after you move the binary.
 
 ### Files
 

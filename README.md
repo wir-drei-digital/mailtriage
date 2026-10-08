@@ -56,10 +56,10 @@ mailtriage list --account work
 ## For agents
 
 ```sh
-mailtriage setup --yes --himalaya-account work --key-store env
+mailtriage setup --yes --himalaya-install --himalaya-account work --key-store env
 ```
 
-`--yes` turns prompts off. Each answer then comes from its flag or its default, and a missing required flag exits 2 and names the flag. With `--key-store env`, set `OPENROUTER_API_KEY` in the environment of the process that runs mailtriage. The [agent guide](docs/hermes.md) covers the other flags, exit codes and health checks.
+`--yes` turns prompts off. Each answer then comes from its flag or its default, and a missing required flag exits 2 and names the flag. `--himalaya-install` installs a tested Himalaya for mailtriage when none is found. With `--key-store env`, set `OPENROUTER_API_KEY` in the environment of the process that runs mailtriage. The [agent guide](docs/hermes.md) covers the other flags, exit codes and health checks.
 
 ## Everyday commands
 
