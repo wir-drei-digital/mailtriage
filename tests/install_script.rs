@@ -410,6 +410,89 @@ fn uninstall_hands_over_to_self_uninstall_without_a_download() {
     assert_eq!(f.server.count("/"), 0);
 }
 
+/// A literal `~` (a quoted `--dir '~/bin'` or `MAILTRIAGE_INSTALL_DIR`)
+/// means HOME, also for `--uninstall`; a `~` elsewhere stays as it is.
+#[test]
+fn a_literal_tilde_in_the_directory_means_home() {
+    let f = Fixture::new(RECORDER);
+    let home = f.root.join("home");
+    let home = home.to_str().unwrap();
+    for (args, env, dir) in [
+        (vec!["--dir", "~/bin"], vec![], format!("{home}/bin")),
+        (vec!["--dir=~/a b"], vec![], format!("{home}/a b")),
+        (
+            vec![],
+            vec![("MAILTRIAGE_INSTALL_DIR", "~")],
+            home.to_owned(),
+        ),
+        (
+            vec![],
+            vec![("MAILTRIAGE_INSTALL_DIR", "~/opt/mt")],
+            format!("{home}/opt/mt"),
+        ),
+        (vec!["--dir", "/tmp/~/x"], vec![], "/tmp/~/x".to_owned()),
+    ] {
+        let out = f.run(&[&["--no-tray"][..], &args].concat(), &env);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{args:?} {env:?}: {}",
+            stderr(&out)
+        );
+        assert_eq!(
+            f.args(),
+            ["self", "install", "--dir", dir.as_str()],
+            "{args:?} {env:?}"
+        );
+    }
+    let out = f.run(&["--uninstall", "--dir", "~/gone"], &[]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains(&format!("nothing is installed in {home}/gone")),
+        "{}",
+        stderr(&out)
+    );
+}
+
+/// Exit 126 (the shell could not run the program, as from a temporary
+/// directory mounted noexec) is kept and explained.
+#[test]
+fn a_program_that_cannot_run_is_explained() {
+    let f = Fixture::new(b"#!/bin/sh\nexit 126\n");
+    let out = f.run(&["--no-tray"], &[]);
+    assert_eq!(out.status.code(), Some(126), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(
+        err.contains("could not run the downloaded mailtriage from the temporary directory"),
+        "{err}"
+    );
+    assert!(err.contains("may be mounted noexec"), "{err}");
+    assert!(
+        err.contains("TMPDIR=<a directory that allows running programs>"),
+        "{err}"
+    );
+    // The same exit from --uninstall's run names the installed file.
+    let dir = f.root.join("bin");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("mailtriage"), b"#!/bin/sh\nexit 126\n").unwrap();
+    fs::set_permissions(dir.join("mailtriage"), fs::Permissions::from_mode(0o755)).unwrap();
+    let out = f.run(&["--uninstall", "--dir", dir.to_str().unwrap()], &[]);
+    assert_eq!(out.status.code(), Some(126), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(
+        err.contains(&format!("could not run {}/mailtriage", dir.display())),
+        "{err}"
+    );
+    assert!(err.contains("may be mounted noexec"), "{err}");
+    // Other exit codes pass through without it.
+    let out = f.run(&["--no-tray"], &[]);
+    assert_eq!(out.status.code(), Some(126));
+    let ok = Fixture::new(RECORDER);
+    let out = ok.run(&["--no-tray"], &[("MT_EXIT", "3")]);
+    assert_eq!(out.status.code(), Some(3));
+    assert!(!stderr(&out).contains("noexec"), "{}", stderr(&out));
+}
+
 #[test]
 fn a_truncated_script_runs_nothing() {
     let f = Fixture::new(RECORDER);

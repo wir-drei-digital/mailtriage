@@ -75,7 +75,7 @@ curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/wir-drei
 | Option | Environment | Meaning |
 | --- | --- | --- |
 | `--version X.Y.Z` | `MAILTRIAGE_VERSION` | Install this release instead of the newest. Never a downgrade. |
-| `--dir DIR` | `MAILTRIAGE_INSTALL_DIR` | The install directory, default `~/.local/bin`. |
+| `--dir DIR` | `MAILTRIAGE_INSTALL_DIR` | The install directory, default `~/.local/bin`. A leading `~/` or a bare `~` that reaches the script unexpanded means your `HOME`. |
 | `--tray` / `--no-tray` | `MAILTRIAGE_TRAY=1` / `0` | Install the tray app, or not. Default: yes on macOS; on Linux only when `DISPLAY` or `WAYLAND_DISPLAY` is set. |
 | `--no-setup` | `MAILTRIAGE_NO_SETUP=1` | Do not offer setup or the login item. |
 | `--yes` | `MAILTRIAGE_YES=1` | Never ask. |
@@ -91,7 +91,7 @@ It asks only when it can open your terminal:
 | Start the tray at login (after setup succeeded) | asks, default yes | no; prints the command | no; prints the command |
 | Uninstall | asks, default no | yes | refused (exit 2; use `--yes`) |
 
-The end of input at a question counts as its default. Exit codes: 0 done; 1 a failed step, which the message names: a missing tool, a network error, a checksum mismatch, an unexpected archive or latest-release URL; 2 invalid options, an unsupported platform, or a refused downgrade; any other code is `mailtriage self install`'s. A download that breaks off runs nothing: the whole script is one `{ … }` group, which `sh` reads completely before running it.
+The end of input at a question counts as its default. Exit codes: 0 done; 1 a failed step, which the message names: a missing tool, a network error, a checksum mismatch, an unexpected archive or latest-release URL; 2 invalid options, an unsupported platform, or a refused downgrade; 126 when the downloaded program could not be run, usually because the temporary directory is mounted `noexec` (run the script again with `TMPDIR=<a directory that allows running programs>` before `sh`); any other code is `mailtriage self install`'s. A download that breaks off runs nothing: the whole script is one `{ … }` group, which `sh` reads completely before running it.
 
 The script never downgrades. To go back to an older release, follow [Rolling back by hand](#rolling-back-by-hand).
 

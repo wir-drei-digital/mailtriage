@@ -216,6 +216,14 @@ main() {
         ;;
     esac
   done
+  # A literal ~ (a quoted --dir or MAILTRIAGE_INSTALL_DIR) means HOME; the
+  # patterns are quoted, so the shell does not expand them itself.
+  case "$dir" in
+    '~' | '~/'*)
+      [ -n "${HOME:-}" ] || refuse "HOME is not set; pass --dir without ~"
+      dir="$HOME${dir#?}"
+      ;;
+  esac
   if [ -z "$dir" ]; then
     [ -n "${HOME:-}" ] || refuse "HOME is not set; pass --dir"
     dir="$HOME/.local/bin"
@@ -245,6 +253,9 @@ main() {
     if [ "$yes" = 1 ]; then set -- "$@" --yes; fi
     status=0
     "$dir/mailtriage" "$@" <"$(input)" || status=$?
+    if [ "$status" = 126 ]; then
+      say "could not run $dir/mailtriage (exit 126); $dir may be mounted noexec, or the file is not executable"
+    fi
     exit "$status"
   fi
 
@@ -307,6 +318,11 @@ main() {
   if [ "$yes" = 1 ]; then set -- "$@" --yes; fi
   status=0
   "$tmp/mailtriage" "$@" <"$(input)" || status=$?
+  # 126: the shell found the program but could not run it.
+  if [ "$status" = 126 ]; then
+    say "could not run the downloaded mailtriage from the temporary directory ${tmp%/*} (exit 126); it may be mounted noexec"
+    say "run the installer again with a temporary directory that does: curl ... | TMPDIR=<a directory that allows running programs> sh"
+  fi
   exit "$status"
 }
 
