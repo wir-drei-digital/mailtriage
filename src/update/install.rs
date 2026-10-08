@@ -248,6 +248,7 @@ pub fn install(
         version: &candidate,
         cache: job.cache,
         hooks: job.hooks,
+        keep_previous: false,
     };
     let placed = place(&placement, _lock, &binary)?;
     Ok(Outcome::Installed(Installed {
@@ -272,6 +273,10 @@ pub struct Placement<'a> {
     /// Where step 10 records the installation; `None` records nothing.
     pub cache: Option<&'a Cache>,
     pub hooks: &'a dyn Hooks,
+    /// Skip the backup (9.2 and 9.4) and leave `<path>.previous` as it is:
+    /// `self install` over the same version keeps the release before it
+    /// there. The updater always backs up.
+    pub keep_previous: bool,
 }
 
 /// What `place` did from its commit point on.
@@ -300,11 +305,12 @@ impl std::error::Error for DoesNotRun {}
 /// Steps 7 to 10 for `binary` (already verified), under the held
 /// installation lock: write it to an exclusively created file next to the
 /// installation path, smoke-test it, revalidate both files, back up the
-/// installed binary when there is one, rename the new one over the path
-/// (the commit point), publish the backup as `<path>.previous`, sync the
-/// directory and record the installation. Errors before the commit point
-/// leave the path and `<path>.previous` untouched and remove this attempt's
-/// files; a binary that does not run is a `DoesNotRun` error.
+/// installed binary when there is one (unless `keep_previous`), rename the
+/// new one over the path (the commit point), publish the backup as
+/// `<path>.previous`, sync the directory and record the installation.
+/// Errors before the commit point leave the path and `<path>.previous`
+/// untouched and remove this attempt's files; a binary that does not run is
+/// a `DoesNotRun` error.
 pub fn place(p: &Placement, _lock: &InstallLock, binary: &[u8]) -> Result<Placed> {
     let path = p.path;
     let dir = path
@@ -334,7 +340,7 @@ pub fn place(p: &Placement, _lock: &InstallLock, binary: &[u8]) -> Result<Placed
     }
     // 9.2 Backup copy; `.previous` is not touched yet.
     let backup = match p.before {
-        Some(_) => {
+        Some(_) if !p.keep_previous => {
             let backup =
                 scratch.add(dir.join(format!("{TEMP_PREFIX}{}.prev", uuid::Uuid::new_v4())));
             p.hooks
@@ -343,7 +349,7 @@ pub fn place(p: &Placement, _lock: &InstallLock, binary: &[u8]) -> Result<Placed
                 .map_err(|e| anyhow!("cannot back up {}: {e}", path.display()))?;
             Some(backup)
         }
-        None => None,
+        _ => None,
     };
     // 9.3 The commit point.
     p.hooks

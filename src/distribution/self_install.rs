@@ -68,6 +68,7 @@ pub fn run(args: &Args, hooks: &dyn Hooks, p: &mut Prompter) -> Result<Value> {
     let running = version::running();
     let cli = dir.join(CLI.name);
     let before = regular_file(&cli)?;
+    let mut installed = None;
     if before.is_some() {
         if let Ok(found) = platform::probe(&cli, CLI) {
             if version::is_newer(&found, &running) {
@@ -79,6 +80,7 @@ pub fn run(args: &Args, hooks: &dyn Hooks, p: &mut Prompter) -> Result<Value> {
                     ),
                 ));
             }
+            installed = Some(found);
         }
     }
     let cache = Cache::for_user();
@@ -90,6 +92,7 @@ pub fn run(args: &Args, hooks: &dyn Hooks, p: &mut Prompter) -> Result<Value> {
         version: &running,
         cache: cache.as_ref(),
         hooks,
+        keep_previous: keeps_previous(&cli, installed.as_ref(), &running),
     };
     let placed = install::place(&placement, &lock, &own).map_err(|e| err(3, format!("{e:#}")))?;
     drop(own);
@@ -203,6 +206,17 @@ fn install_dir(dir: &Path) -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// Whether `place` keeps `<path>.previous` as it is: the installed file
+/// already prints this version (a reinstall) and `.previous` exists. A
+/// backup would replace the release before it with a copy of this one.
+fn keeps_previous(
+    path: &Path,
+    installed: Option<&semver::Version>,
+    running: &semver::Version,
+) -> bool {
+    installed == Some(running) && fs::symlink_metadata(install::previous_path(path)).is_ok()
+}
+
 /// The identity of the regular file at `path`; `None` when there is none.
 /// Anything else there (a link, a directory) is refused: exit 3.
 fn regular_file(path: &Path) -> Result<Option<FileIdentity>> {
@@ -267,6 +281,10 @@ fn install_tray(
         }
         let bytes = read_capped(file)
             .map_err(|e| err(3, format!("--tray-file: {}: {e}", file.display())))?;
+        let installed = before
+            .is_some()
+            .then(|| platform::probe(&path, TRAY).ok())
+            .flatten();
         let placement = Placement {
             component: TRAY,
             path: &path,
@@ -274,6 +292,7 @@ fn install_tray(
             version: running,
             cache,
             hooks,
+            keep_previous: keeps_previous(&path, installed.as_ref(), running),
         };
         let placed = install::place(&placement, lock, &bytes)?;
         for warning in placed.warnings {

@@ -288,6 +288,70 @@ fn a_running_service_restarts_onto_the_installed_file() {
     watch.stop();
 }
 
+/// Re-running the installer at the same version replaces the files (so
+/// services restart onto them) but keeps the release before it in
+/// `.previous`, for rolling back by hand.
+#[test]
+fn a_same_version_reinstall_keeps_the_previous_release() {
+    use std::os::unix::fs::MetadataExt;
+    let f = Fixture::new();
+    let old_cli = "#!/bin/sh\necho 'mailtriage 0.0.0'\n";
+    let old_tray = fake_tray("0.0.0");
+    write_exe(&f.installed(), old_cli);
+    write_exe(&f.dir().join("mailtriage-tray"), &old_tray);
+    fs::set_permissions(f.dir(), fs::Permissions::from_mode(0o755)).unwrap();
+    let tray_file = f.root.join("download/mailtriage-tray");
+    write_exe(&tray_file, &fake_tray(RUNNING));
+    let args = ["--no-setup", "--tray-file", tray_file.to_str().unwrap()];
+    let ino = |name: &str| fs::metadata(f.dir().join(name)).unwrap().ino();
+    let (out, v) = f.install(&args, "", &[]);
+    assert_eq!(out.status.code(), Some(0), "{v} {}", stderr(&out));
+    assert_eq!(v["self_install"]["tray"]["action"], "installed", "{v}");
+    assert_eq!(
+        fs::read_to_string(f.dir().join("mailtriage.previous")).unwrap(),
+        old_cli
+    );
+    assert_eq!(
+        fs::read_to_string(f.dir().join("mailtriage-tray.previous")).unwrap(),
+        old_tray
+    );
+    let (cli_before, tray_before) = (ino("mailtriage"), ino("mailtriage-tray"));
+    // The same version again.
+    let (out, v) = f.install(&args, "", &[]);
+    assert_eq!(out.status.code(), Some(0), "{v} {}", stderr(&out));
+    assert_eq!(v["self_install"]["cli"]["action"], "installed", "{v}");
+    assert_eq!(v["self_install"]["tray"]["action"], "installed", "{v}");
+    assert_ne!(ino("mailtriage"), cli_before, "the CLI is replaced");
+    assert_ne!(ino("mailtriage-tray"), tray_before, "the tray is replaced");
+    assert!(
+        fs::read(f.installed()).unwrap() == fs::read(env!("CARGO_BIN_EXE_mailtriage")).unwrap()
+    );
+    assert!(
+        fs::read(f.dir().join("mailtriage.previous")).unwrap() == old_cli.as_bytes(),
+        "mailtriage.previous is no longer the release before"
+    );
+    assert!(
+        fs::read(f.dir().join("mailtriage-tray.previous")).unwrap() == old_tray.as_bytes(),
+        "mailtriage-tray.previous is no longer the release before"
+    );
+    // No backup was left behind.
+    let mut names: Vec<String> = fs::read_dir(f.dir())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| !n.starts_with(".mailtriage-update.lock"))
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "mailtriage",
+            "mailtriage-tray",
+            "mailtriage-tray.previous",
+            "mailtriage.previous"
+        ]
+    );
+}
+
 #[test]
 fn the_tray_is_installed_or_skipped_keeping_the_old_one() {
     let f = Fixture::new();
