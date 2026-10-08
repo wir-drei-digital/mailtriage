@@ -218,7 +218,10 @@ pub fn systemd_unit(unit: &Unit) -> String {
                 .replace('%', "%%")
         );
     }
-    s += "Restart=on-failure\nRestartSec=30\nUMask=0077\n\n[Install]\nWantedBy=default.target\n";
+    // A pass asked to stop ends after its current message, but one Himalaya
+    // or provider call can take its full timeout; Fedora's 45 s default would
+    // abort the process with a core dump first.
+    s += "Restart=on-failure\nRestartSec=30\nTimeoutStopSec=120\nUMask=0077\n\n[Install]\nWantedBy=default.target\n";
     s
 }
 

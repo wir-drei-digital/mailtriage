@@ -26,6 +26,10 @@ use std::{
     fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
     rc::Rc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
 /// What a `ServiceError` is about, for callers that react to a class of
@@ -192,6 +196,9 @@ pub struct Service {
     pub store: Store,
     engine_override: Option<Rc<dyn MailEngine>>,
     key: KeyCache,
+    /// Set by `watch` on SIGTERM or Ctrl-C: a running pass stops taking new
+    /// messages and skips its filing steps, so it ends within one message.
+    stop: Option<Arc<AtomicBool>>,
 }
 impl Service {
     pub fn open(path: &Path) -> Result<Self> {
@@ -226,7 +233,16 @@ impl Service {
             store,
             engine_override: None,
             key: KeyCache::default(),
+            stop: None,
         })
+    }
+    /// Lets `stop` end a running pass early (see `Service::stop`).
+    pub fn with_stop(mut self, stop: Arc<AtomicBool>) -> Self {
+        self.stop = Some(stop);
+        self
+    }
+    fn stopping(&self) -> bool {
+        self.stop.as_ref().is_some_and(|s| s.load(Ordering::SeqCst))
     }
     /// Like `open`, but every account with an engine config uses `engine`.
     pub fn open_with_engine(path: &Path, engine: Rc<dyn MailEngine>) -> Result<Self> {
@@ -658,8 +674,10 @@ impl Service {
         };
         let (done, skipped) = self.fetch_and_classify(name, &account, &generation, &from, limit)?;
         // 7–10. Arrivals and re-evaluation, bootstrap and hydration, plan and
-        // apply, done inference.
-        if let Some(ctx) = filing {
+        // apply, done inference. A pass asked to stop leaves them to the next
+        // pass: every filing step resumes from stored state.
+        let stopped = self.stopping();
+        if let Some(ctx) = filing.filter(|_| !stopped) {
             self.locate_and_file(ctx, &map, &removed, &mut summary)?;
         }
         // 11. Summary.
@@ -671,6 +689,10 @@ impl Service {
             filing.map(|_| &summary),
         )?;
         mark_skipped(&mut out, skipped);
+        if stopped {
+            out["stopped"] = json!(true);
+            out["partial"] = json!(true);
+        }
         Ok(out)
     }
     /// Steps 7–10 with filing on: arrival resolution, then re-evaluation of
@@ -906,6 +928,9 @@ impl Service {
             }
         }
         for id in ids {
+            if self.stopping() {
+                break;
+            }
             let needed_fetch = self.required(name, &id)?.normalized.is_none();
             match self
                 .process_one(name, account, generation, &id, h)?
