@@ -106,7 +106,7 @@ pub fn newest() -> &'static Tested {
     tested().last().expect("at least one tested version")
 }
 
-/// `2.1.0, 2.2.1`: the tested versions for messages.
+/// The tested versions for messages, such as `2.1.0, 2.2.1`.
 pub fn listed() -> String {
     tested()
         .iter()
@@ -177,21 +177,72 @@ pub fn check_version_output(output: &[u8]) -> Result<(String, &'static Tested), 
 mod tests {
     use super::*;
 
+    /// The spec's digests of the two versions the feature shipped with. The
+    /// tests check properties of the data file, not its exact list, so that
+    /// adding a version keeps them passing.
+    const PINNED: [(&str, [(&str, &str); 3]); 2] = [
+        (
+            "2.1.0",
+            [
+                (
+                    "aarch64-darwin",
+                    "a5a787b7c4dbf065408e7772908fc75c799626f4cebab8e9c78fafe3e2fa585c",
+                ),
+                (
+                    "x86_64-linux",
+                    "683a2ab8e1534f01e6bda3a69e204d564c31fbfbe20511fc7bc60b67f2e85884",
+                ),
+                (
+                    "aarch64-linux",
+                    "c41adab4bc220ba816cdbf865a5df8dc3b358b39ec58b4be0ed2f64e46b1d182",
+                ),
+            ],
+        ),
+        (
+            "2.2.1",
+            [
+                (
+                    "aarch64-darwin",
+                    "a5d97a1f7bbca45e58bddde3f9f17325f614c9cd6d5f17fabf38ddcb030869ab",
+                ),
+                (
+                    "x86_64-linux",
+                    "5c5ba2724c162f82d0a0c71b6c03224ed44f8bef7b14ace5da0635d3af2665a0",
+                ),
+                (
+                    "aarch64-linux",
+                    "1dc21c3dd6d948929e22e5cae49b9d0b3b30ff88fafd4493fd4460c6252e9d90",
+                ),
+            ],
+        ),
+    ];
+
+    /// A newer patch release the data does not list: the newest listed
+    /// version with its patch number + 1.
+    fn untested_patch() -> String {
+        let newest = Version::parse(&newest().version).unwrap();
+        let untested = format!("{}.{}.{}", newest.major, newest.minor, newest.patch + 1);
+        assert!(find(&untested).is_none(), "{untested} is listed");
+        untested
+    }
+
     #[test]
     fn the_data_file_lists_well_formed_digests_oldest_first() {
         let tested = parse(DATA).unwrap();
-        let versions: Vec<&str> = tested.iter().map(|t| t.version.as_str()).collect();
-        assert_eq!(versions, ["2.1.0", "2.2.1"]);
-        assert_eq!(listed(), "2.1.0, 2.2.1");
-        assert_eq!(newest().version, "2.2.1");
-        assert_eq!(
-            find("2.1.0").unwrap().sha256("x86_64-linux"),
-            Some("683a2ab8e1534f01e6bda3a69e204d564c31fbfbe20511fc7bc60b67f2e85884")
-        );
-        assert_eq!(
-            find("2.2.1").unwrap().sha256("aarch64-darwin"),
-            Some("a5d97a1f7bbca45e58bddde3f9f17325f614c9cd6d5f17fabf38ddcb030869ab")
-        );
+        let versions: Vec<Version> = tested
+            .iter()
+            .map(|t| Version::parse(&t.version).unwrap())
+            .collect();
+        assert!(versions.windows(2).all(|w| w[0] < w[1]), "{versions:?}");
+        let names: Vec<&str> = tested.iter().map(|t| t.version.as_str()).collect();
+        assert_eq!(listed(), names.join(", "));
+        assert_eq!(&newest().version, names.last().unwrap());
+        for (version, digests) in PINNED {
+            let entry = find(version).unwrap_or_else(|| panic!("{version} is not listed"));
+            for (platform, hex) in digests {
+                assert_eq!(entry.sha256(platform), Some(hex), "{version} {platform}");
+            }
+        }
     }
 
     /// The roles each version's resolver maps for IMAP, read from
@@ -252,15 +303,23 @@ mod tests {
             assert!(line.contains(&format!("v{} ", tested.version)));
         }
         let refused = |line: &str| check_version_output(line.as_bytes()).unwrap_err();
-        let newer = refused("himalaya v2.2.2 +imap\n");
-        assert_eq!(newer.version.as_deref(), Some("2.2.2"));
+        let untested = untested_patch();
+        let newer = refused(&format!("himalaya v{untested} +imap\n"));
+        assert_eq!(newer.version.as_deref(), Some(untested.as_str()));
         assert_eq!(
             newer.to_string(),
-            "Himalaya 2.2.2 is not a tested version (tested: 2.1.0, 2.2.1)"
+            format!(
+                "Himalaya {untested} is not a tested version (tested: {})",
+                listed()
+            )
         );
+        assert!(find("1.2.0").is_none());
         assert_eq!(
             refused("himalaya v1.2.0 +imap\n").to_string(),
-            "Himalaya 1.2.0 is not a tested version (tested: 2.1.0, 2.2.1)"
+            format!(
+                "Himalaya 1.2.0 is not a tested version (tested: {})",
+                listed()
+            )
         );
         let no_imap = refused("himalaya v2.2.1 +smtp\n");
         assert!(no_imap.no_imap);

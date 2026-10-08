@@ -52,21 +52,34 @@ Monday and on demand, in three jobs:
 
 Before merging such a pull request, read the new version's `--mailbox`
 resolver in Himalaya's source for role changes: the script copies `roles` from
-the previous version. The workflow needs one repository setting, made once:
+the previous version. Also update the places in `README.md` and
+`docs/guide.md` that name the tested versions or the newest one. Push these
+edits to the pull request's branch, never to `main` directly. The tests derive
+the tested versions from the data file, so a valid new entry needs no test
+change. The workflow needs one repository setting, made once:
 Settings → Actions → General → Workflow permissions → "Allow GitHub Actions
 to create and approve pull requests".
 
-**Adding a version by hand:**
+**Adding a version by hand,** on a new branch:
 
 ```sh
+git switch -c himalaya/2.3.0
 scripts/add-himalaya-version.sh 2.3.0
 ```
 
 It reads the release's asset digests from the GitHub API (set `GH_TOKEN` to
 avoid the anonymous rate limit), fails without changing anything when a
 platform's digest is missing, and appends the entry with the previous
-version's `roles`. Check the roles, push, and let `e2e.yml` run the suite for
-every listed version.
+version's `roles`. Then:
+
+1. Check the roles against the new version's `--mailbox` resolver; correct
+   `roles` and the tests that pin them (`src/engine/versions.rs`,
+   `src/engine/targets.rs`) if it changed.
+2. Update the places in `README.md` and `docs/guide.md` that name the tested
+   versions or the newest one.
+3. Push the branch and open a pull request; never push to `main` directly.
+   The pull request runs CI and `e2e.yml`, which runs the suite for every
+   listed version.
 
 ## Publish a version
 

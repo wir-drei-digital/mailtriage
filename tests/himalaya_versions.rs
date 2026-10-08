@@ -2,7 +2,10 @@
 //! Tested Himalaya versions: any listed version is accepted whatever
 //! `expected_version` says, and an untested one is reported by `doctor`,
 //! refused by passes (exit 3) and by setup.
-use mailtriage::{domain::HimalayaConfig, engine::himalaya::Himalaya};
+use mailtriage::{
+    domain::HimalayaConfig,
+    engine::{himalaya::Himalaya, versions},
+};
 use serde_json::{json, Value};
 use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Command};
 
@@ -96,6 +99,25 @@ impl Fixture {
     }
 }
 
+/// A newer patch release the compiled data does not list: the newest listed
+/// version with its patch number + 1. Derived, so that adding a version to
+/// the data file keeps these tests passing.
+fn untested_patch() -> String {
+    let newest = &versions::newest().version;
+    let (minor, patch) = newest.rsplit_once('.').unwrap();
+    let untested = format!("{minor}.{}", patch.parse::<u64>().unwrap() + 1);
+    assert!(versions::find(&untested).is_none(), "{untested} is listed");
+    untested
+}
+
+/// The error for `untested`, with the tested versions as listed.
+fn not_tested(untested: &str) -> String {
+    format!(
+        "Himalaya {untested} is not a tested version (tested: {})",
+        versions::listed()
+    )
+}
+
 fn engine(f: &Fixture, expected: &str) -> Himalaya {
     Himalaya::new(&HimalayaConfig {
         binary: f.bin().join("himalaya"),
@@ -135,23 +157,22 @@ fn doctor_reports_whether_the_version_is_tested() {
         ),
         (json!(true), json!(true), json!("himalaya v2.2.1 +imap"))
     );
-    f.set_version("himalaya v2.2.2 +imap\n");
+    let untested = untested_patch();
+    f.set_version(&format!("himalaya v{untested} +imap\n"));
     let (code, v) = f.run(&["doctor", "--account", "work", "--json", "--config", config]);
     assert_eq!(code, Some(0), "{v}");
     let t = &v["transport"];
     assert_eq!(t["ready"], false, "{v}");
     assert_eq!(t["tested"], false);
-    assert_eq!(t["version"], "himalaya v2.2.2 +imap");
-    assert_eq!(
-        t["error"],
-        "Himalaya 2.2.2 is not a tested version (tested: 2.1.0, 2.2.1)"
-    );
+    assert_eq!(t["version"], format!("himalaya v{untested} +imap"));
+    assert_eq!(t["error"], not_tested(&untested));
     assert_eq!(v["ready"], false);
 }
 
 #[test]
 fn a_pass_with_an_untested_version_exits_3_naming_it() {
-    let f = Fixture::new("himalaya v2.2.2 +imap\n");
+    let untested = untested_patch();
+    let f = Fixture::new(&format!("himalaya v{untested} +imap\n"));
     let config = f.config("2.2.1");
     let (code, v) = f.run(&[
         "sync",
@@ -162,10 +183,7 @@ fn a_pass_with_an_untested_version_exits_3_naming_it() {
         config.to_str().unwrap(),
     ]);
     assert_eq!(code, Some(3), "{v}");
-    assert_eq!(
-        v["error"]["message"],
-        "Himalaya 2.2.2 is not a tested version (tested: 2.1.0, 2.2.1)"
-    );
+    assert_eq!(v["error"]["message"], not_tested(&untested));
 }
 
 #[test]
@@ -191,13 +209,11 @@ fn setup_accepts_any_tested_version_and_writes_it() {
         "2.2.1"
     );
     fs::remove_file(f.home().join(".config/mailtriage/mailtriage.json")).unwrap();
-    f.set_version("himalaya v2.2.2 +imap\n");
+    let untested = untested_patch();
+    f.set_version(&format!("himalaya v{untested} +imap\n"));
     let (code, v) = f.run(&setup);
     assert_eq!(code, Some(3), "{v}");
     let message = v["error"]["message"].as_str().unwrap();
     assert!(message.starts_with("step 2 (Himalaya): "), "{message}");
-    assert!(
-        message.contains("Himalaya 2.2.2 is not a tested version (tested: 2.1.0, 2.2.1)"),
-        "{message}"
-    );
+    assert!(message.contains(&not_tested(&untested)), "{message}");
 }

@@ -4,7 +4,11 @@
 use std::{fs, os::unix::fs::PermissionsExt, path::Path};
 
 /// A fake Himalaya whose `--version` prints `@VERSION@` (`flip`: 2.1.0 the
-/// first time, 2.2.2 afterwards). It lists the IMAP account `work`, passes
+/// first time, 2.2.2 afterwards). `flip` is for tests that run under their
+/// own `MAILTRIAGE_TEST_HIMALAYA_VERSIONS` table, which lists 2.1.0 and not
+/// 2.2.2, so the compiled data file may list 2.2.2 one day; tests on the
+/// compiled data derive their untested version from it instead (see
+/// `tests/himalaya_versions.rs`). It lists the IMAP account `work`, passes
 /// `account check`, reports capabilities without SPECIAL-USE and lists
 /// INBOX. Its state lives in `MT_FAKE_DIR`, so a copy installed elsewhere
 /// behaves the same.
