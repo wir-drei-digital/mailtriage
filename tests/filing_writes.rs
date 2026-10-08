@@ -1316,3 +1316,63 @@ fn a_source_mismatch_is_reported_each_pass_it_waits() {
         );
     }
 }
+
+/// Recovery reads each folder's epoch once per call: N `sent` moves from
+/// INBOX into Newsletters cost one status call per folder, not two per intent.
+#[test]
+fn recovery_reads_each_folder_epoch_once_per_call() {
+    use mailtriage::filing::{observe, recover, FilingSummary, PassContext};
+    const N: usize = 5;
+    let h = Harness::new(Live);
+    h.sync();
+    for i in 0..N {
+        h.fake.deliver(
+            "INBOX",
+            &mail(
+                &format!("n{i}"),
+                &format!("Weekly newsletter {i}"),
+                "Our newsletter",
+            ),
+        );
+    }
+    h.sync();
+    let sent = vec![("move".to_string(), "sent".to_string()); N];
+    assert_eq!(
+        intent_states(&h),
+        sent,
+        "moved, arrivals not yet discovered"
+    );
+    let mut s = h.service();
+    let cfg = s.config.accounts["work"].clone();
+    let generation = s.store.records("work").unwrap()[0].generation.clone();
+    let verify = || -> anyhow::Result<()> { Ok(()) };
+    let ctx = PassContext {
+        account: "work",
+        cfg: &cfg,
+        engine: &h.fake,
+        mode: Live,
+        generation: &generation,
+        now: mailtriage::store::now(),
+        max_attempts: 5,
+        verify_binding: &verify,
+    };
+    let mut summary = FilingSummary::default();
+    let map = observe::resolve_folders(&mut s.store, &ctx, &mut summary).unwrap();
+    let before = h.fake.calls().len();
+    recover::recover(&mut s.store, &ctx, &map, &mut summary).unwrap();
+    let mut snapshots: Vec<String> = h.fake.calls()[before..]
+        .iter()
+        .filter(|c| c.starts_with("snapshot "))
+        .cloned()
+        .collect();
+    snapshots.sort();
+    assert_eq!(snapshots, ["snapshot INBOX", "snapshot Newsletters"]);
+    assert!(summary.problems.is_empty(), "{:?}", summary.problems);
+    assert_eq!(intent_states(&h), sent, "still waiting for their arrivals");
+    drop(s);
+    h.sync();
+    assert_eq!(
+        intent_states(&h),
+        vec![("move".to_string(), "applied".to_string()); N]
+    );
+}

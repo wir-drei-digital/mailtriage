@@ -19,9 +19,11 @@ use crate::store::{now, Store};
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Duration, Utc};
 use serde_json::json;
+use std::collections::BTreeMap;
 
 /// Walks open intents oldest first, then the reverts (mode not off). Engine
-/// writes (retries, reverts) happen only when `map.writes_allowed`.
+/// writes (retries, reverts) happen only when `map.writes_allowed`. Each
+/// folder's epoch is read at most once per call (see `Epochs`).
 pub fn recover(
     store: &mut Store,
     ctx: &PassContext,
@@ -32,13 +34,14 @@ pub fn recover(
         return Ok(());
     }
     record_race_bounds(store, ctx)?;
+    let mut epochs = Epochs::default();
     for listed in store.intents(ctx.account, true)? {
         let Some(intent) = store.intent(listed.id)? else {
             continue;
         };
         let result = match intent.kind.as_str() {
             "flag" => recover_flag(store, ctx, &intent, summary),
-            _ => recover_move(store, ctx, map, &intent, summary),
+            _ => recover_move(store, ctx, map, &mut epochs, &intent, summary),
         };
         if let Err(e) = result {
             write_failed(e, "recovery_failed", &intent.folder, summary)?;
@@ -83,6 +86,31 @@ fn record_race_bounds(store: &mut Store, ctx: &PassContext) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Folder epochs (UIDVALIDITY) read once per recovery call, for the two ends
+/// of every move intent. Only the epoch is kept: it is all `Ends` compares,
+/// and everything recovery concludes beyond it comes from stored occurrences
+/// and checkpoints, which discovery wrote before recovery began. Because
+/// UIDVALIDITY only increases, a cached epoch that differs from a recorded
+/// one stays different; one that matches can go stale, exactly as a fresh
+/// snapshot can right after it returns. Whatever needs the folder as it is
+/// now takes its own snapshot: bracketed reads (`observe_in_source`), a
+/// retry's target bounds, and race bounds (`race_until_uid`); every write
+/// recovery dispatches selects its folder and checks the session epoch.
+/// A failed snapshot is not cached, so the next intent asks again.
+#[derive(Default)]
+struct Epochs(BTreeMap<String, u64>);
+
+impl Epochs {
+    fn of(&mut self, ctx: &PassContext, folder: &str) -> Result<u64> {
+        if let Some(epoch) = self.0.get(folder) {
+            return Ok(*epoch);
+        }
+        let epoch = ctx.engine.snapshot(folder)?.uid_validity;
+        self.0.insert(folder.to_owned(), epoch);
+        Ok(epoch)
+    }
 }
 
 fn writes_allowed(ctx: &PassContext, map: &FolderMap) -> bool {
@@ -249,7 +277,8 @@ fn recover_flag(
     }
 }
 
-/// Both ends of a move intent: the target and its current epoch.
+/// Both ends of a move intent: the target and the epochs both ends are in
+/// this recovery call.
 struct Ends<'i> {
     target: &'i str,
     target_epoch: u64,
@@ -261,6 +290,7 @@ fn recover_move(
     store: &mut Store,
     ctx: &PassContext,
     map: &FolderMap,
+    epochs: &mut Epochs,
     intent: &Intent,
     summary: &mut FilingSummary,
 ) -> Result<()> {
@@ -275,8 +305,8 @@ fn recover_move(
     let ends = Ends {
         target,
         target_epoch,
-        t_now: ctx.engine.snapshot(target)?.uid_validity,
-        f_now: ctx.engine.snapshot(&intent.folder)?.uid_validity,
+        t_now: epochs.of(ctx, target)?,
+        f_now: epochs.of(ctx, &intent.folder)?,
     };
     match intent.state.as_str() {
         "sent" => recover_sent(store, ctx, intent, &ends, summary),
@@ -619,6 +649,8 @@ fn retry_or_supersede(
         Seen::Mismatch => return mismatch_wait(&from.folder, summary),
         Seen::Absent | Seen::EpochChanged => return Ok(()),
     }
+    // Fresh, not from `Epochs`: `target_uid_next` bounds where the retried
+    // move arrives and the race window (spec "Moves" step 2).
     let snapshot = ctx.engine.snapshot(&target)?;
     if !target_watched(store, ctx, &target, snapshot.uid_validity)? {
         return Ok(());
