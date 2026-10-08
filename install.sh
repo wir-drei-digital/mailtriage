@@ -217,7 +217,9 @@ main() {
     esac
   done
   # A literal ~ (a quoted --dir or MAILTRIAGE_INSTALL_DIR) means HOME; the
-  # patterns are quoted, so the shell does not expand them itself.
+  # patterns are quoted, so the shell does not expand them itself (hence
+  # SC2088 is off here).
+  # shellcheck disable=SC2088
   case "$dir" in
     '~' | '~/'*)
       [ -n "${HOME:-}" ] || refuse "HOME is not set; pass --dir without ~"
