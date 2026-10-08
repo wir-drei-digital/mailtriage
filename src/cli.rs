@@ -330,6 +330,8 @@ enum FilingCommand {
     Adopt(FolderArg),
     /// Recent filing events, newest first.
     Log(LogArg),
+    /// Answered mail filed unread by the reply queue; `--approve` marks it read.
+    Replies(RepliesArg),
 }
 
 #[derive(Subcommand)]
@@ -374,6 +376,18 @@ struct EnableArg {
     /// or marked done (default: keep the configured value).
     #[arg(long, value_parser = ["on", "off"])]
     reply_queue: Option<String>,
+}
+
+#[derive(Args)]
+struct RepliesArg {
+    #[arg(long)]
+    account: String,
+    /// Mark the listed mail read on the next pass (all, or each `--id`).
+    #[arg(long)]
+    approve: bool,
+    /// Only this message (repeatable); needs `--approve`.
+    #[arg(long, requires = "approve")]
+    id: Vec<String>,
 }
 
 #[derive(Args)]
@@ -781,6 +795,7 @@ fn filing(config: &Path, command: &FilingCommand) -> Result<Value, CliError> {
         FilingCommand::Dismiss(arg) => service.filing_dismiss(&arg.account, arg.arrival),
         FilingCommand::Adopt(arg) => service.filing_adopt(&arg.account, &arg.folder),
         FilingCommand::Log(arg) => service.filing_log(&arg.account, arg.id.as_deref(), arg.limit),
+        FilingCommand::Replies(arg) => service.filing_replies(&arg.account, arg.approve, &arg.id),
     }
     .map_err(service_error)
 }

@@ -27,6 +27,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 pub enum FakeOp {
     Move,
     Flag,
+    /// `add_seen` (reply queue).
+    Seen,
     Create,
     Subscribe,
 }
@@ -629,34 +631,15 @@ impl MailEngine for FakeEngine {
     }
 
     fn move_messages(&self, folder: &str, uids: &[u64], target: &str) -> Result<WriteOutcome> {
-        self.move_with(folder, uids, target, false)
-    }
-
-    fn move_messages_seen(&self, folder: &str, uids: &[u64], target: &str) -> Result<WriteOutcome> {
-        self.move_with(folder, uids, target, true)
+        self.move_with(folder, uids, target)
     }
 
     fn add_flagged(&self, folder: &str, uids: &[u64]) -> Result<WriteOutcome> {
-        let mut s = self.state();
-        let call = format!("flag {folder} {}", raw::uid_set(uids));
-        s.validate(&call, &[folder], Some(uids))?;
-        s.enter(Some(FakeOp::Flag), call, &[folder])?;
-        let fault = s.take_fault(FakeOp::Flag);
-        let Some(epoch) = s.select(folder, fault)? else {
-            return Ok(WriteOutcome::default());
-        };
-        for m in &mut s.folder(folder).msgs {
-            if uids.contains(&m.uid) {
-                m.flags.insert("\\Flagged".into());
-            }
-        }
-        let out = WriteOutcome {
-            selected: true,
-            session_epoch: Some(epoch),
-            completed: fault != Some(Fault::PartialCopy),
-            copyuid: None,
-        };
-        respond(out, fault)
+        self.store_flag(folder, uids, ("flag", FakeOp::Flag, "\\Flagged"))
+    }
+
+    fn add_seen(&self, folder: &str, uids: &[u64]) -> Result<WriteOutcome> {
+        self.store_flag(folder, uids, ("seen", FakeOp::Seen, "\\Seen"))
     }
 
     fn set_watch_scope(&self, folders: &[String]) {
@@ -677,31 +660,44 @@ impl MailEngine for FakeEngine {
 }
 
 impl FakeEngine {
-    /// `move_messages`, and with `seen` the reply exit's `\\Seen` STORE
-    /// first (in the same selected session, whatever the MOVE then does).
-    fn move_with(
+    /// `add_flagged` and `add_seen`: SELECT, then `+FLAGS.SILENT (flag)`.
+    fn store_flag(
         &self,
         folder: &str,
         uids: &[u64],
-        target: &str,
-        seen: bool,
+        (verb, op, flag): (&str, FakeOp, &str),
     ) -> Result<WriteOutcome> {
         let mut s = self.state();
-        let verb = if seen { "move_seen" } else { "move" };
-        let call = format!("{verb} {folder} {} -> {target}", raw::uid_set(uids));
+        let call = format!("{verb} {folder} {}", raw::uid_set(uids));
+        s.validate(&call, &[folder], Some(uids))?;
+        s.enter(Some(op), call, &[folder])?;
+        let fault = s.take_fault(op);
+        let Some(epoch) = s.select(folder, fault)? else {
+            return Ok(WriteOutcome::default());
+        };
+        for m in &mut s.folder(folder).msgs {
+            if uids.contains(&m.uid) {
+                m.flags.insert(flag.into());
+            }
+        }
+        let out = WriteOutcome {
+            selected: true,
+            session_epoch: Some(epoch),
+            completed: fault != Some(Fault::PartialCopy),
+            copyuid: None,
+        };
+        respond(out, fault)
+    }
+
+    fn move_with(&self, folder: &str, uids: &[u64], target: &str) -> Result<WriteOutcome> {
+        let mut s = self.state();
+        let call = format!("move {folder} {} -> {target}", raw::uid_set(uids));
         s.validate(&call, &[folder, target], Some(uids))?;
         s.enter(Some(FakeOp::Move), call, &[folder, target])?;
         let fault = s.take_fault(FakeOp::Move);
         let Some(epoch) = s.select(folder, fault)? else {
             return Ok(WriteOutcome::default());
         };
-        if seen {
-            for m in &mut s.folder(folder).msgs {
-                if uids.contains(&m.uid) {
-                    m.flags.insert("\\Seen".into());
-                }
-            }
-        }
         let mut out = WriteOutcome {
             selected: true,
             session_epoch: Some(epoch),

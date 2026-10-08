@@ -324,3 +324,14 @@ pub fn rfc_message_id(env: &SourceEnvelope) -> Option<String> {
         .filter(|s| !s.is_empty())
         .map(str::to_string)
 }
+
+/// Reply queue spec: an answered message mailtriage filed, waiting for the
+/// user to approve its read state (`approved_at`), and when `\Seen` was
+/// added (`applied_at`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ReadApproval {
+    pub message_id: String,
+    pub requested_at: String,
+    pub approved_at: Option<String>,
+    pub applied_at: Option<String>,
+}

@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 /// Schema migrations: (version reached, SQL). Each runs in its own
 /// `BEGIN IMMEDIATE` transaction that re-reads `user_version` first.
-const MIGRATIONS: [(u32, &str); 8] = [
+const MIGRATIONS: [(u32, &str); 9] = [
     (
         1,
         "CREATE TABLE metadata(key TEXT PRIMARY KEY, value INTEGER NOT NULL);
@@ -111,6 +111,13 @@ UPDATE placements SET filed_home_folder=home_folder,filed_home_epoch=home_epoch,
         8,
         "ALTER TABLE pass_heartbeats ADD COLUMN reason TEXT;
 ALTER TABLE pass_heartbeats ADD COLUMN reason_at TEXT;",
+    ),
+    // Reply queue: answered mail that mailtriage filed, waiting for the
+    // user to approve its read state; a new table, so processes of the
+    // previous release are unaffected.
+    (
+        9,
+        "CREATE TABLE read_approvals(account TEXT NOT NULL, message_id TEXT NOT NULL, requested_at TEXT NOT NULL, approved_at TEXT, applied_at TEXT, PRIMARY KEY(account, message_id));",
     ),
 ];
 

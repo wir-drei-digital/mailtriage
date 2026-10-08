@@ -727,7 +727,9 @@ impl Service {
             let plan = filing::refile::plan_pass(store, ctx, map, preview, summary)?;
             summary.planned = plan.actions.len();
             summary.awaiting_reply = plan.awaiting_reply.len();
-            filing::apply::apply(store, ctx, map, &plan, summary)
+            let dropped = filing::apply::apply(store, ctx, map, &plan, summary)?;
+            filing::reply::apply_reads(store, ctx, map, summary)?;
+            Ok(dropped)
         })();
         match result {
             Ok(dropped) => Ok(dropped),
@@ -1415,6 +1417,7 @@ impl Service {
         }
         let refile_candidates =
             refile::command::candidate_total(&self.store, name, &account, &generation)?;
+        let reads = self.store.read_approvals(name, true)?;
         let awaiting_reply = if account.filing.reply_queue {
             self.offline_plan(name, &account, &generation)?
                 .awaiting_reply
@@ -1450,9 +1453,61 @@ impl Service {
             "reply_queue": account.filing.reply_queue,
             "awaiting_reply": awaiting_reply.len(),
             "awaiting_reply_ids": listed(&awaiting_reply),
+            "read_waiting": reads.iter().filter(|r| r.approved_at.is_none()).count(),
+            "read_approved_pending": reads.iter().filter(|r| r.approved_at.is_some()).count(),
             "alias_conflicts": map.alias_conflicts,
             "problems": last_pass.get("problems").cloned().unwrap_or(json!([])),
             "last_pass": last_pass,
+        }))
+    }
+    /// `filing replies`: answered mail the reply queue filed unread, waiting
+    /// for the user's approval of its read state. With `approve`, every
+    /// waiting message (or each of `ids`) is approved; the next live pass
+    /// adds `\Seen`. An id that is not waiting fails with exit code 2 and
+    /// approves nothing.
+    pub fn filing_replies(&mut self, name: &str, approve: bool, ids: &[String]) -> Result<Value> {
+        self.ensure(name)?;
+        let mut approved = Vec::new();
+        if approve {
+            let waiting: BTreeSet<String> = self
+                .store
+                .read_approvals(name, true)?
+                .into_iter()
+                .filter(|r| r.approved_at.is_none())
+                .map(|r| r.message_id)
+                .collect();
+            if let Some(unknown) = ids.iter().find(|id| !waiting.contains(*id)) {
+                return Err(err(2, format!("not waiting for read approval: {unknown}")));
+            }
+            let only = (!ids.is_empty()).then_some(ids);
+            approved = self.store.approve_reads(name, only, &now())?;
+        }
+        let mut items = Vec::new();
+        for r in self.store.read_approvals(name, true)? {
+            let Some(row) = self.store.record(name, &r.message_id)? else {
+                continue;
+            };
+            let placement = self.store.placement(name, &r.message_id)?;
+            let meta = self.store.message_meta(name, &r.message_id)?;
+            let flags = meta.map(|m| m.flags).unwrap_or_default();
+            items.push(json!({
+                "id": r.message_id,
+                "subject": row.envelope.get("subject"),
+                "from": row.envelope.get("from"),
+                "folder": placement.and_then(|p| p.home_folder),
+                "answered": flags.iter().any(|f| f.eq_ignore_ascii_case("\\Answered")),
+                "requested_at": r.requested_at,
+                "approved_at": r.approved_at,
+            }));
+        }
+        let waiting = items.iter().filter(|i| i["approved_at"].is_null()).count();
+        Ok(json!({
+            "schema_version": 1,
+            "account": name,
+            "waiting": waiting,
+            "approved_pending": items.len() - waiting,
+            "approved": approved,
+            "items": items,
         }))
     }
     /// `filing plan`: the planner over stored state as a preview, with the

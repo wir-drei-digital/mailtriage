@@ -32,7 +32,8 @@ pub struct FilingSummary {
     pub unresolved: usize,
     pub folders_created: usize,
     pub hydrated: usize,
-    /// Reply queue spec: held messages this pass, and reply exits moved.
+    /// Reply queue spec: held messages this pass, and reply exits claimed
+    /// (moved unread, waiting in the read approval list).
     #[serde(skip_serializing_if = "is_zero")]
     pub awaiting_reply: usize,
     #[serde(skip_serializing_if = "is_zero")]
@@ -40,6 +41,9 @@ pub struct FilingSummary {
     /// Held messages whose flags were read again this pass.
     #[serde(skip_serializing_if = "is_zero")]
     pub replies_checked: usize,
+    /// Approved messages that got `\Seen` this pass.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub reads_applied: usize,
     pub errors: usize,
     /// Codes only, never message text.
     pub problems: Vec<String>,

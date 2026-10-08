@@ -2,8 +2,9 @@
 
 Date: 2026-10-08
 Status: Implemented on branch `feature/reply-queue`. Open questions were
-decided by Michael on 2026-10-08; the implementation is simpler than the
-first draft (no new database state, no new intent kind), see "Implementation".
+decided by Michael on 2026-10-08. The same day he asked for the read state
+to wait for his approval ("Read approval"); the implementation needs no new
+intent kind, and only the read approval list adds a table (SQLite v9).
 Builds on: [IMAP category filing](2026-10-04-imap-category-filing-design.md),
 [Filing refile](2026-10-06-filing-refile-design.md)
 
@@ -12,8 +13,9 @@ Builds on: [IMAP category filing](2026-10-04-imap-category-filing-design.md),
 The inbox should show only the mail that still needs an answer. Mail that
 needs a reply stays where the user works. Everything else goes straight to its
 category folder. Once the user has answered, mailtriage moves the message to
-its category folder and marks it read. The user then sees at a glance what is
-still open, in any mail client, phone included.
+its category folder, unread, and lists it for the user's approval; only an
+approved message is marked read. The user then sees at a glance what is still
+open, in any mail client, phone included.
 
 ## Decisions
 
@@ -24,9 +26,10 @@ still open, in any mail client, phone included.
 | Flag | With the queue on, only high urgency gets the `\Flagged` attempt; the inbox itself shows what needs action. |
 | Everything else | Unchanged: moved once to its category folder. |
 | Reply signal | The IMAP `\Answered` flag on the held message. Mail clients set it when the user replies from that client. |
-| Exit | A held message observed with `\Answered` gets `\Seen` and is moved to its category folder. |
+| Exit | A held message observed with `\Answered` is moved to its category folder at once, **unread**, and enters the read approval list. |
+| Read approval | `mailtriage filing replies` lists that mail; `--approve` (all, or each `--id`) lets the next pass add `\Seen`. |
 | Manual exits | `mailtriage done --id` on a held message triggers the same exit. A client move into a category folder still counts as a correction plus exit. Archiving still means done. |
-| Read state | mailtriage **adds** `\Seen` only at the reply exit. It still never removes `\Seen` and never removes a flag. |
+| Read state | mailtriage **adds** `\Seen` only to answered mail the user approved. It still never removes `\Seen` and never removes a flag. |
 | Off switch | `filing.reply_queue: false` (the default) keeps today's behaviour exactly. |
 | Invoices | A payment sets no `\Answered`; a paid invoice leaves the queue with `done`. |
 | Existing mail | Only new mail is held. Mail in INBOX before filing was enabled is left alone, and backfilled mail files as before. |
@@ -76,47 +79,72 @@ reading every config that does not. Turn it on with
    move to the category folder is a **reply exit**, listed in
    `Plan.reply_exits`. Held messages are listed in `Plan.awaiting_reply`.
 3. **Apply.** Reply exits form their own batches (the batch key gains a
-   reply-exit bit) and go through `MailEngine::move_messages_seen`:
-   `a1 SELECT folder; s1 UID STORE uids +FLAGS.SILENT (\Seen); a2 UID MOVE
-   uids target` in one session. The STORE runs while the UIDs are still
-   valid, and `a2` stays the MOVE that the outcome mapping reads. The
-   intent, journal, verification, race handling and recovery are those of
-   every move.
-4. **Retries.** A reply exit that is retried by recovery moves with
-   `move_messages`, without `\Seen`: the read state is added at most once,
-   in the first attempt's session.
+   reply-exit bit) and move like every move: same intent, journal,
+   verification, race handling and recovery. Each claimed reply exit enters
+   the read approval list (`Store::request_read_approval`, once per
+   message).
+4. **Read.** After the moves, `filing::reply::apply_reads` adds `\Seen` to
+   every approved message that is not read yet, in its current home: known,
+   unblocked, not being moved, its folder unpaused and in its discovery
+   epoch. Right before the write it reads the UIDs' envelopes and keeps only
+   those whose Message-ID still matches; a message that already carries
+   `\Seen` is recorded without a write. The write is
+   `MailEngine::add_seen`: `a1 SELECT folder; a2 UID STORE uids
+   +FLAGS.SILENT (\Seen)`. An incomplete write or another epoch leaves the
+   rows for the next pass (`read_incomplete:<folder>`,
+   `read_failed:<folder>`). Adding `\Seen` twice is harmless, so the rows
+   need no intent.
 
 A message whose decision changes to "no action" while held files like any
-new mail, without `\Seen`. A held message whose category targets `INBOX`
+new mail and does not enter the list. A held message whose category targets `INBOX`
 stays where it is.
 
 ### Manual paths
 
-- **`done --id`** on a held message is a reply exit on the next pass. This
-  covers replies sent from elsewhere (Hermes, `icm-pim mail reply`, a phone
-  app that does not set `\Answered`), paid invoices, and "no answer needed".
-- **A client move into a category folder** is a correction, as today. No
-  `\Seen` is added.
+- **`done --id`** on a held message is a reply exit on the next pass and
+  enters the list like an answered one. This covers replies sent from
+  elsewhere (Hermes, `icm-pim mail reply`, a phone app that does not set
+  `\Answered`), paid invoices, and "no answer needed".
+- **A client move into a category folder** is a correction, as today. It
+  does not enter the list.
 - **A client move into a non-watched folder** (archive, `INBOX/Done`) is done
   inference, as today.
 - **`filing pin --id`** keeps a held message in the inbox, even after
   `\Answered`.
 
+### Read approval
+
+```sh
+mailtriage filing replies --account work            # the list
+mailtriage filing replies --account work --approve  # approve all
+mailtriage filing replies --account work --approve --id ID --id ID
+```
+
+The list holds every reply exit whose `\Seen` is not added yet: `id`,
+`subject`, `from`, `folder` (its known home; it shows the source folder until
+the next pass confirms the move), `answered` (`false` for a `done` exit),
+`requested_at` and `approved_at`. `waiting` counts the unapproved rows,
+`approved_pending` the approved ones the next live pass reads, and
+`approved` names the ids this call approved. An `--id` that is not waiting
+fails with exit code 2 and approves nothing; `--id` needs `--approve`.
+
 ### Visibility
 
 - `sync` (and the stored last pass): `filing.awaiting_reply`,
-  `filing.reply_exits` and `filing.replies_checked`, each only when not 0.
-- `filing status`: `reply_queue`, `awaiting_reply` and `awaiting_reply_ids`.
+  `filing.reply_exits`, `filing.replies_checked` and `filing.reads_applied`,
+  each only when not 0.
+- `filing status`: `reply_queue`, `awaiting_reply`, `awaiting_reply_ids`,
+  `read_waiting` and `read_approved_pending`.
 - `filing plan`: a reply exit's move carries `"reason": "reply_exit"`.
 - `filing enable`: the result carries `reply_queue`.
 
 ## Safety invariants (amendments)
 
 - **Invariant 1:** "no `\Seen` change" becomes "never removes `\Seen`; adds
-  it only in the first attempt of a reply exit, in the MOVE's session". The
-  engine trait has exactly one new method, `move_messages_seen`.
-  tests/engine_contract.rs pins its exact text, and `assert_no_forbidden`
-  now accepts `Seen` only in that form.
+  it only to answered mail the user approved". The engine trait has exactly
+  one new method, `add_seen`. tests/engine_contract.rs pins its exact text,
+  and `assert_no_forbidden` now accepts `Seen` only in a STORE without a
+  MOVE.
 - **Invariant 3:** unchanged. A reply exit is an ordinary move intent.
 - **Invariant 4:** unchanged. A reply exit leaves a source folder.
 - **Invariant 7:** unchanged. A held message is moved once, at the exit.
@@ -131,9 +159,11 @@ The other invariants are untouched.
 | CLI | `filing enable --reply-queue on\|off`; `Service::filing_enable_with`. |
 | Planner | `PlanInput.reply_queue`, `PlanMessage.done`, `holds`, `reply_done`, `MoveDecision::{Held, ReplyExit}`, `Plan.{reply_exits, awaiting_reply}`; the flag rule drops "action required" with the queue on. |
 | Flags | `filing/reply.rs` (`refresh_flags`), called by `refile::plan_pass` before the planner; reuses `Store::hydrate`. |
-| Engine | `MailEngine::move_messages_seen` (Himalaya, fake, offline). |
-| Apply | Reply-exit batches; `dispatch_moves` takes the reply-exit bit; recovery retries pass `false`. |
-| State | No migration: holding is recomputed every pass from placement, effective decision, flags and review state. |
+| Engine | `MailEngine::add_seen` (Himalaya, fake with `FakeOp::Seen`, offline). |
+| Apply | Reply-exit batches; a claimed reply exit calls `Store::request_read_approval`. |
+| Read | `filing::reply::apply_reads`, after `apply` in `plan_and_apply`. |
+| CLI | `filing replies [--approve [--id ID]...]`; `Service::filing_replies`. |
+| State | Holding is recomputed every pass from placement, effective decision, flags and review state. SQLite v9 adds `read_approvals(account, message_id, requested_at, approved_at, applied_at)`; a new table, so processes of the previous release are unaffected, but a binary before v9 refuses the database. |
 
 ## Option B: a separate queue folder
 
@@ -172,15 +202,18 @@ job that reads `mailtriage list --json`) before the job is switched off.
 - Planner unit tests (planner.rs): hold, answered exit, done exit, flag only
   high, only new, current or override, unpinned, decision change files
   without `\Seen`, inbox category stays.
-- tests/reply_queue.rs (fake engine, real passes): answered mail leaves read
-  and filed while unanswered mail waits quietly; done files read; mail
-  without action is unchanged and unread; dry run previews `reply_exit` with
-  no writes; a lost response converges with one write; a failed exit is
-  retried without `\Seen`.
-- tests/engine_contract.rs: the exact `move_messages_seen` text.
+- tests/reply_queue.rs (fake engine, real passes): answered mail is filed
+  unread and read only after approval, while unanswered mail waits quietly;
+  approval of single ids and refusal of unknown ones; done files unread for
+  approval; mail without action is unchanged and unread; dry run previews
+  `reply_exit` with no writes; a lost move response converges with one move;
+  a failed read write is retried on the next pass.
+- tests/engine_contract.rs: the exact `add_seen` text.
 - tests/config_v2.rs: the queue alone makes a config schema 4.
-- Still open: the Dovecot end-to-end run and the provider check on
-  Infomaniak. On 2026-10-08, 54 of the 329 INBOX messages of
+- Dovecot e2e (flat and prefix), step 6: held unread and unflagged in INBOX,
+  `\Answered`, filed to Transactions unread, listed, approved, then `\Seen`
+  with `\Answered` kept.
+- Still open: the provider check on Infomaniak. On 2026-10-08, 54 of the 329 INBOX messages of
   `michael@wirdrei.digital` carried `\Answered`, so the clients in use set
   it; which ones (webmail, the Infomaniak Mail app) and whether replies via
   Himalaya or icm-pim set it is still to check.
@@ -192,7 +225,7 @@ The following docs need updates:
 - README ("never changes the read state");
 - guide.md:24, the "What is moved and flagged" and "Safety rules" sections,
   and a new "Reply queue" section;
-- service-api.md (new fields and events, schema v9);
+- service-api.md (new fields, `filing replies`, schema v9);
 - verification.md (new rows);
 - the filing spec's invariants list (a pointer to this spec).
 
@@ -203,6 +236,8 @@ The following docs need updates:
 3. Existing mail: only new mail is held.
 4. Hermes: mailtriage replaces the Hermes job for `michael@`.
 5. Sent-folder detection stays out of scope for now.
+6. Read state: answered mail is filed at once but stays unread until the
+   user approves it with `filing replies --approve` (all, or single ids).
 
 ## Out of scope
 

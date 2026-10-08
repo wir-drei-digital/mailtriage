@@ -23,7 +23,8 @@ const BATCH: usize = 100;
 /// Step 9 in `live`: clears satisfied explicit requests, consumes the flag
 /// attempt of already-flagged messages, then claims and applies flags (per
 /// folder and epoch) and moves (per folder, epoch, target, and whether they
-/// are reply exits that add `\Seen`) in batches of at most 100. Nothing happens unless writes are allowed. Returns the
+/// are reply exits, whose claims enter the read approval list) in batches of
+/// at most 100. Nothing happens unless writes are allowed. Returns the
 /// messages whose UID batch verification dropped (absent, or another
 /// Message-ID or size), for placement re-evaluation.
 pub fn apply(
@@ -67,13 +68,13 @@ pub fn apply(
         )),
         Action::Flag { .. } => None,
     });
-    for ((folder, epoch, to, seen), actions) in &moves {
+    for ((folder, epoch, to, reply_exit), actions) in &moves {
         for chunk in actions.chunks(BATCH) {
             let batch = move_batch(
                 store,
                 ctx,
                 map,
-                (folder, *epoch, to, *seen),
+                (folder, *epoch, to, *reply_exit),
                 chunk,
                 &plan.refile_moves,
                 &mut dropped,
@@ -447,14 +448,14 @@ pub(crate) fn race_problem(folder: &str, summary: &mut FilingSummary) {
 }
 
 /// One move batch: verify, snapshot the target, claim (a refile move as
-/// one, checked again right after its claim), dispatch (with `\Seen` for a
-/// batch of reply exits).
+/// one, checked again right after its claim), dispatch. A claimed reply exit
+/// enters the read approval list (reply queue spec).
 #[allow(clippy::too_many_arguments)] // One move batch with its pass context.
 fn move_batch(
     store: &mut Store,
     ctx: &PassContext,
     map: &FolderMap,
-    (folder, epoch, to, seen): (&str, u64, &str, bool),
+    (folder, epoch, to, reply_exit): (&str, u64, &str, bool),
     actions: &[&Action],
     refile: &BTreeSet<String>,
     dropped: &mut Vec<String>,
@@ -492,12 +493,18 @@ fn move_batch(
         if consumes_refile && refile_cancelled(store, ctx, map, id, locator(action))? {
             continue;
         }
+        if reply_exit {
+            store.request_read_approval(ctx.account, action.message_id(), &at)?;
+        }
         claimed.push((id, locator(action).uid));
     }
     if claimed.is_empty() {
         return Ok(());
     }
-    dispatch_moves(store, ctx, (folder, epoch, to, seen), &claimed, summary)?;
+    dispatch_moves(store, ctx, folder, epoch, to, &claimed, summary)?;
+    if reply_exit {
+        summary.reply_exits += claimed.len();
+    }
     Ok(())
 }
 
@@ -535,24 +542,20 @@ pub(crate) fn target_watched(
     Ok(store.discovery_epoch(ctx.account, target)? == Some(epoch))
 }
 
-/// One `move_messages` session (`move_messages_seen` for reply exits) for
-/// claimed intents `(intent id, UID)` verified in `folder`/`epoch`, mapped
-/// per spec "Moves" step 4. Every engine or outcome failure leaves the
-/// intents `uncertain` for recovery.
+/// One `move_messages` session for claimed intents `(intent id, UID)` verified
+/// in `folder`/`epoch`, mapped per spec "Moves" step 4. Every engine or
+/// outcome failure leaves the intents `uncertain` for recovery.
 pub(crate) fn dispatch_moves(
     store: &mut Store,
     ctx: &PassContext,
-    (folder, epoch, target, seen): (&str, u64, &str, bool),
+    folder: &str,
+    epoch: u64,
+    target: &str,
     claimed: &[(i64, u64)],
     summary: &mut FilingSummary,
 ) -> Result<()> {
     let uids: Vec<u64> = claimed.iter().map(|c| c.1).collect();
-    let sent = if seen {
-        ctx.engine.move_messages_seen(folder, &uids, target)
-    } else {
-        ctx.engine.move_messages(folder, &uids, target)
-    };
-    let outcome = match sent {
+    let outcome = match ctx.engine.move_messages(folder, &uids, target) {
         Ok(o) => o,
         Err(e) => {
             set_all(store, ctx, claimed, "uncertain", "dispatch_error")?;
@@ -601,9 +604,6 @@ pub(crate) fn dispatch_moves(
     }
     if outcome.completed {
         summary.moved += claimed.len();
-        if seen {
-            summary.reply_exits += claimed.len();
-        }
     } else {
         summary.errors += 1;
         summary.problems.push(format!("move_incomplete:{folder}"));

@@ -83,6 +83,7 @@ ALTER TABLE folders DROP COLUMN drain_until_uid;
 ALTER TABLE pass_heartbeats DROP COLUMN version;
 ALTER TABLE pass_heartbeats DROP COLUMN reason;
 ALTER TABLE pass_heartbeats DROP COLUMN reason_at;
+DROP TABLE read_approvals;
 PRAGMA user_version=5;";
 
 /// One placement per migration case, with its move intents (ids ascend in

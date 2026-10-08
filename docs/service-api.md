@@ -498,7 +498,7 @@ Apply result: `{"schema_version":1,"account":"work","marked":N,"waiting_marked":
 
 Errors: 2 for `--apply` outside `live` (`refile --apply requires filing mode live`), an unknown category, a folder that names no category or retired folder (`unknown folder: not a category or retired folder`) or several (`folder name matches several folders; pass the native name: A, B`), a limit outside 1..=500, an unknown account; 3 when the state database is unavailable; 5 when `mailtriage.json` changed (`reason: config_changed`) or the placements kept changing (`placements changed concurrently; retry`).
 
-Schema v6 (migration 6): `placements.refile_once`, `placements.filed_home_folder`/`filed_home_epoch`/`filed_home_uid` (the occurrence a COPYUID-proven mailtriage move produced; kept only while it is the known home), `filing_intents.consumes_refile`, `folders.drain_until_uid` (NULL: frozen; 0: retained in the last pass; N: draining until UID N). The newer-schema guard is the public `store::LATEST` (8 since schema v8, below).
+Schema v6 (migration 6): `placements.refile_once`, `placements.filed_home_folder`/`filed_home_epoch`/`filed_home_uid` (the occurrence a COPYUID-proven mailtriage move produced; kept only while it is the known home), `filing_intents.consumes_refile`, `folders.drain_until_uid` (NULL: frozen; 0: retained in the last pass; N: draining until UID N). The newer-schema guard is the public `store::LATEST` (9 since schema v9, see "Reply queue").
 
 Also: `filing status` gains `refile_marked` and `refile_candidates`; `categories apply` gains `hint` (null with filing `off`); `filing plan` refile moves carry `"reason":"refile"`; events `refile_marked`, `refile_cleared {reason}`, `refile_cancelled {intent_id, reason}`, and `moved` with `"reason":"refile"`.
 
@@ -540,17 +540,28 @@ that needs action in its source folder until it is answered or marked done
 (spec: `docs/superpowers/specs/2026-10-08-reply-queue-design.md`). A config
 that turns it on is written as `schema_version` 4; every other config stays
 3. `config::SCHEMA_VERSION` (4) is the newest schema a binary reads;
-`config::written_schema` is the one a write produces. There is no database
-migration.
+`config::written_schema` is the one a write produces.
+
+Schema v9 (migration 9) adds the table `read_approvals(account, message_id,
+requested_at, approved_at, applied_at)`, the read approval list. A claimed
+reply exit enters it once (`Store::request_read_approval`);
+`Store::approve_reads` sets `approved_at`, and a live pass sets `applied_at`
+after adding `\Seen` (`Store::mark_read_applied`). `store::LATEST` is 9.
 
 - `filing enable --reply-queue on|off` (`Service::filing_enable_with`); the
   result gains `reply_queue`.
 - `filing status` gains `reply_queue`, `awaiting_reply` and
   `awaiting_reply_ids` (up to 50).
+- `filing status` also gains `read_waiting` and `read_approved_pending`.
 - The sync `filing` object (and the stored last pass) gains
-  `awaiting_reply`, `reply_exits` and `replies_checked`, each only when not 0.
+  `awaiting_reply`, `reply_exits`, `replies_checked` and `reads_applied`,
+  each only when not 0; problems `reply_check_failed:<folder>`,
+  `read_failed:<folder>` and `read_incomplete:<folder>`.
+- `filing replies [--approve [--id ID]...]` (`Service::filing_replies`):
+  `{"schema_version":1,"account":"work","waiting":W,"approved_pending":A,"approved":[ids],"items":[{"id","subject","from","folder","answered","requested_at","approved_at"}]}`.
+  An `--id` that is not waiting is exit code 2 and approves nothing.
 - `filing plan`: a reply exit's move carries `"reason":"reply_exit"`.
-- `MailEngine::move_messages_seen(folder, uids, target)`: one session
-  `a1 SELECT; s1 UID STORE uids +FLAGS.SILENT (\Seen); a2 UID MOVE uids
-  target`, with the outcome of the MOVE as for `move_messages`.
+- `MailEngine::add_seen(folder, uids)`: one session `a1 SELECT; a2 UID
+  STORE uids +FLAGS.SILENT (\Seen)`, with the outcome mapping of
+  `add_flagged`.
 

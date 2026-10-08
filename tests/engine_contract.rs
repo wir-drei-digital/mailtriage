@@ -109,12 +109,12 @@ fn assert_no_forbidden(f: &Fixture) {
         ] {
             assert!(!joined.contains(bad), "forbidden {bad:?} in {joined:?}");
         }
-        // `\Seen` is only ever added, and only right before a reply exit's MOVE.
+        // `\Seen` is only ever added, in a STORE of its own (approved reads).
         if joined.contains("Seen") {
             assert_eq!(joined.matches("Seen").count(), 1, "{joined:?}");
-            assert!(joined.contains("s1 UID STORE"), "{joined:?}");
+            assert!(joined.contains("a2 UID STORE"), "{joined:?}");
             assert!(joined.contains("+FLAGS.SILENT (\\Seen)"), "{joined:?}");
-            assert!(joined.contains("a2 UID MOVE"), "{joined:?}");
+            assert!(!joined.contains("MOVE"), "{joined:?}");
         }
     }
 }
@@ -158,15 +158,10 @@ fn flag_store_text() {
     assert_no_forbidden(&f);
 }
 
-fn seen_move_text() {
+fn seen_store_text() {
     let f = fixture("", 5);
-    let out = f
-        .engine
-        .move_messages_seen("INBOX", &[4, 5], "Bills and Receipts")
-        .unwrap();
-    assert!(out.selected && out.completed);
-    assert_eq!(out.session_epoch, Some(7));
-    assert_eq!(out.copyuid.unwrap().pairs, vec![(4, 20), (5, 21)]);
+    let out = f.engine.add_seen("INBOX", &[4, 5]).unwrap();
+    assert!(out.selected && out.completed && out.copyuid.is_none());
     let last = calls(&f).pop().unwrap();
     assert_eq!(
         tail(&last),
@@ -174,7 +169,7 @@ fn seen_move_text() {
             "imap",
             "raw",
             "--",
-            "a1 SELECT \"INBOX\"\r\ns1 UID STORE 4,5 +FLAGS.SILENT (\\Seen)\r\na2 UID MOVE 4,5 \"Bills and Receipts\"\r\n"
+            "a1 SELECT \"INBOX\"\r\na2 UID STORE 4,5 +FLAGS.SILENT (\\Seen)\r\n"
         ]
     );
     assert_no_forbidden(&f);
@@ -337,7 +332,7 @@ fn out_of_scope_folders_are_refused_without_spawning() {
 fn contract() {
     move_quotes_names_with_spaces();
     flag_store_text();
-    seen_move_text();
+    seen_store_text();
     timeout_keeps_partial_select_result();
     capabilities_and_namespace();
     list_folders_accepts_object_or_array_json();

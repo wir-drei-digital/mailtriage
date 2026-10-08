@@ -39,16 +39,20 @@ fn answer(h: &Harness, mid: &str) {
     h.fake.client_set_flag(&folder, uid, "\\Answered", true);
 }
 
-fn seen_moves(h: &Harness) -> usize {
+fn seen_writes(h: &Harness) -> usize {
     h.fake
         .calls()
         .iter()
-        .filter(|c| c.starts_with("move_seen "))
+        .filter(|c| c.starts_with("seen "))
         .count()
 }
 
+fn has(flags: &[String], flag: &str) -> bool {
+    flags.iter().any(|f| f == flag)
+}
+
 #[test]
-fn answered_mail_leaves_the_inbox_read_and_filed() {
+fn answered_mail_is_filed_unread_until_the_user_approves() {
     let h = queued(Live);
     h.sync(); // creates folders
     h.fake
@@ -64,7 +68,7 @@ fn answered_mail_leaves_the_inbox_read_and_filed() {
     assert_eq!(place(&h, "n").0, "Newsletters");
     assert_eq!(place(&h, "i").0, "INBOX");
     assert_eq!(flags(&h, "i"), Vec::<String>::new());
-    assert!(flags(&h, "u").contains(&"\\Flagged".to_string()));
+    assert!(has(&flags(&h, "u"), "\\Flagged"));
 
     let writes = h.fake.write_calls();
     h.sync();
@@ -75,12 +79,33 @@ fn answered_mail_leaves_the_inbox_read_and_filed() {
     assert_eq!(out["filing"]["reply_exits"], 1);
     assert_eq!(out["filing"]["moved"], 1);
     assert_eq!(place(&h, "i").0, "Transactions");
-    let after = flags(&h, "i");
-    assert!(after.contains(&"\\Seen".to_string()), "{after:?}");
-    assert!(after.contains(&"\\Answered".to_string()), "{after:?}");
-    assert_eq!(seen_moves(&h), 1);
+    assert!(has(&flags(&h, "i"), "\\Answered"));
+    assert!(!has(&flags(&h, "i"), "\\Seen"), "unread until approved");
     assert_eq!(place(&h, "u").0, "INBOX", "unanswered mail keeps waiting");
-    assert!(!flags(&h, "u").contains(&"\\Seen".to_string()));
+
+    let writes = h.fake.write_calls();
+    h.sync(); // confirms the move's arrival in Transactions
+    assert_eq!(
+        h.fake.write_calls(),
+        writes,
+        "nothing is read before approval"
+    );
+    let replies = h.service().filing_replies("work", false, &[]).unwrap();
+    assert_eq!(replies["waiting"], 1, "{replies}");
+    let item = &replies["items"][0];
+    assert_eq!(item["id"], id_of(&h, "i").as_str());
+    assert_eq!(item["folder"], "Transactions");
+    assert_eq!(item["answered"], true);
+
+    let approved = h.service().filing_replies("work", true, &[]).unwrap();
+    assert_eq!(approved["approved"].as_array().unwrap().len(), 1);
+    assert_eq!(approved["approved_pending"], 1);
+    let out = h.sync();
+    assert_eq!(out["filing"]["reads_applied"], 1, "{out}");
+    assert!(has(&flags(&h, "i"), "\\Seen"));
+    assert_eq!(seen_writes(&h), 1);
+    let replies = h.service().filing_replies("work", false, &[]).unwrap();
+    assert_eq!(replies["items"].as_array().unwrap().len(), 0);
 
     let writes = h.fake.write_calls();
     h.sync();
@@ -88,11 +113,39 @@ fn answered_mail_leaves_the_inbox_read_and_filed() {
     let status = h.service().filing_status("work").unwrap();
     assert_eq!(status["reply_queue"], true);
     assert_eq!(status["awaiting_reply"], 1);
+    assert_eq!(status["read_waiting"], 0);
     assert!(h.service().store.intents("work", true).unwrap().is_empty());
 }
 
 #[test]
-fn marking_held_mail_done_files_it_read() {
+fn approval_can_name_single_messages_and_refuses_unknown_ones() {
+    let h = queued(Live);
+    h.sync();
+    h.fake
+        .deliver("INBOX", &mail("a", "Invoice", "Please pay by next month"));
+    h.fake
+        .deliver("INBOX", &mail("b", "Invoice", "Payment due next month"));
+    h.sync();
+    answer(&h, "a");
+    answer(&h, "b");
+    h.sync();
+    let a = id_of(&h, "a");
+    assert!(h
+        .service()
+        .filing_replies("work", true, &["msg_unknown".into()])
+        .is_err());
+    let approved = h
+        .service()
+        .filing_replies("work", true, std::slice::from_ref(&a))
+        .unwrap();
+    assert_eq!(approved["approved"], serde_json::json!([a]));
+    h.sync();
+    assert!(has(&flags(&h, "a"), "\\Seen"));
+    assert!(!has(&flags(&h, "b"), "\\Seen"));
+}
+
+#[test]
+fn marking_held_mail_done_files_it_unread_for_approval() {
     let h = queued(Live);
     h.sync();
     h.fake
@@ -102,7 +155,10 @@ fn marking_held_mail_done_files_it_read() {
     h.service().review("work", &id_of(&h, "i"), true).unwrap();
     h.sync();
     assert_eq!(place(&h, "i").0, "Transactions");
-    assert!(flags(&h, "i").contains(&"\\Seen".to_string()));
+    assert!(!has(&flags(&h, "i"), "\\Seen"));
+    let replies = h.service().filing_replies("work", false, &[]).unwrap();
+    assert_eq!(replies["waiting"], 1);
+    assert_eq!(replies["items"][0]["answered"], false);
 }
 
 #[test]
@@ -113,8 +169,9 @@ fn mail_that_needs_no_action_files_as_before_and_stays_unread() {
         .deliver("INBOX", &mail("n", "Weekly newsletter", "Our newsletter"));
     h.sync();
     assert_eq!(place(&h, "n").0, "Newsletters");
-    assert!(!flags(&h, "n").contains(&"\\Seen".to_string()));
-    assert_eq!(seen_moves(&h), 0);
+    assert!(!has(&flags(&h, "n"), "\\Seen"));
+    let replies = h.service().filing_replies("work", false, &[]).unwrap();
+    assert_eq!(replies["items"].as_array().unwrap().len(), 0);
 }
 
 #[test]
@@ -139,7 +196,7 @@ fn dry_run_previews_the_reply_exit_without_writes() {
 }
 
 #[test]
-fn a_lost_reply_exit_response_converges_without_a_second_write() {
+fn a_lost_reply_exit_response_converges_without_a_second_move() {
     let h = queued(Live);
     h.sync();
     h.fake
@@ -150,40 +207,40 @@ fn a_lost_reply_exit_response_converges_without_a_second_write() {
     h.sync();
     h.sync();
     h.sync();
-    assert_eq!(seen_moves(&h), 1);
-    assert_eq!(
-        h.fake
-            .calls()
-            .iter()
-            .filter(|c| c.starts_with("move "))
-            .count(),
-        0,
-        "no plain retry either"
-    );
+    let moves = h
+        .fake
+        .calls()
+        .iter()
+        .filter(|c| c.starts_with("move "))
+        .count();
+    assert_eq!(moves, 1);
     assert_eq!(place(&h, "i").0, "Transactions");
     assert!(h.service().store.intents("work", true).unwrap().is_empty());
+    let replies = h.service().filing_replies("work", false, &[]).unwrap();
+    assert_eq!(replies["waiting"], 1);
 }
 
 #[test]
-fn a_failed_reply_exit_is_retried_without_seen() {
+fn a_failed_read_write_is_retried_on_the_next_pass() {
     let h = queued(Live);
     h.sync();
     h.fake
         .deliver("INBOX", &mail("i", "Invoice", "Payment due next month"));
     h.sync();
     answer(&h, "i");
-    h.fake.inject(FakeOp::Move, Fault::ErrorBefore);
     h.sync();
-    assert_eq!(place(&h, "i").0, "INBOX");
-    h.service()
-        .store
-        .expire_intent_backoff_for_tests("work")
-        .unwrap();
-    h.sync();
-    h.sync();
-    assert_eq!(place(&h, "i").0, "Transactions");
+    h.service().filing_replies("work", true, &[]).unwrap();
+    h.fake.inject(FakeOp::Seen, Fault::ErrorBefore);
+    let out = h.sync();
     assert!(
-        !flags(&h, "i").contains(&"\\Seen".to_string()),
-        "the read state is added at most once, in the first attempt"
+        out["filing"]["problems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p == "read_failed:Transactions"),
+        "{out}"
     );
+    assert!(!has(&flags(&h, "i"), "\\Seen"));
+    h.sync();
+    assert!(has(&flags(&h, "i"), "\\Seen"));
 }

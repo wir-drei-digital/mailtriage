@@ -1,6 +1,6 @@
 //! Narrow Himalaya v2.1.0 IMAP adapter. Its only writes are folder create and
-//! subscribe, UID MOVE, adding \Flagged, and adding \Seen right before a
-//! reply exit's UID MOVE, the last three through `imap raw`.
+//! subscribe, UID MOVE, adding \Flagged, and adding \Seen to approved
+//! answered mail, the last three through `imap raw`.
 use super::{
     raw, ConfigChanged, EngineCapabilities, FolderInfo, MailEngine, WriteOutcome, SPECIAL_USE_ROLES,
 };
@@ -535,16 +535,13 @@ impl MailEngine for Himalaya {
         write_outcome(&self.raw_text(&text)?)
     }
 
-    fn move_messages_seen(&self, folder: &str, uids: &[u64], target: &str) -> Result<WriteOutcome> {
+    fn add_seen(&self, folder: &str, uids: &[u64]) -> Result<WriteOutcome> {
         self.check_mailbox(folder)?;
-        self.check_mailbox(target)?;
         check_write_uids(uids)?;
-        let set = raw::uid_set(uids);
-        // The STORE is tagged `s1` so `a2` stays the MOVE that `write_outcome` reads.
         let text = format!(
-            "a1 SELECT {}\r\ns1 UID STORE {set} +FLAGS.SILENT (\\Seen)\r\na2 UID MOVE {set} {}\r\n",
+            "a1 SELECT {}\r\na2 UID STORE {} +FLAGS.SILENT (\\Seen)\r\n",
             raw::quote_mailbox(folder)?,
-            raw::quote_mailbox(target)?
+            raw::uid_set(uids)
         );
         write_outcome(&self.raw_text(&text)?)
     }

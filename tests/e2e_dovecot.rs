@@ -268,7 +268,8 @@ fn filing_against_real_dovecot() {
     assert_eq!(invoice["placement"]["folder"], "INBOX");
     assert_eq!(invoice["placement"]["pinned"], true);
     // 6. Reply queue: mail that needs action waits in INBOX, unread and
-    // unflagged, until the client sets \Answered; then it is filed read.
+    // unflagged, until the client sets \Answered; then it is filed unread
+    // and gets \Seen only after the user approved it.
     mt(
         &e,
         &[
@@ -302,10 +303,18 @@ fn filing_against_real_dovecot() {
     imap(&e, &["answer", "INBOX", "<q@e2e>"]);
     let out = sync(&e);
     assert_eq!(out["filing"]["reply_exits"], 1, "{out}");
+    sync(&e);
     let filed = only_location(&e, "<q@e2e>");
     assert_eq!(filed.0, folder(&e, "Transactions"));
-    assert!(filed.1.contains(&"\\Seen".to_string()), "{filed:?}");
     assert!(filed.1.contains(&"\\Answered".to_string()), "{filed:?}");
-    sync(&e);
-    assert_eq!(only_location(&e, "<q@e2e>").0, folder(&e, "Transactions"));
+    assert!(!filed.1.contains(&"\\Seen".to_string()), "{filed:?}");
+    let replies = mt(&e, &["filing", "replies", "--account", "work"]);
+    assert_eq!(replies["waiting"], 1, "{replies}");
+    mt(&e, &["filing", "replies", "--account", "work", "--approve"]);
+    let out = sync(&e);
+    assert_eq!(out["filing"]["reads_applied"], 1, "{out}");
+    let read = only_location(&e, "<q@e2e>");
+    assert_eq!(read.0, folder(&e, "Transactions"));
+    assert!(read.1.contains(&"\\Seen".to_string()), "{read:?}");
+    assert!(read.1.contains(&"\\Answered".to_string()), "{read:?}");
 }

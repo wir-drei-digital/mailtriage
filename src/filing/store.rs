@@ -2,7 +2,7 @@
 use super::{
     mode_str, open_states_sql, planner::Action, rfc_message_id, Arrival, CheckpointState,
     FilingStateRow, FilingWrite, FolderRecord, HydrationBatch, Intent, IntentPatch, LocationState,
-    MessageMeta, NewIntent, Placement, Revert, StageOptions,
+    MessageMeta, NewIntent, Placement, ReadApproval, Revert, StageOptions,
 };
 use crate::domain::{FilingMode, MailboxSnapshot, SourceEnvelope};
 use crate::store::{bump, envelope_of, merge_envelope, now, row_record, Record, Store};
@@ -94,6 +94,79 @@ impl Store {
         self.db.execute(
             "INSERT INTO filing_state(account,bootstrap_done) VALUES(?1,?2) ON CONFLICT(account) DO UPDATE SET bootstrap_done=excluded.bootstrap_done",
             params![account, done],
+        )?;
+        Ok(())
+    }
+
+    /// Reply queue: a claimed reply exit enters the read approval list once;
+    /// a repeated claim keeps the first request.
+    pub fn request_read_approval(&mut self, account: &str, id: &str, at: &str) -> Result<()> {
+        self.db.execute(
+            "INSERT OR IGNORE INTO read_approvals(account,message_id,requested_at) VALUES(?1,?2,?3)",
+            params![account, id, at],
+        )?;
+        Ok(())
+    }
+
+    /// The read approval list, oldest request first; with `open_only`, the
+    /// rows whose `\Seen` is not added yet.
+    pub fn read_approvals(&self, account: &str, open_only: bool) -> Result<Vec<ReadApproval>> {
+        let sql = if open_only {
+            "SELECT message_id,requested_at,approved_at,applied_at FROM read_approvals WHERE account=? AND applied_at IS NULL ORDER BY requested_at,message_id"
+        } else {
+            "SELECT message_id,requested_at,approved_at,applied_at FROM read_approvals WHERE account=? ORDER BY requested_at,message_id"
+        };
+        let mut st = self.db.prepare(sql)?;
+        let rows = st
+            .query_map([account], |r| {
+                Ok(ReadApproval {
+                    message_id: r.get(0)?,
+                    requested_at: r.get(1)?,
+                    approved_at: r.get(2)?,
+                    applied_at: r.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Approves the read state of the waiting rows (all, or those in `ids`);
+    /// returns the ids it approved. An id that is not waiting is skipped.
+    pub fn approve_reads(
+        &mut self,
+        account: &str,
+        ids: Option<&[String]>,
+        at: &str,
+    ) -> Result<Vec<String>> {
+        let tx = self.db.transaction()?;
+        let waiting: Vec<String> = {
+            let mut st = tx.prepare(
+                "SELECT message_id FROM read_approvals WHERE account=? AND approved_at IS NULL ORDER BY requested_at,message_id",
+            )?;
+            let rows = st
+                .query_map([account], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        let approved: Vec<String> = waiting
+            .into_iter()
+            .filter(|id| ids.is_none_or(|ids| ids.contains(id)))
+            .collect();
+        for id in &approved {
+            tx.execute(
+                "UPDATE read_approvals SET approved_at=?3 WHERE account=?1 AND message_id=?2",
+                params![account, id, at],
+            )?;
+        }
+        tx.commit()?;
+        Ok(approved)
+    }
+
+    /// Records that `\Seen` was added to an approved message.
+    pub fn mark_read_applied(&mut self, account: &str, id: &str, at: &str) -> Result<()> {
+        self.db.execute(
+            "UPDATE read_approvals SET applied_at=?3 WHERE account=?1 AND message_id=?2",
+            params![account, id, at],
         )?;
         Ok(())
     }
