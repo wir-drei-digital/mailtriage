@@ -171,12 +171,23 @@ jobs:
     permissions:
       contents: read
     env:
-      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
       RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
     steps:
+      # The tap token reaches only this step and the tap's checkout; the
+      # other steps read whether it is set from this step's output.
+      - name: Whether HOMEBREW_TAP_TOKEN is set
+        id: token
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -n "$HOMEBREW_TAP_TOKEN" ]; then
+            echo "has_token=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_token=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ needs.prepare.outputs.sha }}
@@ -197,21 +208,21 @@ jobs:
             echo "go=false" >> "$GITHUB_OUTPUT"
           fi
       - name: Without HOMEBREW_TAP_TOKEN
-        if: steps.highest.outputs.go == 'true' && env.HOMEBREW_TAP_TOKEN == ''
+        if: steps.highest.outputs.go == 'true' && steps.token.outputs.has_token != 'true'
         run: echo "::notice::HOMEBREW_TAP_TOKEN is not set, so the tap was not updated; set it and re-run this job"
       - name: Render the formula
-        if: steps.highest.outputs.go == 'true' && env.HOMEBREW_TAP_TOKEN != ''
+        if: steps.highest.outputs.go == 'true' && steps.token.outputs.has_token == 'true'
         run: |
           set -euo pipefail
           gh release download "$RELEASE_TAG" --pattern SHA256SUMS --dir "$RUNNER_TEMP"
           sh packaging/homebrew/render.sh "$RELEASE_VERSION" "$RUNNER_TEMP/SHA256SUMS" > "$RUNNER_TEMP/mailtriage.rb"
           ruby -c "$RUNNER_TEMP/mailtriage.rb"
       - uses: actions/checkout@v7.0.1
-        if: steps.highest.outputs.go == 'true' && env.HOMEBREW_TAP_TOKEN != ''
+        if: steps.highest.outputs.go == 'true' && steps.token.outputs.has_token == 'true'
         with:
           repository: wir-drei-digital/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: tap
       - name: Commit and push, never backwards
-        if: steps.highest.outputs.go == 'true' && env.HOMEBREW_TAP_TOKEN != ''
+        if: steps.highest.outputs.go == 'true' && steps.token.outputs.has_token == 'true'
         run: bash packaging/homebrew/publish.sh tap "$RUNNER_TEMP/mailtriage.rb" "$RELEASE_VERSION"
