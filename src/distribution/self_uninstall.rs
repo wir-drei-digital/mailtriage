@@ -38,8 +38,9 @@ pub struct Args {
 /// Runs `self uninstall`. Errors carry exit codes: 2 for a Homebrew
 /// installation, no `HOME`, a refused confirmation, or no terminal without
 /// `--yes`; 5 when the installation lock is held for 60 s. A failed service
-/// or tray step removes no program file: the result then carries
-/// `exit_code` 3, which the CLI strips.
+/// or tray step removes no program file, and a file that cannot be removed
+/// keeps `DIR/mailtriage`: the result then carries `exit_code` 3, which the
+/// CLI strips.
 pub fn run(args: &Args, hooks: &dyn Hooks, p: &mut Prompter) -> Result<Value> {
     let dir = match &args.dir {
         Some(dir) => std::env::current_dir()
@@ -144,15 +145,18 @@ pub fn run(args: &Args, hooks: &dyn Hooks, p: &mut Prompter) -> Result<Value> {
     } else {
         "not_installed".to_owned()
     };
-    // The files, only when every step above succeeded.
-    if failures.is_empty() {
+    // The files, only when every step above succeeded: the tray and the
+    // `.previous` copies first, `DIR/mailtriage` last and only once they
+    // are all gone, so a failure leaves the program that runs this again.
+    let committed = failures.is_empty();
+    if committed {
         for path in [
-            cli.clone(),
-            install::previous_path(&cli),
             tray.clone(),
             install::previous_path(&tray),
+            install::previous_path(&cli),
+            cli.clone(),
         ] {
-            if fs::symlink_metadata(&path).is_err() {
+            if fs::symlink_metadata(&path).is_err() || (path == cli && !failures.is_empty()) {
                 continue;
             }
             match fs::remove_file(&path) {
@@ -160,8 +164,13 @@ pub fn run(args: &Args, hooks: &dyn Hooks, p: &mut Prompter) -> Result<Value> {
                 Err(e) => failures.push(format!("cannot remove {}: {e}", path.display())),
             }
         }
-        if let Some(cache) = Cache::for_user() {
-            let keys = [install_key(&cli), install_key(&tray)];
+        // A program's cache entry goes only with its file.
+        let keys: Vec<String> = [&cli, &tray]
+            .into_iter()
+            .filter(|path| fs::symlink_metadata(path).is_err())
+            .map(|path| install_key(path))
+            .collect();
+        if let Some(cache) = Cache::for_user().filter(|_| !keys.is_empty()) {
             if let Err(e) = cache.update(|c| {
                 for key in &keys {
                     c.installs.remove(key);
@@ -173,13 +182,16 @@ pub fn run(args: &Args, hooks: &dyn Hooks, p: &mut Prompter) -> Result<Value> {
                 ));
             }
         }
-    } else {
+    }
+    if !failures.is_empty() {
         for failure in &failures {
             p.say(&format!("mailtriage: {failure}"));
         }
-        p.say(
-            "No program files were removed; fix the failures above and run self uninstall again.",
-        );
+        p.say(if committed {
+            "Some program files stay; fix the failures above and run self uninstall again."
+        } else {
+            "No program files were removed; fix the failures above and run self uninstall again."
+        });
     }
     drop(lock);
     let kept = kept(&dir, &home, p);

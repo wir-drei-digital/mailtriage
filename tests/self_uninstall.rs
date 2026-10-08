@@ -183,7 +183,7 @@ fn only_this_installations_services_and_files_go() {
     assert!(!f.root.join("bin/mailtriage.previous").exists());
     assert_eq!(
         s["removed"],
-        json!([f.cli(), f.root.join("bin/mailtriage.previous")])
+        json!([f.root.join("bin/mailtriage.previous"), f.cli()])
     );
     // The lock file stays, and is listed with what was kept.
     let lock = f.root.join("bin/.mailtriage-update.lock");
@@ -339,6 +339,126 @@ fn the_tray_quits_and_its_login_item_goes() {
         );
     }
     assert!(stderr(&out).contains("Close any open categories window"));
+}
+
+#[test]
+fn a_login_item_naming_another_tray_stays() {
+    let f = Fixture::new();
+    let tray = f.root.join("bin/mailtriage-tray");
+    write_exe(&tray, &fake_tray("0.1.0"));
+    let theirs = f.root.join("other/mailtriage-tray");
+    write_exe(&theirs, &fake_tray("0.1.0"));
+    // Marked, and even naming this CLI, but it starts another tray.
+    let item = f.login_item(&theirs);
+    let before = fs::read(&item).unwrap();
+    // launchd has a login job loaded.
+    fs::write(f.root.join("tools/loaded"), "").unwrap();
+    let (out, v) = f.uninstall(&["--yes"], "", &[]);
+    assert_eq!(out.status.code(), Some(0), "{v} {}", stderr(&out));
+    let s = &v["self_uninstall"];
+    assert_eq!(
+        fs::read(&item).unwrap(),
+        before,
+        "the other login item stays"
+    );
+    assert!(!s["removed"].as_array().unwrap().contains(&json!(item)));
+    let log = fs::read_to_string(f.root.join("tools/launchctl.log")).unwrap_or_default();
+    assert!(!log.contains("mailtriage-tray"), "{log}");
+    assert!(f.root.join("tools/loaded").exists());
+    // This installation still goes.
+    assert_eq!(s["tray"], "quit");
+    assert!(!tray.exists() && !f.cli().exists());
+    assert!(theirs.exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_login_job_that_does_not_boot_out_keeps_its_login_item() {
+    let f = Fixture::new();
+    let tray = f.root.join("bin/mailtriage-tray");
+    write_exe(&tray, &fake_tray("0.1.0"));
+    let item = f.login_item(&tray);
+    // This fixture's launchctl lists the job as loaded but cannot boot it
+    // out.
+    write_tool(
+        &f.root.join("tools"),
+        "launchctl",
+        "#!/bin/sh\necho \"$*\" >> \"$(dirname \"$0\")/launchctl.log\"\ncase \"$1\" in\n  print) exit 0 ;;\n  bootout) exit 1 ;;\n  *) exit 64 ;;\nesac\n",
+    );
+    let (out, v) = f.uninstall(&["--yes"], "", &[]);
+    assert_eq!(out.status.code(), Some(3), "{v} {}", stderr(&out));
+    let s = &v["self_uninstall"];
+    assert!(item.exists(), "the login item stays for a rerun");
+    assert_eq!(s["removed"], json!([]));
+    assert!(f.cli().exists() && tray.exists());
+    assert!(f.root.join("bin/mailtriage.previous").exists());
+    let failures = s["failures"].as_array().unwrap();
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    let failure = failures[0].as_str().unwrap();
+    assert!(
+        failure.starts_with(&format!("login item {}: ", item.display()))
+            && failure.contains("bootout gui/"),
+        "{failure}"
+    );
+    assert!(stderr(&out).contains(failure), "{}", stderr(&out));
+    assert!(stderr(&out).contains("No program files were removed"));
+}
+
+#[test]
+fn a_file_that_cannot_be_removed_keeps_the_cli_for_a_rerun() {
+    let f = Fixture::new();
+    let tray = f.root.join("bin/mailtriage-tray");
+    write_exe(&tray, &fake_tray("0.1.0"));
+    // A directory where the tray's previous copy belongs: not removable as
+    // a file.
+    let stuck = f.root.join("bin/mailtriage-tray.previous");
+    fs::create_dir_all(stuck.join("x")).unwrap();
+    let cache = cache_dir(&f.home(), &f.root.join("xdg"));
+    fs::create_dir_all(&cache).unwrap();
+    let cli_key = f.cli().to_str().unwrap().to_owned();
+    let tray_key = tray.to_str().unwrap().to_owned();
+    fs::write(
+        cache.join("update.json"),
+        json!({"schema_version": 1, "installs": {
+            cli_key.clone(): {"version": "0.1.0"},
+            tray_key.clone(): {"version": "0.1.0"},
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    let installs = || -> Value {
+        serde_json::from_slice(&fs::read(cache.join("update.json")).unwrap()).unwrap()
+    };
+    let (out, v) = f.uninstall(&["--yes"], "", &[]);
+    assert_eq!(out.status.code(), Some(3), "{v} {}", stderr(&out));
+    let s = &v["self_uninstall"];
+    assert_eq!(s["tray"], "quit");
+    // The tray and the CLI's previous copy went; the CLI stays, so the
+    // uninstall can run again.
+    assert_eq!(
+        s["removed"],
+        json!([tray, f.root.join("bin/mailtriage.previous")])
+    );
+    assert!(f.cli().exists() && !tray.exists() && stuck.exists());
+    let failures = s["failures"].as_array().unwrap();
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    let failure = failures[0].as_str().unwrap();
+    assert!(
+        failure.starts_with(&format!("cannot remove {}: ", stuck.display())),
+        "{failure}"
+    );
+    assert!(stderr(&out).contains(failure), "{}", stderr(&out));
+    assert!(stderr(&out).contains("Some program files stay"));
+    // Only the entry of the program that is gone is dropped.
+    assert!(installs()["installs"].get(&tray_key).is_none());
+    assert!(installs()["installs"].get(&cli_key).is_some());
+    // Once the cause is gone, the rerun finishes.
+    fs::remove_dir_all(&stuck).unwrap();
+    let (out, v) = f.uninstall(&["--yes"], "", &[]);
+    assert_eq!(out.status.code(), Some(0), "{v} {}", stderr(&out));
+    assert_eq!(v["self_uninstall"]["removed"], json!([f.cli()]));
+    assert!(!f.cli().exists());
+    assert!(installs()["installs"].get(&cli_key).is_none());
 }
 
 #[test]
