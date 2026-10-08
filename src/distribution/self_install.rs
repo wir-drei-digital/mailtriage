@@ -126,7 +126,11 @@ pub fn run(args: &Args, hooks: &dyn Hooks, p: &mut Prompter) -> Result<Value> {
     let setup_line = shell_line(&[cli.as_os_str(), OsStr::new("setup")]);
     let (setup, config) = if asking && p.confirm_or("Run mailtriage setup now?", true) {
         match run_setup(&cli) {
-            Ok(config) => ("ran", Some(config)),
+            Ok(Some(config)) => ("ran", Some(config)),
+            Ok(None) => {
+                p.say("Setup aborted; nothing was changed.");
+                ("skipped", None)
+            }
             Err(message) => {
                 p.say(&format!("mailtriage: setup failed: {message}"));
                 failed = true;
@@ -414,9 +418,10 @@ fn single_quoted(text: &str) -> String {
 }
 
 /// Runs the installed `DIR/mailtriage setup --interactive --json` with this
-/// terminal as stdin and stderr; returns the config it wrote, or its error
-/// message.
-fn run_setup(cli: &Path) -> Result<PathBuf, String> {
+/// terminal as stdin and stderr; returns the config it wrote, `None` when
+/// the user chose Abort (reason `setup_aborted`: nothing was changed), or
+/// its error message.
+fn run_setup(cli: &Path) -> Result<Option<PathBuf>, String> {
     let out = Command::new(cli)
         .args(["setup", "--interactive", "--json"])
         .stdin(Stdio::inherit())
@@ -428,8 +433,12 @@ fn run_setup(cli: &Path) -> Result<PathBuf, String> {
     if out.status.success() {
         return value["setup"]["config"]
             .as_str()
-            .map(PathBuf::from)
+            .map(|config| Some(PathBuf::from(config)))
             .ok_or_else(|| "setup printed no config".to_owned());
+    }
+    let aborted = ErrorKind::SetupAborted.reason();
+    if out.status.code() == Some(2) && value["error"]["reason"].as_str() == aborted {
+        return Ok(None);
     }
     Err(value["error"]["message"].as_str().map_or_else(
         || format!("setup exited with {}", out.status),

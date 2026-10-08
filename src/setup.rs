@@ -408,7 +408,11 @@ fn load_target(
             Ok((cfg, Intent::Update(name), Some(bytes)))
         }
         1 => Ok((cfg, Intent::Add, Some(bytes))),
-        _ => Err(err(2, "setup aborted; nothing was changed")),
+        _ => Err(err_kind(
+            2,
+            ErrorKind::SetupAborted,
+            "setup aborted; nothing was changed",
+        )),
     }
 }
 

@@ -141,7 +141,7 @@ mailtriage self install --dir DIR [--tray-file PATH] [--no-setup] [--yes] [--jso
 ```
 
 - `tray`: `null` without `--tray-file`, else `action` `installed`, `skipped` or `failed`, with the reason in `error`.
-- `setup`: `ran`, `skipped` or `failed`. `autostart`: `enabled`, `skipped` or `failed`.
+- `setup`: `ran`, `skipped` or `failed`. Choosing "Abort" in setup's menu (a re-run with an existing config) changes nothing and counts as `skipped`, not as a failed setup. `autostart`: `enabled`, `skipped` or `failed`.
 
 Exit codes: 0; 2 for invalid flags or a refused downgrade; 3 for an unsafe directory, a failed install, a failed tray install, or a failed setup (the binaries stay installed); 5 when another update or install held the installation lock for 60 seconds.
 
@@ -307,7 +307,7 @@ This keeps the model, endpoint, timeout and `api_key_env`, so no mail is classif
 - Prompts are on when stdin is a terminal, or with `--interactive` (answers from a pipe, as the tests do). Otherwise setup runs as with `--yes`.
 - `--yes` turns prompts off. Each value comes from its flag or its default. A value without a default, such as `--himalaya-account`, exits 2 and names the flag.
 - A flag always answers its question; setup does not ask it.
-- Choosing "Abort" in step 1 exits 2 with `setup aborted; nothing was changed`.
+- Choosing "Abort" in step 1 exits 2 with `setup aborted; nothing was changed` and the reason `setup_aborted`.
 - End of input exits 2 with `setup aborted: input ended`. The config is written in step 8, so an abort at the service question keeps it. Run `mailtriage service install --account NAME` for the service.
 
 ### Updating an account
@@ -1574,7 +1574,7 @@ The summary line, and the categories window, show these:
 
 With `--json`, every result is one line of JSON on stdout, and so is every error: `{"schema_version":1,"error":{"code":N,"message":"..."}}`. Without `--json`, results are pretty-printed JSON and errors go to stderr as `mailtriage: MESSAGE`. Every result has a `schema_version`. Error messages omit message bodies and credentials.
 
-Some errors also carry a machine-readable `reason` in the error object, for scripts that react to a class of error rather than to its message: `config_changed` (`mailtriage.json` or the Himalaya configuration changed during the command), `config_busy` (another command is editing `mailtriage.json`), `account_busy` (another worker for the account is running), `binding_conflict` (the account binding changed, see [Account binding](#account-binding)), `categories_changed` (`categories apply --expect-digest` found other categories), `service_config_mismatch` (the account's service runs another config, see [Service commands](#service-commands)), `service_config_unknown` (the config of the account's service cannot be told), `service_busy` (another service command for the account held the service lock for 30 s) and `unsafe_permissions` (a directory mailtriage would install a program into is not safe; see [A private Himalaya](#a-private-himalaya)). An error without a reason has no `reason` key.
+Some errors also carry a machine-readable `reason` in the error object, for scripts that react to a class of error rather than to its message: `config_changed` (`mailtriage.json` or the Himalaya configuration changed during the command), `config_busy` (another command is editing `mailtriage.json`), `account_busy` (another worker for the account is running), `binding_conflict` (the account binding changed, see [Account binding](#account-binding)), `categories_changed` (`categories apply --expect-digest` found other categories), `service_config_mismatch` (the account's service runs another config, see [Service commands](#service-commands)), `service_config_unknown` (the config of the account's service cannot be told), `service_busy` (another service command for the account held the service lock for 30 s), `unsafe_permissions` (a directory mailtriage would install a program into is not safe; see [A private Himalaya](#a-private-himalaya)) and `setup_aborted` (you chose "Abort" in setup's menu; nothing was changed). An error without a reason has no `reason` key.
 
 | Code | Meaning |
 | --- | --- |

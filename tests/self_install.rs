@@ -549,6 +549,42 @@ fn setup_runs_from_the_installed_binary_then_the_login_item_uses_its_config() {
     assert_eq!(v["service"]["installed"], true);
 }
 
+/// A re-run whose setup the user aborts (nothing changed) is not a failed
+/// install: `setup` is `skipped` and the exit code 0.
+#[test]
+fn choosing_abort_in_setup_counts_as_skipped() {
+    let f = Fixture::new();
+    // An existing config, so setup offers Update, Add or Abort.
+    let (out, v) = f.run_program(
+        &f.root.join("download/mailtriage"),
+        &[
+            "setup",
+            "--yes",
+            "--json",
+            "--himalaya-account",
+            "work",
+            "--provider",
+            "fake",
+        ],
+        "",
+        &[],
+    );
+    assert_eq!(out.status.code(), Some(0), "{v} {}", stderr(&out));
+    let config = PathBuf::from(v["setup"]["config"].as_str().unwrap());
+    let before = fs::read(&config).unwrap();
+    // Yes to setup (Enter), then Abort in setup's menu.
+    let (out, v) = f.install(&[], "\n3\n", &[("MAILTRIAGE_TEST_TERMINAL", "1")]);
+    assert_eq!(out.status.code(), Some(0), "{v} {}", stderr(&out));
+    assert!(v.get("exit_code").is_none(), "{v}");
+    assert_eq!(v["self_install"]["setup"], "skipped", "{v}");
+    assert_eq!(v["self_install"]["cli"]["action"], "installed");
+    let err = stderr(&out);
+    assert!(err.contains("Run mailtriage setup now? [Y/n]"), "{err}");
+    assert!(err.contains("Setup aborted; nothing was changed."), "{err}");
+    assert!(!err.contains("setup failed"), "{err}");
+    assert_eq!(fs::read(&config).unwrap(), before);
+}
+
 /// The old habit of `sudo install … /usr/local/bin`: a root-owned directory
 /// passes the protected path rule but is not the user's, so nothing is
 /// written there and the message says what to do.

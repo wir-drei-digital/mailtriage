@@ -54,6 +54,8 @@ pub enum ErrorKind {
     /// A directory mailtriage would install a program into fails the
     /// protected path rule.
     UnsafePermissions,
+    /// The user chose Abort in setup's menu; nothing was changed.
+    SetupAborted,
 }
 
 impl ErrorKind {
@@ -71,6 +73,7 @@ impl ErrorKind {
             Self::ServiceConfigUnknown => Some("service_config_unknown"),
             Self::ServiceBusy => Some("service_busy"),
             Self::UnsafePermissions => Some("unsafe_permissions"),
+            Self::SetupAborted => Some("setup_aborted"),
         }
     }
 }

@@ -136,8 +136,10 @@ Errors are `ServiceError`s. Except for the two abort messages below, the
 message starts with `step N (name): ` and names the flag or command that fixes
 it. Codes: 2 input, missing flag without
 prompts, key flags with `--provider fake`, abort (`setup aborted; nothing was
-changed`, `setup aborted: input ended`); 3 Himalaya, key tool or service
-manager failure, unwritable config; 5 config exists without `--update`, a
+changed` with reason `setup_aborted`, which `self install` reports as
+`setup: "skipped"`; `setup aborted: input ended` without a reason); 3
+Himalaya, key tool or service manager failure, unwritable config; 5 config
+exists without `--update`, a
 binding-changing update, unmarked service file, another command holding the
 config lock (`config_busy`), or a config that changed since step 1 read it
 (`config_changed`); step 8 writes under the exclusive config lock.
