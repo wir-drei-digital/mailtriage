@@ -4,7 +4,8 @@ Date: 2026-10-08
 Status: Implemented on branch `feature/reply-queue`. Open questions were
 decided by Michael on 2026-10-08. The same day he asked for the read state
 to wait for his approval ("Read approval"); the implementation needs no new
-intent kind, and only the read approval list adds a table (SQLite v9).
+intent kind, and only the read approval list adds a table (SQLite v9; v10
+adds its attempt columns).
 Builds on: [IMAP category filing](2026-10-04-imap-category-filing-design.md),
 [Filing refile](2026-10-06-filing-refile-design.md)
 
@@ -90,10 +91,24 @@ reading every config that does not. Turn it on with
    those whose Message-ID still matches; a message that already carries
    `\Seen` is recorded without a write. The write is
    `MailEngine::add_seen`: `a1 SELECT folder; a2 UID STORE uids
-   +FLAGS.SILENT (\Seen)`. An incomplete write or another epoch leaves the
-   rows for the next pass (`read_incomplete:<folder>`,
-   `read_failed:<folder>`). Adding `\Seen` twice is harmless, so the rows
-   need no intent.
+   +FLAGS.SILENT (\Seen)`. Before it, the rows record the session's folder
+   and epoch (`attempt_folder`, `attempt_epoch`); a known outcome clears
+   them. The outcome maps like a flag's:
+   - `selected`, `session_epoch` equal to the verified epoch, `completed`:
+     `applied_at` is set.
+   - `selected` in another epoch: an epoch race. The folder pauses
+     (`epoch_race`), each message gets event `epoch_race` with kind `seen`,
+     and the pass reports `epoch_race:<folder>`, in one transaction. Another
+     message may now carry `\Seen`; it is never removed. The rows stay
+     approved and are read once the folder is released.
+   - not selected, or incomplete in the verified epoch: the rows wait for
+     the next pass (`read_incomplete:<folder>`).
+   - an error (`read_failed:<folder>`) or a crash: the outcome is unknown
+     and the attempt stays; the row is not written again until it is
+     settled. Intent recovery (step 5 of each pass) compares the folder's
+     epoch with it: another epoch is a suspected race, handled as above
+     with error `epoch_race_suspected`; the same epoch clears the attempt
+     and the row is read again. Adding `\Seen` twice is harmless.
 
 A message whose decision changes to "no action" while held files like any
 new mail and does not enter the list. A held message whose category targets `INBOX`
@@ -145,7 +160,11 @@ fails with exit code 2 and approves nothing; `--id` needs `--approve`.
   one new method, `add_seen`. tests/engine_contract.rs pins its exact text,
   and `assert_no_forbidden` now accepts `Seen` only in a STORE without a
   MOVE.
-- **Invariant 3:** unchanged. A reply exit is an ordinary move intent.
+- **Invariant 3:** a reply exit is an ordinary move intent. `\Seen` writes
+  are not intents: each is tracked on its `read_approvals` row, which
+  records the session's folder and epoch before the engine call, so a lost
+  outcome followed by an epoch change is detected as a suspected race, as
+  for a flag.
 - **Invariant 4:** unchanged. A reply exit leaves a source folder.
 - **Invariant 7:** unchanged. A held message is moved once, at the exit.
 
@@ -161,9 +180,9 @@ The other invariants are untouched.
 | Flags | `filing/reply.rs` (`refresh_flags`), called by `refile::plan_pass` before the planner; reuses `Store::hydrate`. |
 | Engine | `MailEngine::add_seen` (Himalaya, fake with `FakeOp::Seen`, offline). |
 | Apply | Reply-exit batches; a claimed reply exit calls `Store::request_read_approval`. |
-| Read | `filing::reply::apply_reads`, after `apply` in `plan_and_apply`. |
+| Read | `filing::reply::apply_reads`, after `apply` in `plan_and_apply`; `filing::reply::recover_reads` in `recover`, for attempts whose outcome was lost. |
 | CLI | `filing replies [--approve [--id ID]...]`; `Service::filing_replies`. |
-| State | Holding is recomputed every pass from placement, effective decision, flags and review state. SQLite v9 adds `read_approvals(account, message_id, requested_at, approved_at, applied_at)`; a new table, so processes of the previous release are unaffected, but a binary before v9 refuses the database. |
+| State | Holding is recomputed every pass from placement, effective decision, flags and review state. SQLite v9 adds `read_approvals(account, message_id, requested_at, approved_at, applied_at)`; a new table, so processes of the previous release are unaffected, but a binary before v9 refuses the database. SQLite v10 adds the nullable `read_approvals.attempt_folder` and `attempt_epoch`. |
 
 ## Option B: a separate queue folder
 
@@ -207,7 +226,9 @@ job that reads `mailtriage list --json`) before the job is switched off.
   approval of single ids and refusal of unknown ones; done files unread for
   approval; mail without action is unchanged and unread; dry run previews
   `reply_exit` with no writes; a lost move response converges with one move;
-  a failed read write is retried on the next pass.
+  a failed read write is retried on the next pass; a `\Seen` session in
+  another epoch pauses the folder; a lost `\Seen` outcome is a suspected
+  race after an epoch change and converges without one.
 - tests/engine_contract.rs: the exact `add_seen` text.
 - tests/config_v2.rs: the queue alone makes a config schema 4.
 - Dovecot e2e (flat and prefix), step 6: held unread and unflagged in INBOX,
@@ -225,7 +246,7 @@ The following docs need updates:
 - README ("never changes the read state");
 - guide.md:24, the "What is moved and flagged" and "Safety rules" sections,
   and a new "Reply queue" section;
-- service-api.md (new fields, `filing replies`, schema v9);
+- service-api.md (new fields, `filing replies`, schemas v9 and v10);
 - verification.md (new rows);
 - the filing spec's invariants list (a pointer to this spec).
 

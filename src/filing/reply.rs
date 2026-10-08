@@ -3,15 +3,20 @@
 //! `\Answered` or the user marks them done, then move to their category
 //! folder unread and enter the read approval list. Flags are stored once at
 //! discovery, so each pass reads the flags of held messages again before
-//! planning; `\Seen` is added only to messages the user approved.
-use super::apply::{paused, write_failed};
+//! planning; `\Seen` is added only to messages the user approved. Each
+//! `add_seen` session is recorded on its rows (folder and epoch) before it
+//! runs, so an epoch race, detected or suspected, pauses the folder as a
+//! flag race does.
+use super::apply::{commit, event, paused, race_problem, write_failed};
 use super::observe::FolderMap;
 use super::planner::{self, PlanInput, PlanMessage};
-use super::{is_config_changed, rfc_message_id, FilingSummary, LocationState, PassContext};
+use super::{
+    is_config_changed, rfc_message_id, FilingSummary, FilingWrite, LocationState, PassContext,
+};
 use crate::domain::FilingMode;
 use crate::store::{now, Store};
 use anyhow::Result;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// UIDs per `envelopes` call.
@@ -106,8 +111,9 @@ fn refresh_batch(
 
 /// Adds `\Seen` to every approved message of the read approval list, in
 /// its current home (live, writes allowed). A message moves on while
-/// unknown, blocked, being moved or in a paused folder or another epoch; it
-/// is retried on a later pass. Each UID is checked to still name the
+/// unknown, blocked, being moved, in a paused folder or another epoch, or
+/// while an earlier session's outcome waits for `recover_reads`; it is
+/// retried on a later pass. Each UID is checked to still name the
 /// message (its Message-ID) right before the write; a message that already
 /// carries `\Seen` needs no write.
 pub fn apply_reads(
@@ -127,7 +133,8 @@ pub fn apply_reads(
         .collect();
     let mut groups: BTreeMap<(String, u64), Vec<ReadMember>> = BTreeMap::new();
     for row in store.read_approvals(ctx.account, true)? {
-        if row.approved_at.is_none() || moving.contains(&row.message_id) {
+        let unsettled = row.attempt_folder.is_some();
+        if row.approved_at.is_none() || unsettled || moving.contains(&row.message_id) {
             continue;
         }
         let Some(p) = store.placement(ctx.account, &row.message_id)? else {
@@ -165,7 +172,10 @@ pub fn apply_reads(
     Ok(())
 }
 
-/// One verified `add_seen` session for approved messages in `folder`.
+/// One verified `add_seen` session for approved messages in `folder`. The
+/// session's folder and epoch are recorded on the rows it writes before it
+/// runs and cleared once its outcome is known; a lost outcome keeps them
+/// for `recover_reads`.
 fn read_batch(
     store: &mut Store,
     ctx: &PassContext,
@@ -192,22 +202,120 @@ fn read_batch(
             store.mark_read_applied(ctx.account, id, &at)?;
             summary.reads_applied += 1;
         } else {
-            write.push((*uid, id));
+            write.push((*uid, id.as_str()));
         }
     }
     if write.is_empty() {
         return Ok(());
     }
+    let ids: Vec<&str> = write.iter().map(|(_, id)| *id).collect();
+    commit(store, ctx, &attempts(&ids, Some((folder, epoch))))?;
     let uids: Vec<u64> = write.iter().map(|(uid, _)| *uid).collect();
-    let outcome = ctx.engine.add_seen(folder, &uids)?;
-    if !(outcome.selected && outcome.completed && outcome.session_epoch == Some(epoch)) {
+    let outcome = match ctx.engine.add_seen(folder, &uids) {
+        Ok(o) => o,
+        // The engine refused before running anything.
+        Err(e) if is_config_changed(&e) => {
+            commit(store, ctx, &attempts(&ids, None))?;
+            return Err(e);
+        }
+        Err(e) => return Err(e),
+    };
+    if outcome.selected && outcome.session_epoch != Some(epoch) {
+        return seen_raced(store, ctx, (folder, epoch), &ids, "epoch_race", summary);
+    }
+    if !(outcome.selected && outcome.completed) {
+        // Nothing ran, or it ran in the verified epoch: retried later.
+        commit(store, ctx, &attempts(&ids, None))?;
         summary.errors += 1;
         summary.problems.push(format!("read_incomplete:{folder}"));
         return Ok(());
     }
-    for (_, id) in write {
+    for id in ids {
         store.mark_read_applied(ctx.account, id, &at)?;
         summary.reads_applied += 1;
+    }
+    Ok(())
+}
+
+/// The `\Seen` attempt of each of `ids`: set to the session's folder and
+/// epoch, or cleared.
+fn attempts<'a>(ids: &[&'a str], attempt: Option<(&'a str, u64)>) -> Vec<FilingWrite<'a>> {
+    ids.iter()
+        .map(|id| FilingWrite::ReadAttempt {
+            message_id: id,
+            attempt,
+        })
+        .collect()
+}
+
+/// Filing spec "Epoch race", applied to `\Seen` as to a flag (detected or
+/// suspected): the folder pauses with event `epoch_race` (kind `seen`) per
+/// message and the attempts are cleared, in one transaction. Another
+/// message may now carry `\Seen`; it is never removed. The rows stay
+/// approved, for the message's home once the folder is released.
+fn seen_raced(
+    store: &mut Store,
+    ctx: &PassContext,
+    (folder, epoch): (&str, u64),
+    ids: &[&str],
+    error: &str,
+    summary: &mut FilingSummary,
+) -> Result<()> {
+    let mut writes = vec![FilingWrite::Pause {
+        folder,
+        reason: "epoch_race",
+    }];
+    writes.extend(attempts(ids, None));
+    for id in ids {
+        let detail = json!({"kind": "seen", "error": error, "epoch": epoch});
+        writes.push(event(Some(id), Some(folder), "epoch_race", detail));
+    }
+    commit(store, ctx, &writes)?;
+    race_problem(folder, summary);
+    Ok(())
+}
+
+/// Recovery (step 5) for `\Seen` sessions whose outcome was lost (an error
+/// or a crash): a folder no longer in the attempt's epoch is a suspected
+/// race (`seen_raced`); otherwise the session ran in the verified epoch, the
+/// attempt is cleared and `apply_reads` takes the row up again (adding
+/// `\Seen` twice is harmless). Each folder is read once per call.
+pub fn recover_reads(
+    store: &mut Store,
+    ctx: &PassContext,
+    summary: &mut FilingSummary,
+) -> Result<()> {
+    let mut open: BTreeMap<(String, u64), Vec<String>> = BTreeMap::new();
+    for row in store.read_approvals(ctx.account, true)? {
+        if let (Some(folder), Some(epoch)) = (row.attempt_folder, row.attempt_epoch) {
+            open.entry((folder, epoch))
+                .or_default()
+                .push(row.message_id);
+        }
+    }
+    if open.is_empty() {
+        return Ok(());
+    }
+    (ctx.verify_binding)()?;
+    let mut epochs: BTreeMap<String, u64> = BTreeMap::new();
+    for ((folder, epoch), ids) in open {
+        let now_epoch = match epochs.get(&folder) {
+            Some(e) => *e,
+            None => match ctx.engine.snapshot(&folder) {
+                Ok(s) => *epochs.entry(folder.clone()).or_insert(s.uid_validity),
+                Err(e) => {
+                    write_failed(e, "recovery_failed", &folder, summary)?;
+                    continue;
+                }
+            },
+        };
+        let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+        if now_epoch == epoch {
+            commit(store, ctx, &attempts(&ids, None))?;
+        } else {
+            let race = (folder.as_str(), epoch);
+            seen_raced(store, ctx, race, &ids, "epoch_race_suspected", summary)?;
+        }
     }
     Ok(())
 }

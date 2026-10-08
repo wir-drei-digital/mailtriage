@@ -112,9 +112,9 @@ impl Store {
     /// rows whose `\Seen` is not added yet.
     pub fn read_approvals(&self, account: &str, open_only: bool) -> Result<Vec<ReadApproval>> {
         let sql = if open_only {
-            "SELECT message_id,requested_at,approved_at,applied_at FROM read_approvals WHERE account=? AND applied_at IS NULL ORDER BY requested_at,message_id"
+            "SELECT message_id,requested_at,approved_at,applied_at,attempt_folder,attempt_epoch FROM read_approvals WHERE account=? AND applied_at IS NULL ORDER BY requested_at,message_id"
         } else {
-            "SELECT message_id,requested_at,approved_at,applied_at FROM read_approvals WHERE account=? ORDER BY requested_at,message_id"
+            "SELECT message_id,requested_at,approved_at,applied_at,attempt_folder,attempt_epoch FROM read_approvals WHERE account=? ORDER BY requested_at,message_id"
         };
         let mut st = self.db.prepare(sql)?;
         let rows = st
@@ -124,6 +124,8 @@ impl Store {
                     requested_at: r.get(1)?,
                     approved_at: r.get(2)?,
                     applied_at: r.get(3)?,
+                    attempt_folder: r.get(4)?,
+                    attempt_epoch: r.get(5)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -162,10 +164,11 @@ impl Store {
         Ok(approved)
     }
 
-    /// Records that `\Seen` was added to an approved message.
+    /// Records that `\Seen` was added to an approved message; its attempt
+    /// is settled.
     pub fn mark_read_applied(&mut self, account: &str, id: &str, at: &str) -> Result<()> {
         self.db.execute(
-            "UPDATE read_approvals SET applied_at=?3 WHERE account=?1 AND message_id=?2",
+            "UPDATE read_approvals SET applied_at=?3,attempt_folder=NULL,attempt_epoch=NULL WHERE account=?1 AND message_id=?2",
             params![account, id, at],
         )?;
         Ok(())
@@ -1702,6 +1705,15 @@ fn apply_write(tx: &Connection, account: &str, w: &FilingWrite<'_>, now: &str) -
         FilingWrite::Arrival { id, state, kind } => write_arrival(tx, *id, state, *kind, now)?,
         FilingWrite::RemoveOccurrence { folder, epoch, uid } => {
             delete_occurrence(tx, account, folder, *epoch, *uid)?;
+        }
+        FilingWrite::ReadAttempt {
+            message_id,
+            attempt,
+        } => {
+            tx.execute(
+                "UPDATE read_approvals SET attempt_folder=?3,attempt_epoch=?4 WHERE account=?1 AND message_id=?2",
+                params![account, message_id, attempt.map(|a| a.0), attempt.map(|a| a.1)],
+            )?;
         }
         FilingWrite::Event {
             message_id,

@@ -10,7 +10,7 @@ use super::apply::{
 use super::arrivals::in_race_window;
 use super::observe::FolderMap;
 use super::planner::{CategoryFolder, Locator};
-use super::refile;
+use super::{refile, reply};
 use super::{
     FilingSummary, FilingWrite, Intent, IntentPatch, LocationState, PassContext, Placement,
 };
@@ -21,9 +21,10 @@ use chrono::{DateTime, Duration, Utc};
 use serde_json::json;
 use std::collections::BTreeMap;
 
-/// Walks open intents oldest first, then the reverts (mode not off). Engine
-/// writes (retries, reverts) happen only when `map.writes_allowed`. Each
-/// folder's epoch is read at most once per call (see `Epochs`).
+/// Walks open intents oldest first, then the reply queue's `\Seen`
+/// attempts (`reply::recover_reads`), then the reverts (mode not off).
+/// Engine writes (retries, reverts) happen only when `map.writes_allowed`.
+/// Each folder's epoch is read at most once per call (see `Epochs`).
 pub fn recover(
     store: &mut Store,
     ctx: &PassContext,
@@ -47,6 +48,7 @@ pub fn recover(
             write_failed(e, "recovery_failed", &intent.folder, summary)?;
         }
     }
+    reply::recover_reads(store, ctx, summary)?;
     for r in store.reverts(ctx.account, true)? {
         // The session outcome of an interrupted revert is unknown.
         if r.state == "in_flight" {

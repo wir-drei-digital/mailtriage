@@ -46,6 +46,31 @@ fn migration_reaches_the_latest_schema_and_is_idempotent() {
 }
 
 #[test]
+fn schema_10_keeps_the_read_approvals_of_schema_9() {
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("db");
+    drop(Store::open(&p).unwrap());
+    rusqlite::Connection::open(&p)
+        .unwrap()
+        .execute_batch(
+            "ALTER TABLE read_approvals DROP COLUMN attempt_folder;
+ALTER TABLE read_approvals DROP COLUMN attempt_epoch;
+PRAGMA user_version=9;
+INSERT INTO read_approvals(account,message_id,requested_at,approved_at) VALUES('work','m1','t1','t2');",
+        )
+        .unwrap();
+    let s = Store::open(&p).unwrap();
+    assert_eq!(s.schema_version().unwrap(), LATEST);
+    let rows = s.read_approvals("work", true).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].approved_at.as_deref(), Some("t2"));
+    assert_eq!(
+        (rows[0].attempt_folder.as_deref(), rows[0].attempt_epoch),
+        (None, None)
+    );
+}
+
+#[test]
 fn filing_mode_transitions_keep_or_reset_enabled_at() {
     let (_d, mut s) = store();
     s.ensure_account("work", "id", "g1").unwrap();

@@ -552,7 +552,9 @@ verified in, so it may have acted on other messages.
   is never mistaken for a client move. Event `epoch_race`.
 - **Flag race, detected or suspected.** F gets `pause_reason = epoch_race`;
   event `epoch_race` (another message may now be flagged; flags are never
-  removed). The flag intent becomes `failed`.
+  removed). The flag intent becomes `failed`. The
+  [reply queue](2026-10-08-reply-queue-design.md)'s `\Seen` writes race the
+  same way (event kind `seen`).
 
 The race batch's original move intents become `awaiting_rescan`.
 
@@ -749,8 +751,8 @@ Error text never includes message bodies, subjects or credentials.
   detection when the write's response is captured, and a write whose outcome
   was lost is treated as a suspected race whenever the folder's epoch changed;
   moves are reverted with COPYUID where available, otherwise the folder pauses
-  and arrivals are quarantined; a mistaken flag stays (flags are never removed)
-  and is reported. A native IMAP engine closes the window by
+  and arrivals are quarantined; a mistaken flag or `\Seen` stays (neither is
+  ever removed) and is reported. A native IMAP engine closes the window by
   checking SELECT's UIDVALIDITY before sending the write.
 - **Re-download without UIDPLUS.** Identity of moved mail is established by
   fingerprint, costing one extra download per moved message.

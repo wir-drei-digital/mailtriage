@@ -244,3 +244,116 @@ fn a_failed_read_write_is_retried_on_the_next_pass() {
     h.sync();
     assert!(has(&flags(&h, "i"), "\\Seen"));
 }
+
+fn paused(h: &Harness, folder: &str) -> Option<String> {
+    h.service()
+        .store
+        .folder_record("work", folder)
+        .unwrap()
+        .unwrap()
+        .pause_reason
+}
+
+/// The `epoch_race` events of kind `seen`, as their `error`s.
+fn seen_races(h: &Harness, mid: &str) -> Vec<String> {
+    h.service()
+        .store
+        .events("work", Some(&id_of(h, mid)), 50)
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] == "epoch_race" && e["detail"]["kind"] == "seen")
+        .map(|e| e["detail"]["error"].as_str().unwrap().to_string())
+        .collect()
+}
+
+fn has_problem(out: &serde_json::Value, code: &str) -> bool {
+    out["filing"]["problems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p == code)
+}
+
+/// Holds and answers `mids` one pass at a time, so they reach
+/// Transactions as UIDs 1, 2, ... in order.
+fn file_in_order(h: &Harness, mids: &[&str]) {
+    h.sync();
+    for mid in mids {
+        h.fake
+            .deliver("INBOX", &mail(mid, "Invoice", "Payment due next month"));
+    }
+    h.sync();
+    for mid in mids {
+        answer(h, mid);
+        h.sync();
+    }
+    h.sync(); // confirms the last move's arrival
+}
+
+#[test]
+fn a_seen_write_in_another_epoch_pauses_the_folder() {
+    let h = queued(Live);
+    file_in_order(&h, &["x", "a", "b"]);
+    assert_eq!(h.fake.uids("Transactions"), vec![1, 2, 3]);
+    assert_eq!(place(&h, "a"), ("Transactions".to_string(), 2));
+    h.fake.client_delete("Transactions", 1);
+    h.sync();
+    let a = id_of(&h, "a");
+    h.service()
+        .filing_replies("work", true, std::slice::from_ref(&a))
+        .unwrap();
+    // The session renumbers Transactions: UID 2 now names b.
+    h.fake.inject(FakeOp::Seen, Fault::EpochRaceBefore);
+    let out = h.sync();
+    assert!(has_problem(&out, "epoch_race:Transactions"), "{out}");
+    assert_eq!(paused(&h, "Transactions").as_deref(), Some("epoch_race"));
+    assert_eq!(seen_races(&h, "a"), vec!["epoch_race"]);
+    assert!(has(&flags(&h, "b"), "\\Seen"), "the race marked b");
+    assert!(!has(&flags(&h, "a"), "\\Seen"));
+    let replies = h.service().filing_replies("work", false, &[]).unwrap();
+    let approved_at = |mid: &str| {
+        let id = id_of(&h, mid);
+        let items = replies["items"].as_array().unwrap();
+        items.iter().find(|i| i["id"] == id.as_str()).unwrap()["approved_at"].clone()
+    };
+    assert!(approved_at("b").is_null(), "b still waits: {replies}");
+    assert!(!approved_at("a").is_null(), "a stays approved: {replies}");
+    let writes = seen_writes(&h);
+    h.sync();
+    assert_eq!(seen_writes(&h), writes, "a paused folder is not written");
+    assert_eq!(seen_races(&h, "a").len(), 1, "the race is reported once");
+}
+
+#[test]
+fn a_lost_seen_outcome_followed_by_an_epoch_change_is_a_suspected_race() {
+    let h = queued(Live);
+    file_in_order(&h, &["i"]);
+    h.service().filing_replies("work", true, &[]).unwrap();
+    h.fake.inject(FakeOp::Seen, Fault::ErrorAfter);
+    let out = h.sync();
+    assert!(has_problem(&out, "read_failed:Transactions"), "{out}");
+    h.fake.reset_epoch("Transactions");
+    let out = h.sync();
+    assert!(has_problem(&out, "epoch_race:Transactions"), "{out}");
+    assert_eq!(paused(&h, "Transactions").as_deref(), Some("epoch_race"));
+    assert_eq!(seen_races(&h, "i"), vec!["epoch_race_suspected"]);
+    assert_eq!(seen_writes(&h), 1);
+    h.sync();
+    assert_eq!(seen_races(&h, "i").len(), 1, "the race is reported once");
+}
+
+#[test]
+fn a_lost_seen_outcome_in_the_same_epoch_converges() {
+    let h = queued(Live);
+    file_in_order(&h, &["i"]);
+    h.service().filing_replies("work", true, &[]).unwrap();
+    h.fake.inject(FakeOp::Seen, Fault::ErrorAfter);
+    h.sync();
+    let out = h.sync();
+    assert_eq!(out["filing"]["reads_applied"], 1, "{out}");
+    assert_eq!(paused(&h, "Transactions"), None);
+    assert!(seen_races(&h, "i").is_empty());
+    assert_eq!(seen_writes(&h), 1, "the write had landed");
+    let replies = h.service().filing_replies("work", false, &[]).unwrap();
+    assert_eq!(replies["items"].as_array().unwrap().len(), 0);
+}

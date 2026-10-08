@@ -519,7 +519,7 @@ Apply result: `{"schema_version":1,"account":"work","marked":N,"waiting_marked":
 
 Errors: 2 for `--apply` outside `live` (`refile --apply requires filing mode live`), an unknown category, a folder that names no category or retired folder (`unknown folder: not a category or retired folder`) or several (`folder name matches several folders; pass the native name: A, B`), a limit outside 1..=500, an unknown account; 3 when the state database is unavailable; 5 when `mailtriage.json` changed (`reason: config_changed`) or the placements kept changing (`placements changed concurrently; retry`).
 
-Schema v6 (migration 6): `placements.refile_once`, `placements.filed_home_folder`/`filed_home_epoch`/`filed_home_uid` (the occurrence a COPYUID-proven mailtriage move produced; kept only while it is the known home), `filing_intents.consumes_refile`, `folders.drain_until_uid` (NULL: frozen; 0: retained in the last pass; N: draining until UID N). The newer-schema guard is the public `store::LATEST` (9 since schema v9, see "Reply queue").
+Schema v6 (migration 6): `placements.refile_once`, `placements.filed_home_folder`/`filed_home_epoch`/`filed_home_uid` (the occurrence a COPYUID-proven mailtriage move produced; kept only while it is the known home), `filing_intents.consumes_refile`, `folders.drain_until_uid` (NULL: frozen; 0: retained in the last pass; N: draining until UID N). The newer-schema guard is the public `store::LATEST` (10 since schema v10, see "Reply queue").
 
 Also: `filing status` gains `refile_marked` and `refile_candidates`; `categories apply` gains `hint` (null with filing `off`); `filing plan` refile moves carry `"reason":"refile"`; events `refile_marked`, `refile_cleared {reason}`, `refile_cancelled {intent_id, reason}`, and `moved` with `"reason":"refile"`.
 
@@ -567,7 +567,16 @@ Schema v9 (migration 9) adds the table `read_approvals(account, message_id,
 requested_at, approved_at, applied_at)`, the read approval list. A claimed
 reply exit enters it once (`Store::request_read_approval`);
 `Store::approve_reads` sets `approved_at`, and a live pass sets `applied_at`
-after adding `\Seen` (`Store::mark_read_applied`). `store::LATEST` is 9.
+after adding `\Seen` (`Store::mark_read_applied`).
+
+Schema v10 (migration 10) adds the nullable columns
+`read_approvals.attempt_folder` and `attempt_epoch`: the folder and epoch of
+an `add_seen` session whose outcome is not known yet. A live pass writes
+them (`FilingWrite::ReadAttempt`) before the session and clears them once
+its outcome is known; `filing::reply::recover_reads`, run by
+`filing::recover::recover`, compares a remaining attempt with the folder's
+epoch. Additive, so a process of the previous release keeps inserting rows.
+`store::LATEST` is 10.
 
 - `filing enable --reply-queue on|off` (`Service::filing_enable_with`); the
   result gains `reply_queue`.
@@ -577,12 +586,19 @@ after adding `\Seen` (`Store::mark_read_applied`). `store::LATEST` is 9.
 - The sync `filing` object (and the stored last pass) gains
   `awaiting_reply`, `reply_exits`, `replies_checked` and `reads_applied`,
   each only when not 0; problems `reply_check_failed:<folder>`,
-  `read_failed:<folder>` and `read_incomplete:<folder>`.
+  `read_failed:<folder>` and `read_incomplete:<folder>`, and
+  `epoch_race:<folder>` for a `\Seen` race.
 - `filing replies [--approve [--id ID]...]` (`Service::filing_replies`):
   `{"schema_version":1,"account":"work","waiting":W,"approved_pending":A,"approved":[ids],"items":[{"id","subject","from","folder","answered","requested_at","approved_at"}]}`.
   An `--id` that is not waiting is exit code 2 and approves nothing.
 - `filing plan`: a reply exit's move carries `"reason":"reply_exit"`.
 - `MailEngine::add_seen(folder, uids)`: one session `a1 SELECT; a2 UID
-  STORE uids +FLAGS.SILENT (\Seen)`, with the outcome mapping of
-  `add_flagged`.
+  STORE uids +FLAGS.SILENT (\Seen)`, returning a `WriteOutcome` like
+  `add_flagged`. `filing::reply::apply_reads` maps it: `selected`,
+  `completed` and the verified `session_epoch` set `applied_at`; `selected`
+  in another epoch is an epoch race (pause `epoch_race`, event `epoch_race`
+  with `{"kind":"seen","error":"epoch_race","epoch":E}` per message, rows
+  kept approved); anything else leaves the rows for the next pass
+  (`read_incomplete`); an error keeps the attempt for recovery, which
+  reports another epoch as a suspected race (`"error":"epoch_race_suspected"`).
 

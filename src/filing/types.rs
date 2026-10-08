@@ -306,6 +306,12 @@ pub enum FilingWrite<'a> {
         epoch: u64,
         uid: u64,
     },
+    /// A read approval row's `\Seen` attempt: the folder and epoch of the
+    /// `add_seen` session about to run, or `None` once its outcome is known.
+    ReadAttempt {
+        message_id: &'a str,
+        attempt: Option<(&'a str, u64)>,
+    },
     /// One audit event.
     Event {
         message_id: Option<&'a str>,
@@ -334,4 +340,8 @@ pub struct ReadApproval {
     pub requested_at: String,
     pub approved_at: Option<String>,
     pub applied_at: Option<String>,
+    /// The folder and epoch of an `add_seen` session whose outcome is not
+    /// known yet; recovery checks them for a suspected race.
+    pub attempt_folder: Option<String>,
+    pub attempt_epoch: Option<u64>,
 }

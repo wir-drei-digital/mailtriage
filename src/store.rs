@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 /// Schema migrations: (version reached, SQL). Each runs in its own
 /// `BEGIN IMMEDIATE` transaction that re-reads `user_version` first.
-const MIGRATIONS: [(u32, &str); 9] = [
+const MIGRATIONS: [(u32, &str); 10] = [
     (
         1,
         "CREATE TABLE metadata(key TEXT PRIMARY KEY, value INTEGER NOT NULL);
@@ -118,6 +118,15 @@ ALTER TABLE pass_heartbeats ADD COLUMN reason_at TEXT;",
     (
         9,
         "CREATE TABLE read_approvals(account TEXT NOT NULL, message_id TEXT NOT NULL, requested_at TEXT NOT NULL, approved_at TEXT, applied_at TEXT, PRIMARY KEY(account, message_id));",
+    ),
+    // Reply queue: the folder and epoch of an `add_seen` session whose
+    // outcome is not known yet, so a lost outcome followed by an epoch
+    // change is a suspected race; nullable, so processes of the previous
+    // release keep inserting rows.
+    (
+        10,
+        "ALTER TABLE read_approvals ADD COLUMN attempt_folder TEXT;
+ALTER TABLE read_approvals ADD COLUMN attempt_epoch INTEGER;",
     ),
 ];
 
