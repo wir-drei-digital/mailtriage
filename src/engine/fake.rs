@@ -629,44 +629,11 @@ impl MailEngine for FakeEngine {
     }
 
     fn move_messages(&self, folder: &str, uids: &[u64], target: &str) -> Result<WriteOutcome> {
-        let mut s = self.state();
-        let call = format!("move {folder} {} -> {target}", raw::uid_set(uids));
-        s.validate(&call, &[folder, target], Some(uids))?;
-        s.enter(Some(FakeOp::Move), call, &[folder, target])?;
-        let fault = s.take_fault(FakeOp::Move);
-        let Some(epoch) = s.select(folder, fault)? else {
-            return Ok(WriteOutcome::default());
-        };
-        let mut out = WriteOutcome {
-            selected: true,
-            session_epoch: Some(epoch),
-            completed: false,
-            copyuid: None,
-        };
-        // Without MOVE the command fails; a missing target is NO [TRYCREATE].
-        if !s.caps.move_supported || !s.folders.contains_key(target) {
-            return respond(out, fault);
-        }
-        let partial = fault == Some(Fault::PartialCopy);
-        let mut pairs = Vec::new();
-        for &uid in uids {
-            let msg = if partial {
-                s.get(folder)?.msgs.iter().find(|m| m.uid == uid).cloned()
-            } else {
-                s.remove(folder, uid)
-            };
-            if let Some(msg) = msg {
-                pairs.push((uid, s.append(target, msg)));
-            }
-        }
-        out.completed = !partial;
-        if s.caps.uidplus && !pairs.is_empty() {
-            out.copyuid = Some(CopyUid {
-                target_epoch: s.get(target)?.epoch,
-                pairs,
-            });
-        }
-        respond(out, fault)
+        self.move_with(folder, uids, target, false)
+    }
+
+    fn move_messages_seen(&self, folder: &str, uids: &[u64], target: &str) -> Result<WriteOutcome> {
+        self.move_with(folder, uids, target, true)
     }
 
     fn add_flagged(&self, folder: &str, uids: &[u64]) -> Result<WriteOutcome> {
@@ -706,6 +673,65 @@ impl MailEngine for FakeEngine {
             .filter(|f| s.alias_conflicts.contains(*f))
             .cloned()
             .collect())
+    }
+}
+
+impl FakeEngine {
+    /// `move_messages`, and with `seen` the reply exit's `\\Seen` STORE
+    /// first (in the same selected session, whatever the MOVE then does).
+    fn move_with(
+        &self,
+        folder: &str,
+        uids: &[u64],
+        target: &str,
+        seen: bool,
+    ) -> Result<WriteOutcome> {
+        let mut s = self.state();
+        let verb = if seen { "move_seen" } else { "move" };
+        let call = format!("{verb} {folder} {} -> {target}", raw::uid_set(uids));
+        s.validate(&call, &[folder, target], Some(uids))?;
+        s.enter(Some(FakeOp::Move), call, &[folder, target])?;
+        let fault = s.take_fault(FakeOp::Move);
+        let Some(epoch) = s.select(folder, fault)? else {
+            return Ok(WriteOutcome::default());
+        };
+        if seen {
+            for m in &mut s.folder(folder).msgs {
+                if uids.contains(&m.uid) {
+                    m.flags.insert("\\Seen".into());
+                }
+            }
+        }
+        let mut out = WriteOutcome {
+            selected: true,
+            session_epoch: Some(epoch),
+            completed: false,
+            copyuid: None,
+        };
+        // Without MOVE the command fails; a missing target is NO [TRYCREATE].
+        if !s.caps.move_supported || !s.folders.contains_key(target) {
+            return respond(out, fault);
+        }
+        let partial = fault == Some(Fault::PartialCopy);
+        let mut pairs = Vec::new();
+        for &uid in uids {
+            let msg = if partial {
+                s.get(folder)?.msgs.iter().find(|m| m.uid == uid).cloned()
+            } else {
+                s.remove(folder, uid)
+            };
+            if let Some(msg) = msg {
+                pairs.push((uid, s.append(target, msg)));
+            }
+        }
+        out.completed = !partial;
+        if s.caps.uidplus && !pairs.is_empty() {
+            out.copyuid = Some(CopyUid {
+                target_epoch: s.get(target)?.epoch,
+                pairs,
+            });
+        }
+        respond(out, fault)
     }
 }
 

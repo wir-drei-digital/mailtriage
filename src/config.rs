@@ -80,7 +80,7 @@ pub fn default_config() -> AppConfig {
         },
     );
     AppConfig {
-        schema_version: SCHEMA_VERSION,
+        schema_version: 3,
         updates: UpdateMode::Auto,
         state_dir: "./mailtriage-state".into(),
         provider: ProviderConfig {
@@ -104,10 +104,22 @@ pub fn default_config() -> AppConfig {
     }
 }
 
-/// The schema every config write produces. Schema 3 adds `updates`;
-/// binaries before it accept only 1 and 2, so they refuse a schema 3 file
-/// instead of rewriting it without `updates`.
-pub const SCHEMA_VERSION: u32 = 3;
+/// The newest schema this binary reads. Schema 3 adds `updates`; binaries
+/// before it accept only 1 and 2, so they refuse a schema 3 file instead of
+/// rewriting it without `updates`. Schema 4 adds `filing.reply_queue` and is
+/// written only by a config that turns it on (see `written_schema`).
+pub const SCHEMA_VERSION: u32 = 4;
+
+/// The schema a config write produces: 4 when any account turns the reply
+/// queue on, so binaries without it refuse the file instead of rewriting it
+/// without `reply_queue`; otherwise 3, which those binaries still read.
+pub fn written_schema(config: &AppConfig) -> u32 {
+    if config.accounts.values().any(|a| a.filing.reply_queue) {
+        4
+    } else {
+        3
+    }
+}
 
 /// The message for an invalid `updates` value (exit 2).
 pub const UPDATES_RULE: &str = "updates must be auto, notify or off";
@@ -133,9 +145,9 @@ fn updates_value(value: &Value) -> Result<UpdateMode> {
     }
 }
 
-/// Moves the legacy `himalaya` block into `engine` and marks the config as
-/// schema 3. Refuses unknown schema versions so a newer file is never
-/// rewritten as schema 3.
+/// Moves the legacy `himalaya` block into `engine` and marks the config
+/// with the schema it is written as (`written_schema`). Refuses unknown
+/// schema versions so a newer file is never rewritten as an older one.
 pub fn normalize(config: &mut AppConfig) -> Result<()> {
     check_schema_version(config.schema_version)?;
     for (name, account) in config.accounts.iter_mut() {
@@ -146,7 +158,7 @@ pub fn normalize(config: &mut AppConfig) -> Result<()> {
             account.engine = Some(EngineConfig::Himalaya(h));
         }
     }
-    config.schema_version = SCHEMA_VERSION;
+    config.schema_version = written_schema(config);
     Ok(())
 }
 

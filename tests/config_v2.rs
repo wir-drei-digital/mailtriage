@@ -154,7 +154,7 @@ fn source_mailboxes_are_checked_when_filing_is_on() {
 fn unsupported_schema_versions_are_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c.json");
-    for version in [0, 4] {
+    for version in [0, 5] {
         let mut c = serde_json::to_value(config::default_config()).unwrap();
         c["schema_version"] = json!(version);
         fs::write(&path, c.to_string()).unwrap();
@@ -167,6 +167,26 @@ fn unsupported_schema_versions_are_rejected() {
             "saved schema {version}"
         );
     }
+}
+
+#[test]
+fn the_reply_queue_alone_makes_a_config_schema_4() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("c.json");
+    let mut c = config::default_config();
+    config::save(&path, &c).unwrap();
+    let on_disk: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(on_disk["schema_version"], 3);
+    assert!(on_disk["accounts"]["work"]["filing"]
+        .get("reply_queue")
+        .is_none());
+    c.accounts.get_mut("work").unwrap().filing.reply_queue = true;
+    config::save(&path, &c).unwrap();
+    let on_disk: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(on_disk["schema_version"], 4);
+    assert_eq!(on_disk["accounts"]["work"]["filing"]["reply_queue"], true);
+    let loaded = config::load(&path).unwrap();
+    assert!(loaded.accounts["work"].filing.reply_queue);
 }
 
 #[test]

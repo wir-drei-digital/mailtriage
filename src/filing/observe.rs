@@ -278,6 +278,9 @@ impl MailEngine for OfflineEngine {
     fn move_messages(&self, _: &str, _: &[u64], _: &str) -> Result<WriteOutcome> {
         Self::refuse()
     }
+    fn move_messages_seen(&self, _: &str, _: &[u64], _: &str) -> Result<WriteOutcome> {
+        Self::refuse()
+    }
     fn add_flagged(&self, _: &str, _: &[u64]) -> Result<WriteOutcome> {
         Self::refuse()
     }

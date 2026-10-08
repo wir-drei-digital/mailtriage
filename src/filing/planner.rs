@@ -49,6 +49,14 @@ pub struct Plan {
     /// Refile spec: messages whose `Move` consumes their refile mark.
     #[serde(skip_serializing_if = "BTreeSet::is_empty")]
     pub refile_moves: BTreeSet<String>,
+    /// Reply queue spec: messages whose `Move` is a reply exit, sent with
+    /// `\Seen` in the same session.
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    pub reply_exits: BTreeSet<String>,
+    /// Reply queue spec: messages held in their source folder until they
+    /// are answered or marked done.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub awaiting_reply: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +115,8 @@ pub struct PlanMessage {
     pub blocked: bool,
     pub open_move_intent: bool,
     pub open_flag_intent: bool,
+    /// The user marked the message done (`review_state` `done`).
+    pub done: bool,
     pub effective: Effective,
 }
 
@@ -116,6 +126,8 @@ pub struct PlanInput {
     /// `filing plan` and dry_run passes: folders that would be created count as usable.
     pub preview: bool,
     pub flag_enabled: bool,
+    /// Reply queue spec: `filing.reply_queue`.
+    pub reply_queue: bool,
     pub max_actions: usize,
     pub enabled_at: Option<DateTime<Utc>>,
     pub categories: BTreeMap<String, CategoryFolder>,
@@ -127,6 +139,10 @@ enum MoveDecision {
     Move(Action),
     /// A move that consumes the message's refile mark.
     Refile(Action),
+    /// A held message leaves its source folder with `\Seen`.
+    ReplyExit(Action),
+    /// A held message stays in its source folder.
+    Held,
     Clear,
     Nothing,
 }
@@ -175,6 +191,11 @@ pub fn plan_with_refile(input: &PlanInput, refile: &RefileInput) -> Plan {
                 out.refile_moves.insert(m.message_id.clone());
                 actions.push(a);
             }
+            MoveDecision::ReplyExit(a) => {
+                out.reply_exits.insert(m.message_id.clone());
+                actions.push(a);
+            }
+            MoveDecision::Held => out.awaiting_reply.push(m.message_id.clone()),
             MoveDecision::Clear => out
                 .cleared_requests
                 .push((m.message_id.clone(), m.desired_rev)),
@@ -205,6 +226,7 @@ pub fn plan_with_refile(input: &PlanInput, refile: &RefileInput) -> Plan {
         .map(Action::message_id)
         .collect();
     out.refile_moves.retain(|id| kept.contains(id.as_str()));
+    out.reply_exits.retain(|id| kept.contains(id.as_str()));
     out
 }
 
@@ -229,6 +251,23 @@ fn is_new(input: &PlanInput, m: &PlanMessage) -> bool {
         && matches!((m.internal_date, input.enabled_at), (Some(d), Some(on)) if d >= on)
 }
 
+/// Reply queue spec "Entry": with the queue on, new mail whose effective
+/// decision is action required (from an override or a current
+/// classification) is held in its source folder. Backfilled mail is not.
+pub(crate) fn holds(input: &PlanInput, m: &PlanMessage) -> bool {
+    let e = &m.effective;
+    input.reply_queue
+        && is_new(input, m)
+        && e.action_required == Some(true)
+        && (e.action_from_override || e.current)
+}
+
+/// Reply queue spec "Exit": the server reports `\Answered`, or the user
+/// marked the message done.
+pub(crate) fn reply_done(m: &PlanMessage) -> bool {
+    m.done || m.flags.iter().any(|f| f.eq_ignore_ascii_case("\\Answered"))
+}
+
 fn flag_action(
     input: &PlanInput,
     m: &PlanMessage,
@@ -246,7 +285,11 @@ fn flag_action(
         return FlagDecision::Nothing;
     }
     let e = &m.effective;
-    let action = e.action_required == Some(true) && (e.action_from_override || e.current);
+    // With the reply queue on, the source folder already shows what needs
+    // action; only high urgency is flagged.
+    let action = !input.reply_queue
+        && e.action_required == Some(true)
+        && (e.action_from_override || e.current);
     let urgent = e.urgency == Some(Urgency::High) && (e.urgency_from_override || e.current);
     if !(action || urgent) {
         return FlagDecision::Nothing;
@@ -337,6 +380,10 @@ fn move_action(
     if !home_view.is_source || m.pinned {
         return MoveDecision::Nothing;
     }
+    let held = holds(input, m);
+    if held && !reply_done(m) {
+        return MoveDecision::Held;
+    }
     let e = &m.effective;
     let Some(category) = &e.category_id else {
         return MoveDecision::Nothing;
@@ -350,13 +397,18 @@ fn move_action(
     if !(is_new(input, m) || m.eligible_once) || *to == home.folder || !target_usable(input, to) {
         return MoveDecision::Nothing;
     }
-    MoveDecision::Move(Action::Move {
+    let action = Action::Move {
         message_id: m.message_id.clone(),
         from: home.clone(),
         to: to.clone(),
         desired_rev: m.desired_rev,
         consumes_eligible: m.eligible_once,
-    })
+    };
+    if held {
+        MoveDecision::ReplyExit(action)
+    } else {
+        MoveDecision::Move(action)
+    }
 }
 
 #[cfg(test)]
@@ -409,6 +461,7 @@ mod tests {
             mode: FilingMode::Live,
             preview: false,
             flag_enabled: true,
+            reply_queue: false,
             max_actions: 200,
             enabled_at: Some(t(8)),
             categories: BTreeMap::from([
@@ -448,6 +501,7 @@ mod tests {
             blocked: false,
             open_move_intent: false,
             open_flag_intent: false,
+            done: false,
             effective: Effective {
                 category_id: Some(category.into()),
                 current: true,
@@ -474,6 +528,102 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Reply queue spec: a message that needs action, in the queue.
+    fn needs_reply(id: &str, category: &str) -> PlanMessage {
+        let mut m = msg(id, category);
+        m.effective.action_required = Some(true);
+        m
+    }
+    fn queued(messages: Vec<PlanMessage>) -> PlanInput {
+        let mut i = input(messages);
+        i.reply_queue = true;
+        i
+    }
+
+    #[test]
+    fn reply_queue_holds_new_mail_that_needs_action() {
+        let p = plan(&queued(vec![
+            needs_reply("ask", "transactions"),
+            msg("fyi", "newsletters"),
+        ]));
+        assert_eq!(moves(&p), vec![("fyi".into(), "Newsletters".into())]);
+        assert_eq!(p.awaiting_reply, vec!["ask".to_string()]);
+        assert!(p.reply_exits.is_empty());
+        // Without the queue the same message moves (and is flagged) as before.
+        let p = plan(&input(vec![needs_reply("ask", "transactions")]));
+        assert_eq!(moves(&p), vec![("ask".into(), "Transactions".into())]);
+        assert_eq!(flags(&p), vec!["ask".to_string()]);
+        assert!(p.awaiting_reply.is_empty());
+    }
+
+    #[test]
+    fn an_answered_held_message_leaves_with_a_reply_exit() {
+        let mut answered = needs_reply("ask", "transactions");
+        answered.flags = vec!["\\Seen".into(), "\\Answered".into()];
+        let p = plan(&queued(vec![answered]));
+        assert_eq!(moves(&p), vec![("ask".into(), "Transactions".into())]);
+        assert_eq!(p.reply_exits, BTreeSet::from(["ask".to_string()]));
+        assert!(p.awaiting_reply.is_empty());
+    }
+
+    #[test]
+    fn marking_a_held_message_done_is_a_reply_exit() {
+        let mut done = needs_reply("bill", "transactions");
+        done.done = true;
+        let p = plan(&queued(vec![done]));
+        assert_eq!(moves(&p), vec![("bill".into(), "Transactions".into())]);
+        assert!(p.reply_exits.contains("bill"));
+    }
+
+    #[test]
+    fn the_reply_queue_flags_only_high_urgency() {
+        let mut urgent = needs_reply("urgent", "transactions");
+        urgent.effective.urgency = Some(Urgency::High);
+        let p = plan(&queued(vec![needs_reply("ask", "transactions"), urgent]));
+        assert_eq!(flags(&p), vec!["urgent".to_string()]);
+    }
+
+    #[test]
+    fn the_reply_queue_holds_only_new_current_unpinned_mail() {
+        let mut old = needs_reply("old", "transactions");
+        old.internal_date = Some(t(7));
+        let mut backfill = needs_reply("backfill", "transactions");
+        backfill.internal_date = Some(t(7));
+        backfill.eligible_once = true;
+        let mut stale = needs_reply("stale", "transactions");
+        stale.effective.current = false;
+        let mut pinned = needs_reply("pinned", "transactions");
+        pinned.pinned = true;
+        pinned.flags = vec!["\\Answered".into()];
+        let mut overridden = msg("override", "transactions");
+        overridden.effective.current = false;
+        overridden.effective.category_from_override = true;
+        overridden.effective.action_required = Some(true);
+        overridden.effective.action_from_override = true;
+        let p = plan(&queued(vec![old, backfill, stale, pinned, overridden]));
+        // Old mail is left alone, backfilled mail files as before, a stale
+        // classification and a pin decide nothing, an override holds.
+        assert_eq!(moves(&p), vec![("backfill".into(), "Transactions".into())]);
+        assert!(p.reply_exits.is_empty());
+        assert_eq!(p.awaiting_reply, vec!["override".to_string()]);
+    }
+
+    #[test]
+    fn a_held_message_whose_decision_changes_files_without_seen() {
+        let p = plan(&queued(vec![msg("ask", "transactions")]));
+        assert_eq!(moves(&p), vec![("ask".into(), "Transactions".into())]);
+        assert!(p.reply_exits.is_empty());
+    }
+
+    #[test]
+    fn an_answered_held_message_in_an_inbox_category_stays() {
+        let mut answered = needs_reply("ask", "correspondence");
+        answered.flags = vec!["\\Answered".into()];
+        let p = plan(&queued(vec![answered]));
+        assert!(moves(&p).is_empty());
+        assert!(p.reply_exits.is_empty());
     }
 
     #[test]

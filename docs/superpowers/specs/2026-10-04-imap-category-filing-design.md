@@ -35,7 +35,9 @@ read-only fetch, full-fingerprint identity) remains in force.
 Each invariant has at least one dedicated test.
 
 1. The engine boundary exposes no destructive operation: no delete, expunge,
-   flag removal, `\Seen` change, folder delete or folder rename.
+   flag removal, `\Seen` change, folder delete or folder rename. (Amended by
+   the [reply queue](2026-10-08-reply-queue-design.md): `\Seen` may be added,
+   never removed, in the first attempt of a reply exit.)
 2. In filing modes `off` and `dry_run` the engine receives zero write calls
    (create, subscribe, move, store).
 3. Every move, revert and flag is journaled as an intent in SQLite before the

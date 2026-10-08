@@ -267,4 +267,45 @@ fn filing_against_real_dovecot() {
     assert_eq!(invoice["placement"]["location_state"], "known");
     assert_eq!(invoice["placement"]["folder"], "INBOX");
     assert_eq!(invoice["placement"]["pinned"], true);
+    // 6. Reply queue: mail that needs action waits in INBOX, unread and
+    // unflagged, until the client sets \Answered; then it is filed read.
+    mt(
+        &e,
+        &[
+            "filing",
+            "enable",
+            "--account",
+            "work",
+            "--mode",
+            "live",
+            "--reply-queue",
+            "on",
+        ],
+    );
+    let q = write_mail(
+        e.dir.path(),
+        "q.eml",
+        "<q@e2e>",
+        "Invoice",
+        "Payment due next month",
+    );
+    imap(&e, &["append", "INBOX", q.to_str().unwrap()]);
+    for _ in 0..2 {
+        sync(&e);
+    }
+    let held = only_location(&e, "<q@e2e>");
+    assert_eq!(held.0, "INBOX");
+    assert!(!held.1.contains(&"\\Seen".to_string()), "{held:?}");
+    assert!(!held.1.contains(&"\\Flagged".to_string()), "{held:?}");
+    let status = mt(&e, &["filing", "status", "--account", "work"]);
+    assert_eq!(status["awaiting_reply"], 1, "{status}");
+    imap(&e, &["answer", "INBOX", "<q@e2e>"]);
+    let out = sync(&e);
+    assert_eq!(out["filing"]["reply_exits"], 1, "{out}");
+    let filed = only_location(&e, "<q@e2e>");
+    assert_eq!(filed.0, folder(&e, "Transactions"));
+    assert!(filed.1.contains(&"\\Seen".to_string()), "{filed:?}");
+    assert!(filed.1.contains(&"\\Answered".to_string()), "{filed:?}");
+    sync(&e);
+    assert_eq!(only_location(&e, "<q@e2e>").0, folder(&e, "Transactions"));
 }

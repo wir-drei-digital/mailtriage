@@ -724,8 +724,9 @@ impl Service {
         let store = &mut self.store;
         let result = (|| {
             let preview = ctx.mode == FilingMode::DryRun;
-            let plan = filing::refile::plan_pass(store, ctx, map, preview)?;
+            let plan = filing::refile::plan_pass(store, ctx, map, preview, summary)?;
             summary.planned = plan.actions.len();
+            summary.awaiting_reply = plan.awaiting_reply.len();
             filing::apply::apply(store, ctx, map, &plan, summary)
         })();
         match result {
@@ -1303,6 +1304,16 @@ impl Service {
     /// (its name), validates the folders and writes the mode, under the
     /// exclusive configuration lock. Idempotent.
     pub fn filing_enable(&mut self, name: &str, mode: FilingMode) -> Result<Value> {
+        self.filing_enable_with(name, mode, None)
+    }
+    /// `filing enable`, optionally turning the reply queue on or off
+    /// (`None` keeps the configured value).
+    pub fn filing_enable_with(
+        &mut self,
+        name: &str,
+        mode: FilingMode,
+        reply_queue: Option<bool>,
+    ) -> Result<Value> {
         if mode == FilingMode::Off {
             return Err(err(2, "filing enable needs mode dry_run or live"));
         }
@@ -1312,17 +1323,22 @@ impl Service {
         let _lock = self.exclusive_config_lock()?;
         self.require_unchanged()?;
         self.ensure(name)?;
-        self.write_filing_mode(name, mode)
+        self.write_filing_mode(name, mode, reply_queue)
     }
     /// `filing disable`: writes mode `off`; the next pass stops filing.
     pub fn filing_disable(&mut self, name: &str) -> Result<Value> {
         let _lock = self.exclusive_config_lock()?;
         self.require_unchanged()?;
-        self.write_filing_mode(name, FilingMode::Off)
+        self.write_filing_mode(name, FilingMode::Off, None)
     }
     /// Edits the configuration as stored (relative paths stay relative); an
     /// unchanged configuration is not rewritten.
-    fn write_filing_mode(&mut self, name: &str, mode: FilingMode) -> Result<Value> {
+    fn write_filing_mode(
+        &mut self,
+        name: &str,
+        mode: FilingMode,
+        reply_queue: Option<bool>,
+    ) -> Result<Value> {
         let stored = config::load(&self.path).map_err(|_| err(2, "invalid configuration"))?;
         let mut updated = stored.clone();
         let a = updated
@@ -1335,6 +1351,9 @@ impl Service {
             }
         }
         a.filing.mode = mode;
+        if let Some(on) = reply_queue {
+            a.filing.reply_queue = on;
+        }
         validate_edit(&updated, name)?;
         if serde_json::to_value(&updated)? != serde_json::to_value(&stored)? {
             config::save(&self.path, &updated)?;
@@ -1349,7 +1368,7 @@ impl Service {
             .map(|c| (c.id.clone(), json!(c.effective_folder())))
             .collect();
         Ok(
-            json!({"schema_version":1,"account":name,"mode":filing::mode_str(mode),"folders":folders}),
+            json!({"schema_version":1,"account":name,"mode":filing::mode_str(mode),"reply_queue":account.filing.reply_queue,"folders":folders}),
         )
     }
     /// `filing status`: configuration and stored state only, no engine calls.
@@ -1396,6 +1415,12 @@ impl Service {
         }
         let refile_candidates =
             refile::command::candidate_total(&self.store, name, &account, &generation)?;
+        let awaiting_reply = if account.filing.reply_queue {
+            self.offline_plan(name, &account, &generation)?
+                .awaiting_reply
+        } else {
+            vec![]
+        };
         let unresolved = self.store.arrivals(name, Some("unresolved"))?;
         let last_pass = state.last_pass.clone().unwrap_or(Value::Null);
         Ok(json!({
@@ -1422,6 +1447,9 @@ impl Service {
             "stale_requests": {"count": stale.len(), "ids": listed(&stale)},
             "refile_marked": refile_marked,
             "refile_candidates": refile_candidates,
+            "reply_queue": account.filing.reply_queue,
+            "awaiting_reply": awaiting_reply.len(),
+            "awaiting_reply_ids": listed(&awaiting_reply),
             "alias_conflicts": map.alias_conflicts,
             "problems": last_pass.get("problems").cloned().unwrap_or(json!([])),
             "last_pass": last_pass,
@@ -1435,26 +1463,7 @@ impl Service {
         }
         let (account, generation) = self.ensure(name)?;
         let mode = filing_mode(&account);
-        let plan = if mode == FilingMode::Off {
-            Plan::default()
-        } else {
-            let map = observe::offline_map(&self.store, name, &account)?;
-            let no_binding_check = || -> Result<()> { Ok(()) };
-            let ctx = PassContext {
-                account: name,
-                cfg: &account,
-                engine: &OfflineEngine,
-                mode,
-                generation: &generation,
-                now: now(),
-                max_attempts: self.config.policy.max_attempts,
-                verify_binding: &no_binding_check,
-            };
-            let input = inputs::plan_input(&self.store, &ctx, &map, true)?;
-            let gone = refile::rules::gone(&self.store, name, &map.listed)?;
-            let facts = refile::rules::input(&self.store, name, &account, &gone)?;
-            planner::plan_with_refile(&input, &facts)
-        };
+        let plan = self.offline_plan(name, &account, &generation)?;
         let shown: Vec<Value> = plan.actions[..plan.actions.len().min(limit)]
             .iter()
             .map(|a| plan_action(&plan, a))
@@ -1462,6 +1471,30 @@ impl Service {
         Ok(
             json!({"schema_version":1,"account":name,"mode":filing::mode_str(mode),"folders_to_create":plan.folders_to_create,"actions":shown,"total":plan.actions.len()}),
         )
+    }
+    /// The planner over stored state as a preview, with the offline folder
+    /// map and no engine calls; empty with filing off.
+    fn offline_plan(&self, name: &str, account: &AccountConfig, generation: &str) -> Result<Plan> {
+        let mode = filing_mode(account);
+        if mode == FilingMode::Off {
+            return Ok(Plan::default());
+        }
+        let map = observe::offline_map(&self.store, name, account)?;
+        let no_binding_check = || -> Result<()> { Ok(()) };
+        let ctx = PassContext {
+            account: name,
+            cfg: account,
+            engine: &OfflineEngine,
+            mode,
+            generation,
+            now: now(),
+            max_attempts: self.config.policy.max_attempts,
+            verify_binding: &no_binding_check,
+        };
+        let input = inputs::plan_input(&self.store, &ctx, &map, true)?;
+        let gone = refile::rules::gone(&self.store, name, &map.listed)?;
+        let facts = refile::rules::input(&self.store, name, account, &gone)?;
+        Ok(planner::plan_with_refile(&input, &facts))
     }
     /// `filing backfill`: placements homed in a source folder that are
     /// unfiled, unpinned, unblocked and not yet eligible once; with `apply`
@@ -1909,10 +1942,12 @@ fn listed<T>(all: &[T]) -> &[T] {
 /// A `filing plan` action; a refile move carries `"reason": "refile"`.
 fn plan_action(plan: &Plan, action: &planner::Action) -> Value {
     let mut value = json!(action);
-    if matches!(action, planner::Action::Move { .. })
-        && plan.refile_moves.contains(action.message_id())
-    {
-        value["reason"] = json!("refile");
+    if matches!(action, planner::Action::Move { .. }) {
+        if plan.refile_moves.contains(action.message_id()) {
+            value["reason"] = json!("refile");
+        } else if plan.reply_exits.contains(action.message_id()) {
+            value["reason"] = json!("reply_exit");
+        }
     }
     value
 }

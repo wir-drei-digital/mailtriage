@@ -22,8 +22,8 @@ const BATCH: usize = 100;
 
 /// Step 9 in `live`: clears satisfied explicit requests, consumes the flag
 /// attempt of already-flagged messages, then claims and applies flags (per
-/// folder and epoch) and moves (per folder, epoch and target) in batches of
-/// at most 100. Nothing happens unless writes are allowed. Returns the
+/// folder and epoch) and moves (per folder, epoch, target, and whether they
+/// are reply exits that add `\Seen`) in batches of at most 100. Nothing happens unless writes are allowed. Returns the
 /// messages whose UID batch verification dropped (absent, or another
 /// Message-ID or size), for placement re-evaluation.
 pub fn apply(
@@ -42,10 +42,10 @@ pub fn apply(
         consume_flag_attempt(store, ctx, id)?;
     }
     let flags = group(plan, |a| match a {
-        Action::Flag { at, .. } => Some((at.folder.clone(), at.epoch, String::new())),
+        Action::Flag { at, .. } => Some((at.folder.clone(), at.epoch, String::new(), false)),
         Action::Move { .. } => None,
     });
-    for ((folder, epoch, _), actions) in &flags {
+    for ((folder, epoch, _, _), actions) in &flags {
         for chunk in actions.chunks(BATCH) {
             let batch = flag_batch(store, ctx, (folder, *epoch), chunk, &mut dropped, summary);
             if let Err(e) = batch {
@@ -54,16 +54,26 @@ pub fn apply(
         }
     }
     let moves = group(plan, |a| match a {
-        Action::Move { from, to, .. } => Some((from.folder.clone(), from.epoch, to.clone())),
+        Action::Move {
+            message_id,
+            from,
+            to,
+            ..
+        } => Some((
+            from.folder.clone(),
+            from.epoch,
+            to.clone(),
+            plan.reply_exits.contains(message_id),
+        )),
         Action::Flag { .. } => None,
     });
-    for ((folder, epoch, to), actions) in &moves {
+    for ((folder, epoch, to, seen), actions) in &moves {
         for chunk in actions.chunks(BATCH) {
             let batch = move_batch(
                 store,
                 ctx,
                 map,
-                (folder, *epoch, to),
+                (folder, *epoch, to, *seen),
                 chunk,
                 &plan.refile_moves,
                 &mut dropped,
@@ -77,7 +87,8 @@ pub fn apply(
     Ok(dropped)
 }
 
-type BatchKey = (String, u64, String);
+/// Folder, epoch, move target ("" for flags), reply exit.
+type BatchKey = (String, u64, String, bool);
 
 /// Actions grouped by `key`, groups and members in plan order.
 fn group(plan: &Plan, key: impl Fn(&Action) -> Option<BatchKey>) -> Vec<(BatchKey, Vec<&Action>)> {
@@ -436,13 +447,14 @@ pub(crate) fn race_problem(folder: &str, summary: &mut FilingSummary) {
 }
 
 /// One move batch: verify, snapshot the target, claim (a refile move as
-/// one, checked again right after its claim), dispatch.
+/// one, checked again right after its claim), dispatch (with `\Seen` for a
+/// batch of reply exits).
 #[allow(clippy::too_many_arguments)] // One move batch with its pass context.
 fn move_batch(
     store: &mut Store,
     ctx: &PassContext,
     map: &FolderMap,
-    (folder, epoch, to): (&str, u64, &str),
+    (folder, epoch, to, seen): (&str, u64, &str, bool),
     actions: &[&Action],
     refile: &BTreeSet<String>,
     dropped: &mut Vec<String>,
@@ -485,7 +497,8 @@ fn move_batch(
     if claimed.is_empty() {
         return Ok(());
     }
-    dispatch_moves(store, ctx, folder, epoch, to, &claimed, summary)
+    dispatch_moves(store, ctx, (folder, epoch, to, seen), &claimed, summary)?;
+    Ok(())
 }
 
 /// Refile spec "Intents", at claim time: a refile intent that fails its
@@ -522,20 +535,24 @@ pub(crate) fn target_watched(
     Ok(store.discovery_epoch(ctx.account, target)? == Some(epoch))
 }
 
-/// One `move_messages` session for claimed intents `(intent id, UID)` verified
-/// in `folder`/`epoch`, mapped per spec "Moves" step 4. Every engine or
-/// outcome failure leaves the intents `uncertain` for recovery.
+/// One `move_messages` session (`move_messages_seen` for reply exits) for
+/// claimed intents `(intent id, UID)` verified in `folder`/`epoch`, mapped
+/// per spec "Moves" step 4. Every engine or outcome failure leaves the
+/// intents `uncertain` for recovery.
 pub(crate) fn dispatch_moves(
     store: &mut Store,
     ctx: &PassContext,
-    folder: &str,
-    epoch: u64,
-    target: &str,
+    (folder, epoch, target, seen): (&str, u64, &str, bool),
     claimed: &[(i64, u64)],
     summary: &mut FilingSummary,
 ) -> Result<()> {
     let uids: Vec<u64> = claimed.iter().map(|c| c.1).collect();
-    let outcome = match ctx.engine.move_messages(folder, &uids, target) {
+    let sent = if seen {
+        ctx.engine.move_messages_seen(folder, &uids, target)
+    } else {
+        ctx.engine.move_messages(folder, &uids, target)
+    };
+    let outcome = match sent {
         Ok(o) => o,
         Err(e) => {
             set_all(store, ctx, claimed, "uncertain", "dispatch_error")?;
@@ -584,6 +601,9 @@ pub(crate) fn dispatch_moves(
     }
     if outcome.completed {
         summary.moved += claimed.len();
+        if seen {
+            summary.reply_exits += claimed.len();
+        }
     } else {
         summary.errors += 1;
         summary.problems.push(format!("move_incomplete:{folder}"));

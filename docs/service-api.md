@@ -532,3 +532,25 @@ worker holds the account lock), `binding_conflict` and the other reasons, and
 the migration (it updates `finished_at` but neither `reason` nor `reason_at`),
 so a reason never outlives its pass. `store::LATEST` is public: tests name the
 latest schema `LATEST` and a newer one `LATEST + 1`.
+
+## Reply queue (config schema 4)
+
+`filing.reply_queue` (default `false`, written only when true) holds new mail
+that needs action in its source folder until it is answered or marked done
+(spec: `docs/superpowers/specs/2026-10-08-reply-queue-design.md`). A config
+that turns it on is written as `schema_version` 4; every other config stays
+3. `config::SCHEMA_VERSION` (4) is the newest schema a binary reads;
+`config::written_schema` is the one a write produces. There is no database
+migration.
+
+- `filing enable --reply-queue on|off` (`Service::filing_enable_with`); the
+  result gains `reply_queue`.
+- `filing status` gains `reply_queue`, `awaiting_reply` and
+  `awaiting_reply_ids` (up to 50).
+- The sync `filing` object (and the stored last pass) gains
+  `awaiting_reply`, `reply_exits` and `replies_checked`, each only when not 0.
+- `filing plan`: a reply exit's move carries `"reason":"reply_exit"`.
+- `MailEngine::move_messages_seen(folder, uids, target)`: one session
+  `a1 SELECT; s1 UID STORE uids +FLAGS.SILENT (\Seen); a2 UID MOVE uids
+  target`, with the outcome of the MOVE as for `move_messages`.
+

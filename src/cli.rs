@@ -370,6 +370,10 @@ struct EnableArg {
     account: String,
     #[arg(long, value_parser = ["dry-run", "live"])]
     mode: String,
+    /// Keep new mail that needs action in the inbox until it is answered
+    /// or marked done (default: keep the configured value).
+    #[arg(long, value_parser = ["on", "off"])]
+    reply_queue: Option<String>,
 }
 
 #[derive(Args)]
@@ -739,7 +743,8 @@ fn filing(config: &Path, command: &FilingCommand) -> Result<Value, CliError> {
             } else {
                 FilingMode::DryRun
             };
-            service.filing_enable(&arg.account, mode)
+            let reply_queue = arg.reply_queue.as_deref().map(|v| v == "on");
+            service.filing_enable_with(&arg.account, mode, reply_queue)
         }
         FilingCommand::Disable(arg) => service.filing_disable(&arg.account),
         FilingCommand::Plan(arg) => service.filing_plan(&arg.account, arg.limit),

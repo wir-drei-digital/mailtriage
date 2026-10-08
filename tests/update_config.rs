@@ -95,7 +95,7 @@ fn the_updates_mode_is_read_without_the_rest_of_validation() {
         config::read_updates_mode(&path).unwrap(),
         UpdateMode::Notify
     );
-    c["schema_version"] = json!(4);
+    c["schema_version"] = json!(5);
     let path = write(dir.path(), &c);
     assert!(config::read_updates_mode(&path).is_err());
     assert!(config::read_updates_mode(&dir.path().join("missing.json")).is_err());

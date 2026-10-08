@@ -637,12 +637,12 @@ fn retry_or_supersede(
     if !store.reclaim_move(&next, &now())? {
         return store.update_intent(intent.id, "superseded", IntentPatch::default(), &ctx.now);
     }
+    // A retried reply exit moves without `\Seen`: the read state is added at
+    // most once, in the first attempt's session.
     dispatch_moves(
         store,
         ctx,
-        &from.folder,
-        from.epoch,
-        &target,
+        (&from.folder, from.epoch, &target, false),
         &[(intent.id, from.uid)],
         summary,
     )

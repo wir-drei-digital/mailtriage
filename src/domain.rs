@@ -121,6 +121,11 @@ pub struct FilingConfig {
     pub flag: bool,
     #[serde(default = "default_max_actions")]
     pub max_actions_per_pass: usize,
+    /// Reply queue spec: new mail that needs action stays in its source
+    /// folder until it is answered (or marked done), then gets `\Seen` and
+    /// moves to its category folder.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reply_queue: bool,
 }
 impl Default for FilingConfig {
     fn default() -> Self {
@@ -128,6 +133,7 @@ impl Default for FilingConfig {
             mode: FilingMode::Off,
             flag: true,
             max_actions_per_pass: 200,
+            reply_queue: false,
         }
     }
 }

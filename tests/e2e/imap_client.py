@@ -147,6 +147,14 @@ def cmd_delete(conn, args):
     return {"folder": args.folder, "uid": uid}
 
 
+def cmd_answer(conn, args):
+    # The simulated user replying: mail clients set \Answered on the original.
+    select(conn, args.folder)
+    uid = one_uid(conn, args.folder, args.message_id)
+    check(conn.uid("STORE", str(uid), "+FLAGS.SILENT", "(\\Answered)"), "UID STORE")
+    return {"folder": args.folder, "uid": uid}
+
+
 def cmd_reset_epoch(conn, args):
     old = uid_validity(conn, args.folder)
     # Dovecot hands out UIDVALIDITY values from a counter that can run ahead
@@ -185,6 +193,10 @@ def parse_args(argv):
     p.add_argument("folder")
     p.add_argument("message_id")
     p.set_defaults(run=cmd_delete)
+    p = sub.add_parser("answer")
+    p.add_argument("folder")
+    p.add_argument("message_id")
+    p.set_defaults(run=cmd_answer)
     p = sub.add_parser("reset-epoch")
     p.add_argument("folder")
     p.add_argument("container")
