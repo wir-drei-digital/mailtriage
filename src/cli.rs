@@ -908,7 +908,11 @@ fn watch(cli: &Cli, arg: &WatchArg) -> Result<Value, CliError> {
             Moment::BeforePass => updates.before_pass(&path, &stopped),
             Moment::Waiting => updates.while_waiting(&stopped),
         },
-        || Service::open(&path)?.sync(&arg.account, arg.limit),
+        || {
+            Service::open(&path)?
+                .with_stop(Arc::clone(&stop))
+                .sync(&arg.account, arg.limit)
+        },
     )?;
     let partial = tally.partial_passes > 0 || tally.skipped_passes > 0;
     Ok(

@@ -88,6 +88,7 @@ ExecStart=\"/opt/mail triage/bin/mailtriage\" watch --config \"/Users/a & b/.con
 Environment=\"PATH=/opt/homebrew/bin:/usr/bin:/bin\"
 Restart=on-failure
 RestartSec=30
+TimeoutStopSec=120
 UMask=0077
 
 [Install]
