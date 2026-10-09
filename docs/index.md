@@ -3,8 +3,8 @@ layout: home
 
 hero:
   name: mailtriage
-  text: Find the mail that needs you.
-  tagline: Classify incoming email, review what needs attention, and optionally file it into folders in your usual mail client.
+  text: A background worker for your inbox.
+  tagline: Keep the mail apps you already use. mailtriage tidies your existing mailbox in the background. With live filing enabled, it sorts and flags mail on your mail server, so the changes sync to every connected mail client.
   image:
     src: /mascot.webp
     alt: The mailtriage mascot, an orange envelope looking through a magnifying glass
@@ -17,10 +17,10 @@ hero:
       link: /guide/introduction
 
 features:
-  - title: Review what matters
-    details: Each message gets a category, an urgency and a decision about whether you need to act. Correct a decision or mark a message done.
-    link: /guide/daily-use
-    linkText: Daily use
+  - title: One mailbox, all your mail apps
+    details: Filing changes happen in your existing mailbox. The same folders, messages and flags appear on your phone, desktop and webmail as each client syncs.
+    link: /guide/filing
+    linkText: How filing works
   - title: Check mail in the background
     details: A service checks for new mail. The tray app shows account status and lets you edit categories.
     link: /guide/tray
@@ -30,6 +30,12 @@ features:
     link: /guide/filing
     linkText: File mail into folders
 ---
+
+## Keep using your mail app
+
+mailtriage is not a new email app or a replacement for your inbox. It is a worker that runs on your computer, checks incoming mail and, when you enable live filing, moves it into category folders and flags what needs your attention.
+
+Those changes happen on your mail server. Every mail client connected to that mailbox sees them when it syncs. Keep reading, replying and searching in the apps you already use; mailtriage handles the sorting in the background.
 
 <span id="install"></span>
 <span id="what-you-need"></span>
@@ -48,11 +54,11 @@ The installer offers to run setup, which connects your mailbox and key. Setup st
 
 ## How it works
 
-mailtriage reads mail through Himalaya, asks an AI model through OpenRouter to classify it, and saves message text and decisions in a local database. You can then review messages in a terminal or let an agent work with them.
+mailtriage reads mail through Himalaya and asks an AI model through OpenRouter to choose a category, urgency and whether you need to act. With live filing enabled, it uses those decisions to organize your mailbox. It also keeps a local record that you or an agent can inspect and correct from the terminal.
 
 <span id="what-stays-and-what-leaves"></span>
 
-**Message content is sent to OpenRouter for classification.** The app runs locally, but the default classifier is an external service. See [where your data goes](./guide/introduction.md#where-your-data-goes).
+**Message content is sent to OpenRouter for classification.** The worker runs locally, but the default classifier is an external service. See [where your data goes](./guide/introduction.md#where-your-data-goes).
 
 <span id="what-it-never-does"></span>
 
