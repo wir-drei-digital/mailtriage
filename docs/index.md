@@ -3,7 +3,7 @@ layout: home
 
 hero:
   name: mailtriage
-  text: A background worker for your inbox.
+  text: An inbox that sorts itself.
   tagline: Keep the mail apps you already use. mailtriage tidies your existing mailbox in the background. With live filing enabled, it sorts and flags mail on your mail server, so the changes sync to every connected mail client.
   image:
     src: /mascot.webp
