@@ -426,3 +426,43 @@ fn a_uid_that_shows_other_mail_is_reported_and_not_read() {
     let replies = h.service().filing_replies("work", false, &[]).unwrap();
     assert_eq!(replies["approved_pending"], 1, "the row waits");
 }
+
+#[test]
+fn reopened_mail_is_held_again_instead_of_retrying_its_exit() {
+    let h = queued(Live);
+    h.sync();
+    h.fake
+        .deliver("INBOX", &mail("i", "Invoice", "Please pay by next month"));
+    h.sync();
+    let id = id_of(&h, "i");
+    h.service().review("work", &id, true).unwrap();
+    h.fake.inject(FakeOp::Move, Fault::ErrorBefore);
+    h.sync(); // the done exit's move fails before it runs
+    assert_eq!(place(&h, "i").0, "INBOX");
+    h.service().review("work", &id, false).unwrap();
+    h.sync();
+    let out = h.sync();
+    let moves = |h: &Harness| {
+        h.fake
+            .calls()
+            .iter()
+            .filter(|c| c.starts_with("move "))
+            .count()
+    };
+    assert_eq!(moves(&h), 1, "the exit is not retried");
+    assert_eq!(place(&h, "i").0, "INBOX");
+    assert_eq!(out["filing"]["awaiting_reply"], 1, "{out}");
+    let intents = h.service().store.intents("work", false).unwrap();
+    assert_eq!(intents.len(), 1);
+    assert_eq!(
+        (intents[0].state.as_str(), intents[0].error.as_deref()),
+        ("superseded", Some("held"))
+    );
+    answer(&h, "i");
+    h.sync();
+    assert_eq!(
+        place(&h, "i").0,
+        "Transactions",
+        "a reply still releases it"
+    );
+}

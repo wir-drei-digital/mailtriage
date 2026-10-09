@@ -596,6 +596,10 @@ epoch. Additive, so a process of the previous release keeps inserting rows.
   `{"schema_version":1,"account":"work","waiting":W,"approved_pending":A,"approved":[ids],"items":[{"id","subject","from","folder","answered","requested_at","approved_at"}]}`.
   An `--id` that is not waiting is exit code 2 and approves nothing.
 - `filing plan`: a reply exit's move carries `"reason":"reply_exit"`.
+- Recovery supersedes a move intent before a retry when the planner would
+  now hold its message (`filing::reply::holds_again`: queue on, no explicit
+  request, held, neither answered nor done); the intent's `error` is
+  `held`.
 - `MailEngine::add_seen(folder, uids)`: one session `a1 SELECT; a2 UID
   STORE uids +FLAGS.SILENT (\Seen)`, returning a `WriteOutcome` like
   `add_flagged`. `filing::reply::apply_reads` maps it: `selected`,

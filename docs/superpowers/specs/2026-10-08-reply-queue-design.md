@@ -122,7 +122,11 @@ stays where it is.
 - **`done --id`** on a held message is a reply exit on the next pass and
   enters the list like an answered one. This covers replies sent from
   elsewhere (Hermes, `icm-pim mail reply`, a phone app that does not set
-  `\Answered`), paid invoices, and "no answer needed".
+  `\Answered`), paid invoices, and "no answer needed". A `reopen` before
+  the exit's move has run keeps the message held: recovery checks a move
+  intent before each retry (`filing::reply::holds_again`) and supersedes
+  it (error `held`) when the planner would hold the message now, as the
+  refile rules recheck a refile intent.
 - **A client move into a category folder** is a correction, as today. It
   does not enter the list.
 - **A client move into a non-watched folder** (archive, `INBOX/Done`) is done
@@ -184,6 +188,7 @@ The other invariants are untouched.
 | Engine | `MailEngine::add_seen` (Himalaya, fake with `FakeOp::Seen`, offline). |
 | Apply | Reply-exit batches; a reply exit's claim (`MoveClaim::ReplyExit`) also inserts its read approval row and sets `flag_attempted_at`. |
 | Read | `filing::reply::apply_reads`, after `apply` in `plan_and_apply`; `filing::reply::recover_reads` in `recover`, for attempts whose outcome was lost. |
+| Recovery | `filing::reply::holds_again` before a move retry: an intent whose message is held again is superseded. |
 | CLI | `filing replies [--approve [--id ID]...]`; `Service::filing_replies`. |
 | State | Holding is recomputed every pass from placement, effective decision, flags and review state. SQLite v9 adds `read_approvals(account, message_id, requested_at, approved_at, applied_at)`; a new table, so processes of the previous release are unaffected, but a binary before v9 refuses the database. SQLite v10 adds the nullable `read_approvals.attempt_folder` and `attempt_epoch`. |
 
@@ -234,7 +239,8 @@ job that reads `mailtriage list --json`) before the job is switched off.
   another epoch pauses the folder; a lost `\Seen` outcome is a suspected
   race after an epoch change and converges without one; backfilled mail
   that needs action files and is flagged as before; answered mail is not
-  flagged after its exit, even with the queue turned off.
+  flagged after its exit, even with the queue turned off; a done exit
+  reopened before its retry stays held and is not moved again.
 - tests/engine_contract.rs: the exact `add_seen` text.
 - tests/config_v2.rs: the queue alone makes a config schema 4.
 - Dovecot e2e (flat and prefix), step 6: held unread and unflagged in INBOX,

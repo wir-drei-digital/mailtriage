@@ -10,7 +10,9 @@
 use super::apply::{commit, event, matches_meta, paused, race_problem, write_failed};
 use super::observe::FolderMap;
 use super::planner::{self, PlanInput, PlanMessage};
-use super::{is_config_changed, FilingSummary, FilingWrite, LocationState, PassContext};
+use super::{
+    inputs, is_config_changed, FilingSummary, FilingWrite, Intent, LocationState, PassContext,
+};
 use crate::domain::FilingMode;
 use crate::store::{now, Store};
 use anyhow::Result;
@@ -77,6 +79,25 @@ fn waiting_home<'m>(input: &PlanInput, m: &'m PlanMessage) -> Option<&'m planner
         && !view.paused
         && view.epoch == Some(home.epoch);
     (usable && planner::holds(input, m) && !planner::reply_done(m)).then_some(home)
+}
+
+/// Recovery, before a move intent is retried: whether the planner would now
+/// hold its message instead (queue on, no explicit request, held, and
+/// neither answered nor done), as for a reply exit reopened before its
+/// retry. Flags are the stored ones; a reply seen later exits again.
+pub fn holds_again(
+    store: &Store,
+    ctx: &PassContext,
+    map: &FolderMap,
+    intent: &Intent,
+) -> Result<bool> {
+    if !ctx.cfg.filing.reply_queue {
+        return Ok(false);
+    }
+    let input = inputs::message_input(store, ctx, map, &intent.message_id)?;
+    Ok(input.messages.first().is_some_and(|m| {
+        m.desired_target.is_none() && planner::holds(&input, m) && !planner::reply_done(m)
+    }))
 }
 
 /// One `envelopes` call; returns how many held messages it read.
