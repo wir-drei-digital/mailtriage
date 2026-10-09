@@ -3,8 +3,8 @@ layout: home
 
 hero:
   name: mailtriage
-  text: Your inbox is full. Which mail needs you?
-  tagline: mailtriage reads your new mail and tells you, for every message, what it's about, how urgent it is and whether you need to act. If you want, it sorts your mailbox to match.
+  text: An inbox that sorts itself.
+  tagline: mailtriage reads your new mail, decides which of your categories each message belongs to, and files it into that category's folder. Mail that needs you gets a flag, so you see at a glance what to answer first, in any mail client.
   actions:
     - theme: brand
       text: Get started
@@ -14,14 +14,14 @@ hero:
       link: https://github.com/wir-drei-digital/mailtriage
 
 features:
+  - title: One folder per category
+    details: You define the categories, mailtriage creates the folders and moves new mail into them. It works in every mail client, your phone included.
+    link: /guide/filing
+    linkText: Filing into folders
   - title: Three decisions per message
     details: A category from your own list, an urgency (low, medium or high) and whether you need to act. You see the few messages that matter first.
     link: /guide/daily-use
     linkText: Daily use
-  - title: Your mailbox, sorted
-    details: Optionally, mail moves into one folder per category and mail that needs you gets a flag. It works in every mail client, your phone included.
-    link: /guide/filing
-    linkText: Filing into folders
   - title: A reply queue
     details: Mail that needs an answer can wait in your inbox until you reply. Then it moves to its folder and is marked read once you approve it.
     link: /guide/filing#reply-queue
