@@ -241,6 +241,17 @@ pub struct NewIntent<'a> {
     pub now: &'a str,
 }
 
+/// What a move claim records besides its intent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum MoveClaim {
+    Plain,
+    /// Refile spec: the intent consumes the refile mark.
+    Refile,
+    /// Reply queue spec: the message enters the read approval list, once,
+    /// in the claim's transaction.
+    ReplyExit,
+}
+
 /// Fields that are `Some` overwrite the stored value; `None` keeps it.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, Default)]
 pub struct IntentPatch {

@@ -564,8 +564,10 @@ that turns it on is written as `schema_version` 4; every other config stays
 `config::written_schema` is the one a write produces.
 
 Schema v9 (migration 9) adds the table `read_approvals(account, message_id,
-requested_at, approved_at, applied_at)`, the read approval list. A claimed
-reply exit enters it once (`Store::request_read_approval`);
+requested_at, approved_at, applied_at)`, the read approval list. A reply
+exit enters it once, in its move claim's transaction
+(`Store::claim_move_with(.., MoveClaim::ReplyExit)`; `MoveClaim::Refile`
+marks a refile move, `MoveClaim::Plain` any other);
 `Store::approve_reads` sets `approved_at`, and a live pass sets `applied_at`
 after adding `\Seen` (`Store::mark_read_applied`).
 

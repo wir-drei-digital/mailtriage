@@ -343,6 +343,63 @@ fn claims_check_revision_and_consume_flag_attempt() {
 }
 
 #[test]
+fn a_reply_exit_claim_enters_the_read_approval_list_in_its_transaction() {
+    use mailtriage::filing::{
+        planner::{Action, Locator},
+        MoveClaim,
+    };
+    let (_d, mut s) = store();
+    s.ensure_account("work", "id", "g1").unwrap();
+    let raw = b"Message-ID: <a@t>\r\nSubject: s\r\n\r\nbody";
+    let msg = normalize::rfc822(raw, 1000).unwrap();
+    s.checkpoint("work", "INBOX", &snap(5, 5)).unwrap();
+    let none = BTreeMap::new();
+    s.stage_with(
+        "work",
+        "INBOX",
+        5,
+        1,
+        &[env(1, "a")],
+        "g1",
+        true,
+        &opts(&none),
+    )
+    .unwrap();
+    let id = s.arrivals("work", None).unwrap()[0].message_id.clone();
+    s.attach("work", &id, &msg).unwrap();
+    s.ensure_placement("work", &id, &["INBOX".to_string()])
+        .unwrap();
+    let exit = |desired_rev| Action::Move {
+        message_id: id.clone(),
+        from: Locator {
+            folder: "INBOX".into(),
+            epoch: 5,
+            uid: 1,
+        },
+        to: "News".into(),
+        desired_rev,
+        consumes_eligible: false,
+    };
+    let claim = |s: &mut Store, action: &Action, batch| {
+        s.claim_move_with("work", action, (1, 1), batch, NOW, MoveClaim::ReplyExit)
+            .unwrap()
+    };
+    assert!(claim(&mut s, &exit(9), "b1").is_none());
+    assert!(
+        s.read_approvals("work", false).unwrap().is_empty(),
+        "a refused claim requests nothing"
+    );
+    let intent = claim(&mut s, &exit(0), "b2").unwrap();
+    let rows = s.read_approvals("work", true).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        (rows[0].message_id.as_str(), rows[0].requested_at.as_str()),
+        (id.as_str(), NOW)
+    );
+    assert!(!s.intent(intent).unwrap().unwrap().consumes_refile);
+}
+
+#[test]
 fn events_are_newest_first() {
     let (_d, mut s) = store();
     s.ensure_account("work", "id", "g1").unwrap();

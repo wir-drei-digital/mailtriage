@@ -2,7 +2,7 @@
 use super::{
     mode_str, open_states_sql, planner::Action, rfc_message_id, Arrival, CheckpointState,
     FilingStateRow, FilingWrite, FolderRecord, HydrationBatch, Intent, IntentPatch, LocationState,
-    MessageMeta, NewIntent, Placement, ReadApproval, Revert, StageOptions,
+    MessageMeta, MoveClaim, NewIntent, Placement, ReadApproval, Revert, StageOptions,
 };
 use crate::domain::{FilingMode, MailboxSnapshot, SourceEnvelope};
 use crate::store::{bump, envelope_of, merge_envelope, now, row_record, Record, Store};
@@ -94,16 +94,6 @@ impl Store {
         self.db.execute(
             "INSERT INTO filing_state(account,bootstrap_done) VALUES(?1,?2) ON CONFLICT(account) DO UPDATE SET bootstrap_done=excluded.bootstrap_done",
             params![account, done],
-        )?;
-        Ok(())
-    }
-
-    /// Reply queue: a claimed reply exit enters the read approval list once;
-    /// a repeated claim keeps the first request.
-    pub fn request_read_approval(&mut self, account: &str, id: &str, at: &str) -> Result<()> {
-        self.db.execute(
-            "INSERT OR IGNORE INTO read_approvals(account,message_id,requested_at) VALUES(?1,?2,?3)",
-            params![account, id, at],
         )?;
         Ok(())
     }
@@ -1206,12 +1196,14 @@ impl Store {
             (target_epoch, target_uid_next),
             batch,
             now,
-            false,
+            MoveClaim::Plain,
         )
     }
 
-    /// `claim_move` with the target snapshot as `(epoch, UIDNEXT)`; the
-    /// intent records whether it consumes a refile mark (refile spec).
+    /// `claim_move` with the target snapshot as `(epoch, UIDNEXT)`. A refile
+    /// claim records that the intent consumes the refile mark (refile spec);
+    /// a reply exit enters the read approval list once, a repeated claim
+    /// keeping the first request (reply queue spec).
     pub fn claim_move_with(
         &mut self,
         account: &str,
@@ -1219,7 +1211,7 @@ impl Store {
         (target_epoch, target_uid_next): (u64, u64),
         batch: &str,
         now: &str,
-        consumes_refile: bool,
+        claim: MoveClaim,
     ) -> Result<Option<i64>> {
         let Action::Move {
             message_id,
@@ -1250,10 +1242,17 @@ impl Store {
         if !ok {
             return Ok(None);
         }
+        let consumes_refile = claim == MoveClaim::Refile;
         tx.execute("INSERT INTO filing_intents(account,message_id,kind,folder,epoch,uid,target,target_epoch,target_uid_next,desired_rev,consumes_eligible,consumes_refile,batch,state,dispatched_at,created_at,updated_at)
                 VALUES(?,?,'move',?,?,?,?,?,?,?,?,?,?,'in_flight',?,?,?)",
             params![account, message_id, from.folder, from.epoch, from.uid, to, target_epoch, target_uid_next, desired_rev, consumes_eligible, consumes_refile, batch, now, now, now])?;
         let id = tx.last_insert_rowid();
+        if claim == MoveClaim::ReplyExit {
+            tx.execute(
+                "INSERT OR IGNORE INTO read_approvals(account,message_id,requested_at) VALUES(?1,?2,?3)",
+                params![account, message_id, now],
+            )?;
+        }
         tx.commit()?;
         Ok(Some(id))
     }

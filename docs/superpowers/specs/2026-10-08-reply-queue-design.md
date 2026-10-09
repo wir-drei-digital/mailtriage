@@ -81,9 +81,10 @@ reading every config that does not. Turn it on with
    `Plan.reply_exits`. Held messages are listed in `Plan.awaiting_reply`.
 3. **Apply.** Reply exits form their own batches (the batch key gains a
    reply-exit bit) and move like every move: same intent, journal,
-   verification, race handling and recovery. Each claimed reply exit enters
-   the read approval list (`Store::request_read_approval`, once per
-   message).
+   verification, race handling and recovery. A reply exit enters the read
+   approval list in the transaction that claims its move
+   (`Store::claim_move_with` with `MoveClaim::ReplyExit`), once per
+   message, so a crash cannot separate the two.
 4. **Read.** After the moves, `filing::reply::apply_reads` adds `\Seen` to
    every approved message that is not read yet, in its current home: known,
    unblocked, not being moved, its folder unpaused and in its discovery
@@ -179,7 +180,7 @@ The other invariants are untouched.
 | Planner | `PlanInput.reply_queue`, `PlanMessage.done`, `holds`, `reply_done`, `MoveDecision::{Held, ReplyExit}`, `Plan.{reply_exits, awaiting_reply}`; the flag rule drops "action required" with the queue on. |
 | Flags | `filing/reply.rs` (`refresh_flags`), called by `refile::plan_pass` before the planner; reuses `Store::hydrate`. |
 | Engine | `MailEngine::add_seen` (Himalaya, fake with `FakeOp::Seen`, offline). |
-| Apply | Reply-exit batches; a claimed reply exit calls `Store::request_read_approval`. |
+| Apply | Reply-exit batches; a reply exit's claim (`MoveClaim::ReplyExit`) also inserts its read approval row. |
 | Read | `filing::reply::apply_reads`, after `apply` in `plan_and_apply`; `filing::reply::recover_reads` in `recover`, for attempts whose outcome was lost. |
 | CLI | `filing replies [--approve [--id ID]...]`; `Service::filing_replies`. |
 | State | Holding is recomputed every pass from placement, effective decision, flags and review state. SQLite v9 adds `read_approvals(account, message_id, requested_at, approved_at, applied_at)`; a new table, so processes of the previous release are unaffected, but a binary before v9 refuses the database. SQLite v10 adds the nullable `read_approvals.attempt_folder` and `attempt_epoch`. |

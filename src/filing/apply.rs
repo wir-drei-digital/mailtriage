@@ -6,7 +6,7 @@ use super::observe::FolderMap;
 use super::planner::{Action, Locator, Plan};
 use super::refile;
 use super::{
-    is_config_changed, rfc_message_id, FilingSummary, FilingWrite, Intent, IntentPatch,
+    is_config_changed, rfc_message_id, FilingSummary, FilingWrite, Intent, IntentPatch, MoveClaim,
     PassContext, Placement, Revert,
 };
 use crate::domain::{FilingMode, SourceEnvelope};
@@ -448,8 +448,8 @@ pub(crate) fn race_problem(folder: &str, summary: &mut FilingSummary) {
 }
 
 /// One move batch: verify, snapshot the target, claim (a refile move as
-/// one, checked again right after its claim), dispatch. A claimed reply exit
-/// enters the read approval list (reply queue spec).
+/// one, checked again right after its claim; a reply exit entering the read
+/// approval list in its claim), dispatch.
 #[allow(clippy::too_many_arguments)] // One move batch with its pass context.
 fn move_batch(
     store: &mut Store,
@@ -478,23 +478,19 @@ fn move_batch(
     let mut claimed = Vec::new();
     for action in verified.kept {
         let consumes_refile = refile.contains(action.message_id());
+        let kind = match (consumes_refile, reply_exit) {
+            (true, _) => MoveClaim::Refile,
+            (false, true) => MoveClaim::ReplyExit,
+            (false, false) => MoveClaim::Plain,
+        };
         let target_snapshot = (target.uid_validity, target.uid_next);
-        let claim = store.claim_move_with(
-            ctx.account,
-            action,
-            target_snapshot,
-            &batch,
-            &at,
-            consumes_refile,
-        )?;
+        let claim =
+            store.claim_move_with(ctx.account, action, target_snapshot, &batch, &at, kind)?;
         let Some(id) = claim else {
             continue;
         };
         if consumes_refile && refile_cancelled(store, ctx, map, id, locator(action))? {
             continue;
-        }
-        if reply_exit {
-            store.request_read_approval(ctx.account, action.message_id(), &at)?;
         }
         claimed.push((id, locator(action).uid));
     }
