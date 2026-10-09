@@ -56,6 +56,7 @@ impl DecisionProvider for OpenRouter {
         request: &DecisionRequest,
         key: Option<&str>,
     ) -> Result<Decision> {
+        self.validate(config)?;
         let key = key.ok_or_else(|| anyhow!("OpenRouter API key is missing"))?;
         parse(send(config, &request_body(config, request), key)?)
     }

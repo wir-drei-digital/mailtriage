@@ -15,6 +15,10 @@ Mail classified after the move gets the newer model, including open mail whose c
 
 To stay on one model, name it, such as `typesafe/jev-1.13`; changing `model` queues open mail for classification again.
 
+::: warning Important
+mailtriage does not check a model ID with OpenRouter, and `doctor` makes no provider request, so a mistyped model goes unnoticed until mail is classified. If OpenRouter refuses the model, every classification fails with `classification provider failed; check doctor and retry`, and each message is tried up to `policy.max_attempts` times. Once you correct `model`, all open mail is queued for classification again, failed messages included, and their attempt count starts over.
+:::
+
 Only Decisions-style services fit: they answer each question with a choice, a confidence and a probability per label. See [Adding a provider](../development/providers.md#adding-a-provider).
 
 ## The OpenRouter key

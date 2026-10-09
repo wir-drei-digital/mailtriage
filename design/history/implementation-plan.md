@@ -120,5 +120,5 @@ and execution in the user's headless Hermes deployment.
 
 Implementation stages 1–8 completed on 2026-09-23. Sol agents implemented core,
 adapters and CLI/delivery, then reviewed integrated behavior. Review findings
-were reproduced, fixed and covered by regressions. See [verification.md](verification.md)
+were reproduced, fixed and covered by regressions. See [verification.md](../../docs/development/verification.md)
 for the 30-test suite, release build, smoke checks and deferred live gates.

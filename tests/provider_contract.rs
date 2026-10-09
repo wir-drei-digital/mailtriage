@@ -358,6 +358,35 @@ fn openrouter_failures_keep_todays_errors() {
     }
 }
 
+/// The endpoint pin holds in `decide` itself, not only behind
+/// `classify_with_key`: the key is never sent to an endpoint `validate`
+/// refuses.
+#[test]
+fn openrouter_decide_refuses_another_endpoint_before_any_request() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    for url in [
+        "https://example.test/api/alpha/decisions".to_owned(),
+        // Refused, yet it reaches the listener if a request goes out.
+        format!("http://localhost:{port}/api/alpha/decisions"),
+    ] {
+        let error = provider::provider_for("openrouter")
+            .unwrap()
+            .decide(&openrouter(&url), &request(), Some("fixture-key"))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error, "provider endpoint must be the OpenRouter Decisions endpoint",
+            "{url}"
+        );
+    }
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}
+
 /// Provider adapter spec, errors: a model OpenRouter rejects and a response
 /// that fails the contract check fail the classification like any provider
 /// error: the message is marked failed and counts an attempt.

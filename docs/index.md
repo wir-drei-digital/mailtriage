@@ -25,7 +25,7 @@ The script installs mailtriage into `~/.local/bin` and then offers `mailtriage s
 
 ## What stays and what leaves
 
-Your mail stays on your mail server, and mailtriage runs on your machine. What leaves it is what the classifier needs to decide: each message's sender, recipients, subject, date and text, with your address, time zone, a one-line brief about you, and your category names and descriptions.
+Your mail stays on your mail server, and mailtriage runs on your machine. What leaves it is what the classifier needs to decide: each message's sender, recipients, subject, date and text, with your address, time zone, the brief about you, and your category names and descriptions.
 
 With the `openrouter` provider, that goes to OpenRouter's Decisions API. The `fake` provider, for trying mailtriage offline, sends nothing.
 

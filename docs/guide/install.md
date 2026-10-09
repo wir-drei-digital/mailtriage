@@ -141,7 +141,7 @@ Exit codes:
 
 ## Uninstall
 
-Either command removes an installation again; a Homebrew install uses `brew uninstall` instead (see [Homebrew](#homebrew)):
+A Homebrew install has its own steps; see [Homebrew](#homebrew). Either command removes any other installation again:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/wir-drei-digital/mailtriage/main/install.sh | sh -s -- --uninstall

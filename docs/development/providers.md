@@ -10,7 +10,7 @@ General chat-model APIs do not fit: they give no calibrated probabilities, and t
 2. Add its kind to `KINDS` and `provider_for` in `src/provider/mod.rs`. Setup, `--provider`, `doctor`, the key steps and the service files follow from there.
 3. Give it a fixture in `tests/provider_contract.rs`. The contract suite runs against every kind in `KINDS`.
 
-Every `Decision` passes one contract check before the policy thresholds apply, whichever provider made it: the model is named; each choice is an offered label; confidence and probabilities lie between 0 and 1; the probabilities cover exactly the offered labels and total 1 within 0.031; and no label is more than 0.01 more probable than the chosen one.
+Every `Decision` passes one contract check before the policy thresholds apply, whichever provider made it: the model is named; each choice is an offered label; confidence and probabilities lie between 0 and 1; the probabilities cover exactly the offered labels and total 1 within 0.031; no label is more than 0.01 more probable than the chosen one; and `action_required` lies between 0 and 1.
 
 A failed check fails the classification like a failed request: the message is marked failed, and a later pass retries it.
 

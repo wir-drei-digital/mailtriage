@@ -10,7 +10,9 @@ For each message it records three decisions: a category from your own list, an u
 
 It reads mail over IMAP through the [Himalaya](https://github.com/pimalaya/himalaya) CLI and gets the decisions from OpenRouter's Decisions API with a Decisions model (Jev by default). It stores messages and results in a local SQLite database. Listing and reading work from that database without network access.
 
-Your mail stays on your mail server, and mailtriage runs on your machine. What leaves it is the content of each message it classifies, which goes to the classifier, OpenRouter's Decisions API. [Configuration](./configuration.md#a-complete-configuration) lists everything the provider receives. The `fake` provider below sends nothing.
+Your mail stays on your mail server, and mailtriage runs on your machine. What leaves it is what the classifier needs: each message's sender, recipients, subject, date and text, with your address, time zone and brief, and the IDs, names and descriptions of your categories.
+
+With the `openrouter` provider, that goes to OpenRouter's Decisions API, along with the time of the request and notes on how complete the text is. [Configuration](./configuration.md#a-complete-configuration) has the details. The `fake` provider below sends nothing.
 
 mailtriage never sends, deletes or expunges mail and never removes the read state (`\Seen`). Anything else it changes in your mailbox depends on what you turn on:
 

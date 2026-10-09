@@ -51,9 +51,9 @@ Error mapping: downcast `service::ServiceError {pub code:i32,pub message:String}
 for deliberate service errors; otherwise 3 for operational errors. Invalid
 argument/config errors 2, revision/cursor/identity conflict 5.
 
-Partial sync
-returns successful Value with `partial:true`; CLI exits4 after printing.
-Never print raw debug chain from provider/transport errors (possible secrets).
+Partial sync returns successful Value with `partial:true`; CLI exits4 after
+printing. Never print raw debug chain from provider/transport errors (possible
+secrets).
 
 Develop CLI against these signatures. Do not edit lib.rs/service.rs/store.rs;
 coordinator provides them. Own src/main.rs src/cli.rs README.md examples/,
@@ -68,10 +68,9 @@ empty), else `<cwd>/mailtriage.json` if it exists, else
 `~/.config/mailtriage/mailtriage.json`. `config::setup_path(flag, env, home)`
 is the same without the working-directory step; `setup` uses it.
 
-Without
-`HOME` the last step fails with `cannot find the config: HOME is not set; pass
---config PATH` (exit 2). `Service::open` on a missing file exits 2 with
-``configuration not found; run `mailtriage setup` or pass --config``.
+Without `HOME` the last step fails with `cannot find the config: HOME is not
+set; pass --config PATH` (exit 2). `Service::open` on a missing file exits 2
+with ``configuration not found; run `mailtriage setup` or pass --config``.
 
 ## `setup` result
 
@@ -192,11 +191,9 @@ to lease (`sync`: `queued_outside` is not empty; `classify`:
 `Store::leasable`; `reclassify`: a message is selected). With nothing to
 classify the key command does not run and the result is not partial.
 
-When the
-key cannot be resolved they lease nothing (no attempt is used, jobs stay
-queued) and add
-`"classification": {"skipped": true, "reason": KEY_ERROR}` with one of the
-fixed key-error strings above; `partial` is then `true`.
+When the key cannot be resolved they lease nothing (no attempt is used, jobs
+stay queued) and add `"classification": {"skipped": true, "reason": KEY_ERROR}`
+with one of the fixed key-error strings above; `partial` is then `true`.
 
 `sync` still runs
 discovery and the filing steps, with `fetched`, `classified`, `cached` and
@@ -446,10 +443,9 @@ pub fn status(service: &Service, config_path: &Path, account: Option<&str>,
 one object per account in name order, or `{schema_version:1, config, service}`
 with `account`. `config` is the canonical config path.
 
-Each object is
-`system_service::status_account`'s plus `service_config`, `file_config`,
-`config_matches`, `enabled`, `enablement`, `interval_seconds`, `filing_mode`
-(the configured mode, `filing::mode_str`) and `identity`, and
+Each object is `system_service::status_account`'s plus `service_config`,
+`file_config`, `config_matches`, `enabled`, `enablement`, `interval_seconds`,
+`filing_mode` (the configured mode, `filing::mode_str`) and `identity`, and
 `needs_daemon_reload` on systemd only. Without a `Context` (no supported
 manager) every account reads as not installed. An unknown account exits 2. The
 CLI prints the value as it is, with `PROC_ROOT`.
@@ -609,20 +605,18 @@ that turns it on is written as `schema_version` 4; every other config stays
 Schema v9 (migration 9) adds the table `read_approvals(account, message_id,
 requested_at, approved_at, applied_at)`, the read approval list.
 
-A reply
-exit enters it once, in its move claim's transaction
-(`Store::claim_move_with(.., MoveClaim::ReplyExit)`; `MoveClaim::Refile`
-marks a refile move, `MoveClaim::Plain` any other);
-`Store::approve_reads` sets `approved_at`, and a live pass sets `applied_at`
-after adding `\Seen` (`Store::mark_read_applied`).
+A reply exit enters it once, in its move claim's transaction
+(`Store::claim_move_with(.., MoveClaim::ReplyExit)`; `MoveClaim::Refile` marks a
+refile move, `MoveClaim::Plain` any other); `Store::approve_reads` sets
+`approved_at`, and a live pass sets `applied_at` after adding `\Seen`
+(`Store::mark_read_applied`).
 
 Schema v10 (migration 10) adds the nullable columns
 `read_approvals.attempt_folder` and `attempt_epoch`: the folder and epoch of
 an `add_seen` session whose outcome is not known yet.
 
-A live pass writes
-them (`FilingWrite::ReadAttempt`) before the session and clears them once
-its outcome is known; `filing::reply::recover_reads`, run by
+A live pass writes them (`FilingWrite::ReadAttempt`) before the session and
+clears them once its outcome is known; `filing::reply::recover_reads`, run by
 `filing::recover::recover`, compares a remaining attempt with the folder's
 epoch.
 
