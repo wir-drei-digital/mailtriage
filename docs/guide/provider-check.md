@@ -1,16 +1,16 @@
 # Provider check
 
-Before you use `live` on a real mailbox, the live provider check in the [filing design](https://github.com/wir-drei-digital/mailtriage/blob/main/design/specs/2026-10-04-imap-category-filing-design.md#live-provider-check) must have recorded a go for your provider (Gmail / Google Workspace, Microsoft 365 / Outlook.com, iCloud, Fastmail / Dovecot) in the [Outcome](#outcome) table below. No provider has been checked yet, so use `dry_run` until yours is. A no-go will be listed here.
+Filing in `live` moves real mail, so you want to know first that your mail provider behaves the way mailtriage expects. This page records that check, provider by provider.
 
-The Dovecot end-to-end job covers the protocol contract, not provider
-behaviour. Before setting `filing.mode` to `live` on a real mailbox, run this
-check for that provider with a throwaway test account configured in Himalaya
-([Set up Himalaya](./manual-setup.md#_1-set-up-himalaya); procedure in the
-[filing design](https://github.com/wir-drei-digital/mailtriage/blob/main/design/specs/2026-10-04-imap-category-filing-design.md#live-provider-check)).
-No credentials, message bodies or real addresses go into this file: record
-redacted output, or where the evidence is kept. `Result` is `pass`, `fail` or
-`differs` (with a note). Until a provider has a recorded go, use `dry_run`,
-which never writes.
+Before you use `live` on a real mailbox, the live provider check in the [filing design](https://github.com/wir-drei-digital/mailtriage/blob/main/design/specs/2026-10-04-imap-category-filing-design.md#live-provider-check) must have recorded a go for your provider (Gmail / Google Workspace, Microsoft 365 / Outlook.com, iCloud, Fastmail / Dovecot) in the [Outcome](#outcome) table below. A no-go will be listed here.
+
+::: warning Important
+No provider has been checked yet. Until yours has a recorded go, use `dry_run`, which never writes.
+:::
+
+The Dovecot end-to-end job covers the protocol contract, not provider behavior. So before you set `filing.mode` to `live` on a real mailbox, run this check for that provider with a throwaway test account configured in Himalaya ([Set up Himalaya](./manual-setup.md#_1-set-up-himalaya); procedure in the [filing design](https://github.com/wir-drei-digital/mailtriage/blob/main/design/specs/2026-10-04-imap-category-filing-design.md#live-provider-check)).
+
+No credentials, message bodies or real addresses go on this page: record redacted output, or where the evidence is kept. `Result` is `pass`, `fail` or `differs` (with a note).
 
 ## Gmail / Google Workspace
 
@@ -90,5 +90,4 @@ which never writes.
 | iCloud | not checked | | |
 | Fastmail or a Dovecot host | not checked | | |
 
-A no-go blocks enabling `live` for that provider until it is resolved and is
-listed at the top of this page.
+A no-go blocks enabling `live` for that provider until it is resolved, and it is listed at the top of this page.

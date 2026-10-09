@@ -1,5 +1,7 @@
 # Install
 
+This page gets mailtriage onto your machine. The quickest way is the install script: one line in a terminal, and from then on mailtriage keeps itself up to date.
+
 You need:
 
 - macOS arm64, Linux amd64 or Linux arm64,
@@ -7,7 +9,7 @@ You need:
 - an OpenRouter API key,
 - for the background service: launchd (macOS) or systemd (Linux).
 
-mailtriage reads mail through Himalaya, in a [tested version](./himalaya.md) with IMAP support; setup installs one for mailtriage when none is found.
+mailtriage reads mail through Himalaya, in a [tested version](./himalaya.md) with IMAP support. Setup installs one for mailtriage when none is found.
 
 There are three ways to install, and each stays current differently:
 
@@ -17,15 +19,25 @@ There are three ways to install, and each stays current differently:
 | [Homebrew](#homebrew) | Homebrew's prefix | `brew upgrade mailtriage` |
 | [From source](#from-source) with Cargo | where you put it | you |
 
-The macOS executables are unsigned and not notarized. See the [release guide](../development/releases.md) for how releases are made. A root-owned or otherwise unsafe install, for example one made with `sudo` into `/usr/local/bin`, is not replaced: mailtriage only reports new releases for it (see [Binaries mailtriage does not replace](./updates.md#binaries-mailtriage-does-not-replace)).
+::: warning Important
+The macOS executables are unsigned and not notarized. See the [release guide](../development/releases.md) for how releases are made.
+
+A root-owned or otherwise unsafe install, for example one made with `sudo` into `/usr/local/bin`, is not replaced: mailtriage only reports new releases for it (see [Binaries mailtriage does not replace](./updates.md#binaries-mailtriage-does-not-replace)).
+:::
 
 ## The install script
+
+One command downloads mailtriage, checks it and installs it, then offers to set it up:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/wir-drei-digital/mailtriage/main/install.sh | sh
 ```
 
-The script downloads the newest release's archive and `SHA256SUMS` over HTTPS from GitHub, checks the archive's checksum and that it holds exactly `mailtriage`, `LICENSE` and `README.md`, and hands over to the downloaded binary's [`mailtriage self install`](#mailtriage-self-install), which installs it into `~/.local/bin` and offers setup. It needs `curl`, `tar`, `mktemp`, `uname`, and `sha256sum` or `shasum`. It never uses `sudo`, never edits your shell's startup files, and never touches a `himalaya`. Each release also carries `install.sh` with that release as its default version.
+The script downloads the newest release's archive and `SHA256SUMS` over HTTPS from GitHub. It checks the archive's checksum and that it holds exactly `mailtriage`, `LICENSE` and `README.md`.
+
+Then it hands over to the downloaded binary's [`mailtriage self install`](#mailtriage-self-install), which installs it into `~/.local/bin` and offers setup.
+
+It needs `curl`, `tar`, `mktemp`, `uname`, and `sha256sum` or `shasum`. It never uses `sudo`, never edits your shell's startup files, and never touches a `himalaya`. Each release also carries `install.sh` with that release as its default version.
 
 Options follow `sh -s --`, for example:
 
@@ -52,25 +64,39 @@ It asks only when it can open your terminal:
 | Start the tray at login (after setup succeeded) | asks, default yes | no; prints the command | no; prints the command |
 | Uninstall | asks, default no | yes | refused (exit 2; use `--yes`) |
 
-The end of input at a question counts as its default. Exit codes: 0 done; 1 a failed step, which the message names: a missing tool, a network error, a checksum mismatch, an unexpected archive or latest-release URL; 2 invalid options, an unsupported platform, or a refused downgrade; 126 when the downloaded program could not be run, usually because the temporary directory is mounted `noexec` (run the script again with `TMPDIR=<a directory that allows running programs>` before `sh`); any other code is `mailtriage self install`'s. A download that breaks off runs nothing: the whole script is one `{ … }` group, which `sh` reads completely before running it.
+The end of input at a question counts as its default.
+
+Exit codes:
+
+- **0**: done.
+- **1**: a failed step, which the message names: a missing tool, a network error, a checksum mismatch, an unexpected archive or latest-release URL.
+- **2**: invalid options, an unsupported platform, or a refused downgrade.
+- **126**: the downloaded program could not be run, usually because the temporary directory is mounted `noexec`. Run the script again with `TMPDIR=<a directory that allows running programs>` before `sh`.
+- Any other code is `mailtriage self install`'s.
+
+A download that breaks off runs nothing: the whole script is one `{ … }` group, which `sh` reads completely before running it.
 
 The script never downgrades. To go back to an older release, follow [Rolling back by hand](./updates.md#rolling-back-by-hand).
 
 ## Homebrew
 
+If you manage your tools with Homebrew, install mailtriage from the wir-drei-digital tap:
+
 ```sh
 brew install wir-drei-digital/tap/mailtriage
 ```
 
-The formula in [wir-drei-digital/homebrew-tap](https://github.com/wir-drei-digital/homebrew-tap) installs the release archive for macOS arm64, with `mailtriage-tray`, or for Linux amd64 or arm64. It has no Himalaya dependency: `mailtriage setup` uses a tested `himalaya` on your `PATH` or installs a private one. Then:
+The formula in [wir-drei-digital/homebrew-tap](https://github.com/wir-drei-digital/homebrew-tap) installs the release archive for macOS arm64, with `mailtriage-tray`, or for Linux amd64 or arm64.
 
-- `brew upgrade mailtriage` installs new releases. For a Homebrew install mailtriage only reports them (`managed_by_homebrew`).
-- The background service and the tray's login item record `$(brew --prefix)/opt/mailtriage/bin/…`, which `brew upgrade` keeps pointing at the current version; running services and the tray switch to it by themselves.
-- To uninstall, run `mailtriage service uninstall --account NAME` for each account, then on macOS `mailtriage-tray autostart disable` (the login item names the `opt` path that `brew uninstall` removes), then `brew uninstall mailtriage`; `mailtriage self uninstall` refuses a Homebrew install.
+It has no Himalaya dependency: `mailtriage setup` uses a tested `himalaya` on your `PATH` or installs a private one. Then:
+
+- **Updates**: `brew upgrade mailtriage` installs new releases. For a Homebrew install mailtriage only reports them (`managed_by_homebrew`).
+- **Services and the tray**: the background service and the tray's login item record `$(brew --prefix)/opt/mailtriage/bin/…`, which `brew upgrade` keeps pointing at the current version. Running services and the tray switch to it by themselves.
+- **Uninstall**: run `mailtriage service uninstall --account NAME` for each account, then on macOS `mailtriage-tray autostart disable` (the login item names the `opt` path that `brew uninstall` removes), then `brew uninstall mailtriage`. `mailtriage self uninstall` refuses a Homebrew install.
 
 ## From source
 
-With a stable Rust toolchain:
+If you'd rather build mailtriage yourself, you need a stable Rust toolchain:
 
 ```sh
 cargo build --release --locked &&
@@ -79,11 +105,13 @@ cargo build --release --locked &&
   mailtriage --version
 ```
 
-`~/.local/bin` must be on your `PATH`; the examples below assume `mailtriage` is. If `command -v mailtriage` prints nothing, add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile (`~/.zprofile` on macOS, `~/.bashrc` on Linux) and open a new terminal. The background service records the absolute path of the executable that installs it, so install the binary in its final place first.
+`~/.local/bin` must be on your `PATH`; the examples below assume `mailtriage` is. If `command -v mailtriage` prints nothing, add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile (`~/.zprofile` on macOS, `~/.bashrc` on Linux) and open a new terminal.
+
+The background service records the absolute path of the executable that installs it, so install the binary in its final place first.
 
 ## `mailtriage self install`
 
-The install script runs this command; you or an agent can run it on a binary you placed yourself:
+The install script runs this command. You or an agent can run it on a binary you placed yourself, and it installs that binary the way the script would:
 
 ```sh
 mailtriage self install --dir DIR [--tray-file PATH] [--no-setup] [--yes] [--json]
@@ -104,16 +132,25 @@ mailtriage self install --dir DIR [--tray-file PATH] [--no-setup] [--yes] [--jso
 - `tray`: `null` without `--tray-file`, else `action` `installed`, `skipped` or `failed`, with the reason in `error`.
 - `setup`: `ran`, `skipped` or `failed`. Choosing "Abort" in setup's menu (a re-run with an existing config) changes nothing and counts as `skipped`, not as a failed setup. `autostart`: `enabled`, `skipped` or `failed`.
 
-Exit codes: 0; 2 for invalid flags or a refused downgrade; 3 for an unsafe directory, a failed install, a failed tray install, or a failed setup (the binaries stay installed); 5 when another update or install held the installation lock for 60 seconds.
+Exit codes:
+
+- **0**: done.
+- **2**: invalid flags or a refused downgrade.
+- **3**: an unsafe directory, a failed install, a failed tray install, or a failed setup (the binaries stay installed).
+- **5**: another update or install held the installation lock for 60 seconds.
 
 ## Uninstall
+
+Either command removes an installation again; a Homebrew install uses `brew uninstall` instead (see [Homebrew](#homebrew)):
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/wir-drei-digital/mailtriage/main/install.sh | sh -s -- --uninstall
 mailtriage self uninstall [--dir DIR] [--yes] [--json]
 ```
 
-The script's `--uninstall` runs `DIR/mailtriage self uninstall --dir DIR`, with `--yes` when given, and downloads nothing; it asks through your terminal like the install does. `self uninstall` removes the installation in `DIR`, by default the directory of the `mailtriage` that runs it, and nothing else:
+The script's `--uninstall` runs `DIR/mailtriage self uninstall --dir DIR`, with `--yes` when given, and downloads nothing. It asks through your terminal like the install does.
+
+`self uninstall` removes the installation in `DIR`, by default the directory of the `mailtriage` that runs it, and nothing else:
 
 1. A Homebrew install is refused: `installed by Homebrew; run brew uninstall mailtriage` (exit 2). Without `--yes` it asks first (default no); without a terminal it needs `--yes` (exit 2).
 2. It takes the installation lock, waiting up to 60 seconds (else exit 5), so no update recreates the binaries meanwhile.
@@ -121,7 +158,7 @@ The script's `--uninstall` runs `DIR/mailtriage self uninstall --dir DIR`, with 
 4. It removes the tray's login item when that starts `DIR/mailtriage-tray` (on macOS it also stops the login job), then runs `DIR/mailtriage-tray quit`. Close any open categories window yourself.
 5. Only when all of that worked, it deletes `DIR/mailtriage-tray`, the `.previous` copies and then `DIR/mailtriage`, and the update cache's entry of each program it deleted. When a step failed, it deletes no program file (services and a login item it already removed stay removed), lists the failures and exits 3. When a file cannot be deleted, it keeps `DIR/mailtriage`, so you can run `self uninstall` again, lists the failure and exits 3.
 
-It keeps the installation lock file, the private Himalaya under `~/.local/share/mailtriage/himalaya` (other configs may use it; it prints how to delete it), and your config, state and logs (`~/.config/mailtriage/` by default). No mail is touched.
+It keeps the installation lock file and the private Himalaya under `~/.local/share/mailtriage/himalaya` (other configs may use it; it prints how to delete it). It also keeps your config, state and logs (`~/.config/mailtriage/` by default). No mail is touched.
 
 ```json
 {"schema_version":1,"self_uninstall":{"dir":"/Users/alice/.local/bin","services":[{"account":"work","unit_path":"/Users/alice/Library/LaunchAgents/digital.wirdrei.mailtriage.work.plist","action":"uninstalled","error":null}],"tray":"quit","removed":["/Users/alice/Library/LaunchAgents/digital.wirdrei.mailtriage-tray.plist","/Users/alice/.local/bin/mailtriage-tray","/Users/alice/.local/bin/mailtriage.previous","/Users/alice/.local/bin/mailtriage"],"kept":["/Users/alice/.local/bin/.mailtriage-update.lock","/Users/alice/.config/mailtriage"],"failures":[]}}
@@ -130,4 +167,9 @@ It keeps the installation lock file, the private Himalaya under `~/.local/share/
 - `services[].action`: `uninstalled`, `skipped` (by the time its lock was held, the file named another executable) or `failed`, with `error`.
 - `tray`: `quit`, `not_running`, `other_installation` (another installation's tray, which keeps running), `not_installed`, or `failed`.
 
-Exit codes: 0; 2 for a Homebrew install, a refused confirmation, no terminal without `--yes`, or `HOME` not set (nothing is changed); 3 for a failed service or tray step (no program file was deleted) or a file that could not be deleted (`DIR/mailtriage` stays); 5 when the installation lock was held for 60 seconds.
+Exit codes:
+
+- **0**: done.
+- **2**: a Homebrew install, a refused confirmation, no terminal without `--yes`, or `HOME` not set (nothing is changed).
+- **3**: a failed service or tray step (no program file was deleted) or a file that could not be deleted (`DIR/mailtriage` stays).
+- **5**: the installation lock was held for 60 seconds.

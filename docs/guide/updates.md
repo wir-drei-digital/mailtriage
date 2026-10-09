@@ -1,6 +1,8 @@
 # Updates
 
-mailtriage installs new releases of itself from [GitHub Releases](https://github.com/wir-drei-digital/mailtriage/releases). The background service installs a new stable release within about a day and switches to it between passes. `mailtriage update` installs one at once.
+You don't have to keep an eye on new releases: mailtriage installs them itself, from [GitHub Releases](https://github.com/wir-drei-digital/mailtriage/releases).
+
+The background service installs a new stable release within about a day and switches to it between passes. `mailtriage update` installs one at once.
 
 ## Modes
 
@@ -12,7 +14,9 @@ mailtriage installs new releases of itself from [GitHub Releases](https://github
 | `notify` | Checks about once a day and prints an `available` event; installs nothing. |
 | `off` | Makes no network call. |
 
-Set it with `mailtriage setup --update --updates notify`, or edit the file. The mode governs only `watch`: `mailtriage update` works in every mode and needs no config.
+Set it with `mailtriage setup --update --updates notify`, or edit the file.
+
+The mode governs only `watch`: `mailtriage update` works in every mode and needs no config.
 
 ## `mailtriage update`
 
@@ -23,7 +27,11 @@ mailtriage update --check --json
 mailtriage update --json
 ```
 
-Both read the release list of `wir-drei-digital/mailtriage` from the GitHub API, every page, without a token. The candidate is the highest release whose tag is exactly `vX.Y.Z`: drafts, prereleases such as `v0.4.0-rc.1` and other tags are ignored, and GitHub's "Latest" flag is not used. Versions compare by SemVer, so `0.3.0-rc.1 < 0.3.0 < 0.3.1`. A release is installed only when it is newer than the installed binary. mailtriage never downgrades, and a release candidate you installed by hand stays until a higher stable release appears.
+Both read the release list of `wir-drei-digital/mailtriage` from the GitHub API, every page, without a token.
+
+The candidate is the highest release whose tag is exactly `vX.Y.Z`: drafts, prereleases such as `v0.4.0-rc.1` and other tags are ignored, and GitHub's "Latest" flag is not used. Versions compare by SemVer, so `0.3.0-rc.1 < 0.3.0 < 0.3.1`.
+
+A release is installed only when it is newer than the installed binary. mailtriage never downgrades, and a release candidate you installed by hand stays until a higher stable release appears.
 
 `update` replaces the binary that runs it (its path with symlinks resolved). In order, it:
 
@@ -35,7 +43,13 @@ Both read the release list of `wir-drei-digital/mailtriage` from the GitHub API,
 6. unpacks the `mailtriage` executable next to the binary and runs `--version` on it, which must print the release's version. This catches a wrong architecture, a glibc older than the release needs, and macOS refusing to run the binary;
 7. checks that the installed binary did not change meanwhile, keeps it as `<binary>.previous`, and moves the new binary into place with a rename. Running processes keep the old file open, so nothing running is disturbed.
 
-When a step before the rename fails, the binary and `<binary>.previous` are unchanged and the temporary files are removed. After the rename the update counts as done; a later problem, such as keeping the backup or recording the update, is a warning. Releases are verified by HTTPS and `SHA256SUMS`, not by signatures. `update` starts and stops nothing: each running `watch` switches to the new binary by itself (see [How a running service switches](#how-a-running-service-switches)).
+When a step before the rename fails, the binary and `<binary>.previous` are unchanged and the temporary files are removed. After the rename the update counts as done; a later problem, such as keeping the backup or recording the update, is a warning.
+
+::: warning Important
+Releases are verified by HTTPS and `SHA256SUMS`, not by signatures.
+:::
+
+`update` starts and stops nothing: each running `watch` switches to the new binary by itself (see [How a running service switches](#how-a-running-service-switches)).
 
 `--check` reports:
 
@@ -80,13 +94,17 @@ Without `--check`:
 
 ## The tray next to the CLI
 
-When a regular file `mailtriage-tray` (not a symlink) is in the same directory as the CLI, `mailtriage update` updates it in the same run, after the CLI. The CLI's directory is taken with symlinks resolved. The tray update uses the same installation lock, download rules and `SHA256SUMS`, and the tray has its own entry in the cache:
+When a regular file `mailtriage-tray` (not a symlink) is in the same directory as the CLI, `mailtriage update` updates it in the same run, after the CLI. The CLI's directory is taken with symlinks resolved.
+
+The tray update uses the same installation lock, download rules and `SHA256SUMS`, and the tray has its own entry in the cache:
 
 1. `update` runs `mailtriage-tray --version`. When that fails, for example on a Linux host without the tray's GTK or AppIndicator libraries, the tray is skipped. Nothing is downloaded, and a skipped tray is not a failure.
 2. When the release is newer than the tray's own version, `update` installs `mailtriage-tray-vX.Y.Z-PLATFORM.tar.gz` with the same steps as the CLI. The new tray must print `mailtriage-tray X.Y.Z`, and the old one is kept as `mailtriage-tray.previous`. A tray that is already current is left alone, even when the release has no tray archive.
 3. A failure leaves the old tray in place and does not undo the CLI. `watch` retries the tray after 1 hour, doubling up to 24 hours, and `update` exits 4.
 
-The CLI comes first. When its part fails, `update` exits as in the table above without trying the tray. A tray that mailtriage may not replace (see [Binaries mailtriage does not replace](#binaries-mailtriage-does-not-replace)) fails the tray part.
+The CLI comes first. When its part fails, `update` exits as in the table above without trying the tray.
+
+A tray that mailtriage may not replace (see [Binaries mailtriage does not replace](#binaries-mailtriage-does-not-replace)) fails the tray part.
 
 `update`'s result adds `tray`:
 
@@ -107,11 +125,15 @@ The CLI comes first. When its part fails, `update` exits as in the table above w
 - `installed`: what it prints for `--version`, or `null` when it does not run.
 - `available`: whether the release is newer.
 
-`service status` and `doctor` look next to the binary the service runs and read only the cache. Their `available` is `false` while the cached release was checked by a mailtriage that did not know the tray; `watch` then checks again early. The CLI's `available` still means the CLI alone. Without a tray file there is no `tray`.
+`service status` and `doctor` look next to the binary the service runs and read only the cache. Their `available` is `false` while the cached release was checked by a mailtriage that did not know the tray; `watch` then checks again early.
+
+The CLI's `available` still means the CLI alone. Without a tray file there is no `tray`.
 
 ## In the background
 
-All of this happens in `watch`; no other command checks for updates by itself. Each pass runs, in order, the restart check (see [How a running service switches](#how-a-running-service-switches)), the update step, and then the pass. The update step never fails, ends or changes a pass. Its problems are printed as `{"schema_version":1,"update":{"event":"error","message":"…"}}`, one JSON line with `--json`, else one text line.
+All of this happens in `watch`; no other command checks for updates by itself. Each pass runs, in order, the restart check (see [How a running service switches](#how-a-running-service-switches)), the update step, and then the pass.
+
+The update step never fails, ends or changes a pass. Its problems are printed as `{"schema_version":1,"update":{"event":"error","message":"…"}}`, one JSON line with `--json`, else one text line.
 
 The update step:
 
@@ -120,26 +142,40 @@ The update step:
 3. With `auto`, when the cached release is newer than the installed binary, was checked at most 48 hours ago, and no earlier attempt waits for its retry, it installs the release as `mailtriage update` does. It tries the installation lock once; when another update holds it, it tries again at the next pass. It records the next attempt one hour ahead before it downloads, and a failed install waits 1 hour, doubling up to 24 hours. After an install, the restart check switches `watch` to the new binary before the pass. A `mailtriage-tray` next to the binary comes after it, under the same rules and with its own retry times, from the cached release only (see [The tray next to the CLI](#the-tray-next-to-the-cli)). After a switch to a new binary, the tray follows at a later pass. A tray that does not run here is skipped, and a tray failure is an `error` event.
 4. With `notify`, or with `auto` when the binary may not be replaced, it prints once per release and config `{"schema_version":1,"update":{"event":"available","current":"0.2.0","latest":"0.3.0","release_url":"…"}}`. For `auto`, the event adds `install` with `reason` and `fix`.
 
-The release information is shared by every `watch` of the same user: a `notify` watcher's check serves an `auto` watcher's install. A cache that cannot be written stops the network work, and `watch` prints one event about it.
+The release information is shared by every `watch` of the same user: a `notify` watcher's check serves an `auto` watcher's install.
+
+A cache that cannot be written stops the network work, and `watch` prints one event about it.
 
 ## Status
 
-`mailtriage service status --account NAME` and `mailtriage doctor --account NAME` include an `update` block for the binary the account's service runs (see [Service commands](./service.md#service-commands)); `doctor` adds `ready` and `fix`. With a `mailtriage-tray` next to that binary, the block has `tray` too (see [The tray next to the CLI](#the-tray-next-to-the-cli)). Both read the cache and make no network call. `mailtriage update --check --json` asks GitHub now.
+`mailtriage service status --account NAME` and `mailtriage doctor --account NAME` include an `update` block for the binary the account's service runs (see [Service commands](./service.md#service-commands)); `doctor` adds `ready` and `fix`. With a `mailtriage-tray` next to that binary, the block has `tray` too (see [The tray next to the CLI](#the-tray-next-to-the-cli)).
+
+Both read the cache and make no network call. `mailtriage update --check --json` asks GitHub now.
 
 ## How a running service switches
 
-`watch` records which file it runs when it starts. Before each pass, and every 5 seconds while it waits, it compares that file with the binary at the same path (device, inode, size, modification and change time, mode). When the binary was replaced, by `mailtriage update`, by another account's service, or by `cargo install` over the same path, `watch`:
+A running `watch` notices when its binary is replaced and switches to the new one by itself.
+
+`watch` records which file it runs when it starts. Before each pass, and every 5 seconds while it waits, it compares that file with the binary at the same path (device, inode, size, modification and change time, mode).
+
+When the binary was replaced, by `mailtriage update`, by another account's service, or by `cargo install` over the same path, `watch`:
 
 1. runs `<binary> --version`, which must print `mailtriage <version>`;
 2. checks that the file did not change again meanwhile;
 3. prints `{"schema_version":1,"update":{"event":"restarting","pid":1234,"from":"0.2.0","to":"0.3.0"}}`;
 4. replaces itself with the new binary, with the same arguments and environment. The process ID stays the same, so launchd and systemd see no change, and the account lock is free while this happens.
 
-It never does this during a pass, and after Ctrl-C or SIGTERM it stops instead. It works in every `updates` mode and needs no `service install`; moving the binary to another path does need `service install`.
+It never does this during a pass, and after Ctrl-C or SIGTERM it stops instead.
 
-A Homebrew install keeps each version in its own directory, and `brew upgrade` deletes the old one. `watch` therefore also follows `$(brew --prefix)/opt/mailtriage/bin/mailtriage`: when that leads to another file than the running one, it runs `--version` on it and re-executes the `opt` path, between passes, as above.
+It works in every `updates` mode and needs no `service install`; moving the binary to another path does need `service install`.
 
-When the new binary does not run, or the switch fails, `watch` prints one `{"schema_version":1,"update":{"event":"error","message":"…"}}` per file and kind of failure, keeps running the old code, and tries again after 1 minute, doubling up to 1 hour, or at once when the file changes again (for example after `chmod +x`). On Linux, a process whose binary file was replaced uses its absolute `argv[0]` to find the path; when that does not exist either, `watch` prints one error event and does not switch.
+A Homebrew install keeps each version in its own directory, and `brew upgrade` deletes the old one.
+
+`watch` therefore also follows `$(brew --prefix)/opt/mailtriage/bin/mailtriage`: when that leads to another file than the running one, it runs `--version` on it and re-executes the `opt` path, between passes, as above.
+
+When the new binary does not run, or the switch fails, `watch` prints one `{"schema_version":1,"update":{"event":"error","message":"…"}}` per file and kind of failure and keeps running the old code. It tries again after 1 minute, doubling up to 1 hour, or at once when the file changes again (for example after `chmod +x`).
+
+On Linux, a process whose binary file was replaced uses its absolute `argv[0]` to find the path; when that does not exist either, `watch` prints one error event and does not switch.
 
 Without `--json`, events are one line of text, for example `update: restarting onto 0.3.0 (was 0.2.0, pid 1234)`.
 
@@ -153,13 +189,19 @@ Without `--json`, events are one line of text, for example `update: restarting o
 | `unsafe_permissions` | The binary or its directory is not owned by you, or is writable by group or others. | Install mailtriage into a directory only you own and can write, such as `~/.local/bin`, or set `updates` to `notify`. |
 | `not_writable` | You cannot create files in the binary's directory. | Make the directory writable for you, or set `updates` to `notify`. |
 
-A binary installed with `sudo install … /usr/local/bin/mailtriage` belongs to root, so it is `unsafe_permissions`: mailtriage reports new releases for it but does not replace it. For automatic updates, install it as your own user into `~/.local/bin`, with [the install script](./install.md#the-install-script) or with the binary you have:
+::: warning Important
+A binary installed with `sudo install … /usr/local/bin/mailtriage` belongs to root, so it is `unsafe_permissions`: mailtriage reports new releases for it but does not replace it.
+:::
+
+For automatic updates, install it as your own user into `~/.local/bin`, with [the install script](./install.md#the-install-script) or with the binary you have:
 
 ```sh
 /usr/local/bin/mailtriage self install --dir ~/.local/bin
 ```
 
-[`self install`](./install.md#mailtriage-self-install) says when `~/.local/bin` is not on your `PATH` and when another `mailtriage`, such as the root-owned one, comes first there. Run `~/.local/bin/mailtriage service install --account NAME` again after you move the binary.
+[`self install`](./install.md#mailtriage-self-install) says when `~/.local/bin` is not on your `PATH` and when another `mailtriage`, such as the root-owned one, comes first there.
+
+Run `~/.local/bin/mailtriage service install --account NAME` again after you move the binary.
 
 ## Files
 
@@ -210,4 +252,6 @@ There is no rollback command; a bad release is normally fixed by a newer one. To
 3. `mv <binary>.previous <binary>`
 4. Start them again: `mailtriage service install --account NAME`.
 
-This works only when the newer release did not migrate the state database. An older binary refuses a newer database (`database schema is newer than this binary`); then roll forward to a fixed release instead.
+::: warning Important
+Rolling back works only when the newer release did not migrate the state database. An older binary refuses a newer database (`database schema is newer than this binary`); then roll forward to a fixed release instead.
+:::

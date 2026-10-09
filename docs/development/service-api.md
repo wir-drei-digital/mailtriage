@@ -35,17 +35,23 @@ impl Service {
 ```
 
 `init` is CLI-owned: default_config + config::save, refuse overwrite existing;
-choose state_dir relative .state. `categories validate` accepts JSON category
+choose state_dir relative .state.
+
+`categories validate` accepts JSON category
 array or {categories:[...]}; can use default config work account and validate.
+
 `watch` is CLI-owned repeated Service::open + sync, signal graceful stop, default
 60s interval, bounded limit default100; sleeps in short intervals for signal.
+
 `--json` supported globally after subcommand too. The config path follows the
 resolution order below; `init` writes `--config` or ./mailtriage.json. Clear field accepts category
 alias mapping to category_id. Main errors printable JSON with safe message.
 
 Error mapping: downcast `service::ServiceError {pub code:i32,pub message:String}`
 for deliberate service errors; otherwise 3 for operational errors. Invalid
-argument/config errors 2, revision/cursor/identity conflict 5. Partial sync
+argument/config errors 2, revision/cursor/identity conflict 5.
+
+Partial sync
 returns successful Value with `partial:true`; CLI exits4 after printing.
 Never print raw debug chain from provider/transport errors (possible secrets).
 
@@ -60,7 +66,9 @@ fake provider using temporary config. release.yml optional with artifacts.
 except `init` and `setup`: `--config`, else `MAILTRIAGE_CONFIG` (ignored when
 empty), else `<cwd>/mailtriage.json` if it exists, else
 `~/.config/mailtriage/mailtriage.json`. `config::setup_path(flag, env, home)`
-is the same without the working-directory step; `setup` uses it. Without
+is the same without the working-directory step; `setup` uses it.
+
+Without
 `HOME` the last step fails with `cannot find the config: HOME is not set; pass
 --config PATH` (exit 2). `Service::open` on a missing file exits 2 with
 ``configuration not found; run `mailtriage setup` or pass --config``.
@@ -126,10 +134,14 @@ Before step 8 writes, `service::stored_binding_matches(config, &AppConfig,
 account) -> Result<Option<bool>>` compares the binding stored in the state
 database (resolved as `Service::open` resolves it, opened read-only, never
 created) with the one the new config gives the account, computed as `ensure`
-computes it. `Some(false)` exits 5 with `step 3 (account): account NAME is
+computes it.
+
+`Some(false)` exits 5 with `step 3 (account): account NAME is
 bound to its previous mailbox (identity, Himalaya account or IMAP server
 changed); keep them, or set this mailbox up under a new name with --account
-NEW`, and nothing is written. `None` (no database or no row) and read errors
+NEW`, and nothing is written.
+
+`None` (no database or no row) and read errors
 let setup go on; step 9 then reports what `doctor` finds.
 
 Errors are `ServiceError`s. Except for the two abort messages below, the
@@ -148,7 +160,9 @@ config lock (`config_busy`), or a config that changed since step 1 read it
 
 `provider` carries `kind`, `model`, `configuration_valid`, `key_source`
 (`command` when `api_key_command` is set, else `env`; `null` for `fake`) and
-`key_present`. When the key is missing, `key_error` holds one fixed string:
+`key_present`.
+
+When the key is missing, `key_error` holds one fixed string:
 `API key command failed (exit N)` (`exit signal` when killed),
 `API key command timed out`, `API key command printed no key`,
 `API key command could not start`,
@@ -160,7 +174,9 @@ the key command (once per `Service`; `secrets::KeyCache`).
 `version` (the first line of `himalaya --version`) and `tested` (whether that is
 a tested version). When the version is tested, it also carries
 `alias_conflicts` (the source folders Himalaya resolves to another mailbox,
-which no pass reads from). When it is not ready, `error` is
+which no pass reads from).
+
+When it is not ready, `error` is
 `Himalaya X is not a tested version (tested: …)`,
 `Himalaya X was built without IMAP (+imap)`,
 `Himalaya printed no version mailtriage knows (tested: …)`,
@@ -174,11 +190,15 @@ which no pass reads from). When it is not ready, `error` is
 service's `KeyCache` before they lease any job, and only when a job is eligible
 to lease (`sync`: `queued_outside` is not empty; `classify`:
 `Store::leasable`; `reclassify`: a message is selected). With nothing to
-classify the key command does not run and the result is not partial. When the
+classify the key command does not run and the result is not partial.
+
+When the
 key cannot be resolved they lease nothing (no attempt is used, jobs stay
 queued) and add
 `"classification": {"skipped": true, "reason": KEY_ERROR}` with one of the
-fixed key-error strings above; `partial` is then `true`. `sync` still runs
+fixed key-error strings above; `partial` is then `true`.
+
+`sync` still runs
 discovery and the filing steps, with `fetched`, `classified`, `cached` and
 `failed` 0. `classify` stores the message and reports `outcome: "skipped"`;
 `reclassify` requeues the matched messages and reports `reclassified: 0`. The
@@ -230,7 +250,9 @@ The CLI wraps each in `{"schema_version":1,"service":{...}}`.
 `mailtriage update [--check]`; it opens no config. Errors are `ServiceError`s:
 3 for network, release, archive, smoke-test and replaceability problems of the
 CLI, 5 when the installation lock stayed held for 60 s. The JSON results are
-in the [guide](../guide/updates.md). The code is in `src/update/`: `github` (URL
+in the [guide](../guide/updates.md).
+
+The code is in `src/update/`: `github` (URL
 rules, release list, downloads), `release` (candidate, archive names,
 `SHA256SUMS`), `cache` (`update.json`), `schedule`, `check` (one refresh,
 and `due`: when `watch` refreshes), `platform` (file identity,
@@ -242,11 +264,15 @@ The updater installs `update::COMPONENTS`: `CLI` (`mailtriage`) and `TRAY`
 (`mailtriage-tray`, at `update::tray_path(cli)`, used when
 `update::installed_tray(cli)` finds a regular file there). Both go through
 `install::install` with their own `Job { component, path, fallback }`; the
-tray's fallback is its own probed version. `run` handles the CLI first and
+tray's fallback is its own probed version.
+
+`run` handles the CLI first and
 then the tray under the same installation lock. A failed tray part, including
 a tray the replaceability check (`platform::blocker`) refuses, keeps the CLI's
 result and sets top-level `"partial": true` (exit 4); a failed CLI part never
-reaches the tray. Every check records `release.archives` for each
+reaches the tray.
+
+Every check records `release.archives` for each
 component (`null` when the release lacks it); a missing key was written by an
 older version and counts as unknown (`CachedRelease::knows`), so `watch`
 refreshes early once (`check::due`) and status reports the tray's `available`
@@ -258,7 +284,9 @@ backoff) and `record_version` are the `installs` writers that `update` and
 
 Migration 5 adds `pass_heartbeats(account TEXT PRIMARY KEY, finished_at TEXT
 NOT NULL, partial INTEGER NOT NULL, exit_code INTEGER NOT NULL, mode TEXT NOT
-NULL)`. `Service::sync` upserts one row per pass that names a configured
+NULL)`.
+
+`Service::sync` upserts one row per pass that names a configured
 account, including a pass that finds another worker holding the account lock
 (exit 5, reason `account_busy`; the holder's own heartbeat replaces it when its
 pass ends): `exit_code` 0, 4 for partial, else the error's code
@@ -416,7 +444,9 @@ pub fn status(service: &Service, config_path: &Path, account: Option<&str>,
 
 `status` is `service status`: `{schema_version:1, config, services:[…]}` with
 one object per account in name order, or `{schema_version:1, config, service}`
-with `account`. `config` is the canonical config path. Each object is
+with `account`. `config` is the canonical config path.
+
+Each object is
 `system_service::status_account`'s plus `service_config`, `file_config`,
 `config_matches`, `enabled`, `enablement`, `interval_seconds`, `filing_mode`
 (the configured mode, `filing::mode_str`) and `identity`, and
@@ -519,7 +549,9 @@ Apply result: `{"schema_version":1,"account":"work","marked":N,"waiting_marked":
 
 Errors: 2 for `--apply` outside `live` (`refile --apply requires filing mode live`), an unknown category, a folder that names no category or retired folder (`unknown folder: not a category or retired folder`) or several (`folder name matches several folders; pass the native name: A, B`), a limit outside 1..=500, an unknown account; 3 when the state database is unavailable; 5 when `mailtriage.json` changed (`reason: config_changed`) or the placements kept changing (`placements changed concurrently; retry`).
 
-Schema v6 (migration 6): `placements.refile_once`, `placements.filed_home_folder`/`filed_home_epoch`/`filed_home_uid` (the occurrence a COPYUID-proven mailtriage move produced; kept only while it is the known home), `filing_intents.consumes_refile`, `folders.drain_until_uid` (NULL: frozen; 0: retained in the last pass; N: draining until UID N). The newer-schema guard is the public `store::LATEST` (10 since schema v10, see "Reply queue").
+Schema v6 (migration 6): `placements.refile_once`, `placements.filed_home_folder`/`filed_home_epoch`/`filed_home_uid` (the occurrence a COPYUID-proven mailtriage move produced; kept only while it is the known home), `filing_intents.consumes_refile`, `folders.drain_until_uid` (NULL: frozen; 0: retained in the last pass; N: draining until UID N).
+
+The newer-schema guard is the public `store::LATEST` (10 since schema v10, see "Reply queue").
 
 Also: `filing status` gains `refile_marked` and `refile_candidates`; `categories apply` gains `hint` (null with filing `off`); `filing plan` refile moves carry `"reason":"refile"`; events `refile_marked`, `refile_cleared {reason}`, `refile_cancelled {intent_id, reason}`, and `moved` with `"reason":"refile"`.
 
@@ -529,9 +561,12 @@ Migration 7 adds the nullable column `pass_heartbeats.version`.
 `Store::record_heartbeat` writes the running version (`CARGO_PKG_VERSION`) on
 every heartbeat, error heartbeats included, and `Store::heartbeat` returns it
 as `version` (`null` for rows written before v7). The newer-schema guard is
-`LATEST`, the last migration's version. Like every migration of a stable
+`LATEST`, the last migration's version.
+
+Like every migration of a stable
 release, it is additive, so a process of the previous release keeps
 inserting heartbeats on an open connection after another process migrated.
+
 A process of a release before v7 updates an existing heartbeat row without
 touching `version`, so during a rolling update a row can keep the newer
 process's version until the next pass of a v7-capable process.
@@ -541,30 +576,40 @@ process's version until the next pass of a v7-capable process.
 Migration 8 adds two nullable columns, `pass_heartbeats.reason` and
 `pass_heartbeats.reason_at`. `Store::record_heartbeat(account, partial,
 exit_code, mode, reason)` writes `reason` and sets `reason_at` to the
-`finished_at` it writes, in the same upsert. `Service::sync` passes
+`finished_at` it writes, in the same upsert.
+
+`Service::sync` passes
 `service::error_reason(&error)`, the `reason` the CLI's error object carries
 (a `ServiceError`'s kind, or `config_changed` for the engine's
 `ConfigChanged`), and `None` for a pass that did not fail. So error heartbeats
 carry `config_changed` (the errors `watch` skips), `account_busy` (another
 worker holds the account lock), `binding_conflict` and the other reasons, and
-`null` for an error without one. `Store::heartbeat` returns `reason` only when
+`null` for an error without one.
+
+`Store::heartbeat` returns `reason` only when
 `reason_at` equals `finished_at`, else `null`: rows written before v8 read
 `null`, and so does a row that a process of a release before v8 rewrote after
 the migration (it updates `finished_at` but neither `reason` nor `reason_at`),
-so a reason never outlives its pass. `store::LATEST` is public: tests name the
+so a reason never outlives its pass.
+
+`store::LATEST` is public: tests name the
 latest schema `LATEST` and a newer one `LATEST + 1`.
 
 ## Reply queue (config schema 4)
 
 `filing.reply_queue` (default `false`, written only when true) holds new mail
 that needs action in its source folder until it is answered or marked done
-(spec: `design/specs/2026-10-08-reply-queue-design.md`). A config
+(spec: `design/specs/2026-10-08-reply-queue-design.md`).
+
+A config
 that turns it on is written as `schema_version` 4; every other config stays
 3. `config::SCHEMA_VERSION` (4) is the newest schema a binary reads;
 `config::written_schema` is the one a write produces.
 
 Schema v9 (migration 9) adds the table `read_approvals(account, message_id,
-requested_at, approved_at, applied_at)`, the read approval list. A reply
+requested_at, approved_at, applied_at)`, the read approval list.
+
+A reply
 exit enters it once, in its move claim's transaction
 (`Store::claim_move_with(.., MoveClaim::ReplyExit)`; `MoveClaim::Refile`
 marks a refile move, `MoveClaim::Plain` any other);
@@ -573,15 +618,21 @@ after adding `\Seen` (`Store::mark_read_applied`).
 
 Schema v10 (migration 10) adds the nullable columns
 `read_approvals.attempt_folder` and `attempt_epoch`: the folder and epoch of
-an `add_seen` session whose outcome is not known yet. A live pass writes
+an `add_seen` session whose outcome is not known yet.
+
+A live pass writes
 them (`FilingWrite::ReadAttempt`) before the session and clears them once
 its outcome is known; `filing::reply::recover_reads`, run by
 `filing::recover::recover`, compares a remaining attempt with the folder's
-epoch. It also adds `read_approvals.intent_id`, the reply exit intent whose
+epoch.
+
+It also adds `read_approvals.intent_id`, the reply exit intent whose
 claim wrote the row: every intent state write (`Store::update_intent`,
 `FilingWrite::Intent`) that ends an intent `failed`, `lost` or `superseded`
 deletes that intent's row in the same transaction unless `applied_at` is
-set. Additive, so a process of the previous release keeps inserting rows
+set.
+
+Additive, so a process of the previous release keeps inserting rows
 (without `intent_id`, so they are not removed this way).
 `store::LATEST` is 10.
 

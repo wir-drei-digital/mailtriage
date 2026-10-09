@@ -1,6 +1,10 @@
 # Tray
 
-`mailtriage-tray` shows each account's state in the menu bar (macOS) or the system tray (Linux). It starts, stops and installs the background service, opens the service log, and edits categories in a window. Every action is one documented command (listed below), so you or an agent can do the same in a terminal.
+Want to see at a glance whether mailtriage is doing its job, without opening a terminal? The tray app shows it.
+
+`mailtriage-tray` shows each account's state in the menu bar (macOS) or the system tray (Linux). It starts, stops and installs the background service, opens the service log, and edits categories in a window.
+
+Every action is one documented command (listed below), so you or an agent can do the same in a terminal.
 
 ```text
 mailtriage-tray [--config PATH] [--mailtriage PATH]
@@ -11,7 +15,11 @@ mailtriage-tray quit [--json]
 
 ## What the tray runs
 
-The tray uses the `mailtriage` next to its own executable, else the first on your `PATH`; `--mailtriage PATH` overrides both. For a Homebrew install it uses the `opt` path, `$(brew --prefix)/opt/mailtriage/bin/mailtriage`, which outlives `brew upgrade`. It uses the config that `mailtriage service status` finds (see [Where mailtriage finds the config](./configuration.md#where-mailtriage-finds-the-config)); `--config PATH` overrides it. Both are resolved once at start and made absolute. A later change of `PATH`, the working directory or a symlink therefore never redirects a running tray; restart it to follow one.
+The tray uses the `mailtriage` next to its own executable, else the first on your `PATH`; `--mailtriage PATH` overrides both. For a Homebrew install it uses the `opt` path, `$(brew --prefix)/opt/mailtriage/bin/mailtriage`, which outlives `brew upgrade`.
+
+It uses the config that `mailtriage service status` finds (see [Where mailtriage finds the config](./configuration.md#where-mailtriage-finds-the-config)); `--config PATH` overrides it.
+
+Both are resolved once at start and made absolute. A later change of `PATH`, the working directory or a symlink therefore never redirects a running tray; restart it to follow one.
 
 Every command ends with `--config CONFIG`, the absolute path of the tray's config:
 
@@ -38,7 +46,9 @@ Every command ends with `--config CONFIG`, the absolute path of the tray's confi
 
 The [install script](./install.md#the-install-script) installs the tray next to `mailtriage`: by default on macOS, and on Linux with `--tray` or when `DISPLAY` or `WAYLAND_DISPLAY` is set.
 
-Each release also carries `mailtriage-tray-vVERSION-macos-arm64.tar.gz`, `-linux-amd64.tar.gz` and `-linux-arm64.tar.gz`, each with a `.sha256` file and listed in `SHA256SUMS`. The archive holds `mailtriage-tray` and the license. Use the same release as `mailtriage`, verify the archive's checksum, and install the tray in the same directory as `mailtriage` (`~/.local/bin` in [Install](./install.md)). On Linux, set `PLATFORM` to `linux-amd64` or `linux-arm64` and use `sha256sum --check` in place of `shasum -a 256 --check`:
+Each release also carries `mailtriage-tray-vVERSION-macos-arm64.tar.gz`, `-linux-amd64.tar.gz` and `-linux-arm64.tar.gz`, each with a `.sha256` file and listed in `SHA256SUMS`. The archive holds `mailtriage-tray` and the license.
+
+Use the same release as `mailtriage`, verify the archive's checksum, and install the tray in the same directory as `mailtriage` (`~/.local/bin` in [Install](./install.md)). On Linux, set `PLATFORM` to `linux-amd64` or `linux-arm64` and use `sha256sum --check` in place of `shasum -a 256 --check`:
 
 ```sh
 VERSION=0.1.0 PLATFORM=macos-arm64
@@ -49,7 +59,11 @@ gh release download "v$VERSION" --repo wir-drei-digital/mailtriage --pattern "ma
   install -m 0755 mailtriage-tray ~/.local/bin/mailtriage-tray
 ```
 
-The macOS executable is unsigned and not notarized, like the CLI. From source, with a stable Rust toolchain (on Linux, install the build packages from [Linux requirements](#linux-requirements) first):
+::: warning Important
+The macOS executable is unsigned and not notarized, like the CLI.
+:::
+
+From source, with a stable Rust toolchain (on Linux, install the build packages from [Linux requirements](#linux-requirements) first):
 
 ```sh
 cargo build --release --locked -p mailtriage-tray &&
@@ -58,7 +72,9 @@ cargo build --release --locked -p mailtriage-tray &&
   mailtriage-tray --version
 ```
 
-From then on `mailtriage update`, and the background service with `updates: auto`, keep a `mailtriage-tray` next to the CLI current: they update it after the CLI, to the same release (see [The tray next to the CLI](./updates.md#the-tray-next-to-the-cli)). That needs both in a directory you own, as above. A root-owned copy, for example one installed with `sudo` into `/usr/local/bin`, is not replaced (see [Binaries mailtriage does not replace](./updates.md#binaries-mailtriage-does-not-replace)).
+From then on `mailtriage update`, and the background service with `updates: auto`, keep a `mailtriage-tray` next to the CLI current: they update it after the CLI, to the same release (see [The tray next to the CLI](./updates.md#the-tray-next-to-the-cli)). That needs both in a directory you own, as above.
+
+A root-owned copy, for example one installed with `sudo` into `/usr/local/bin`, is not replaced (see [Binaries mailtriage does not replace](./updates.md#binaries-mailtriage-does-not-replace)).
 
 Start it:
 
@@ -69,7 +85,9 @@ mailtriage-tray
 The icon appears in the menu bar (macOS, without a Dock icon) or the system tray (Linux), and stays until you choose Quit.
 
 - One tray runs per user. A second start prints `mailtriage-tray is already running` and exits 0.
-- `mailtriage-tray quit` quits the running tray of this installation, as its menu's Quit does, and prints `quit`, `not_running` (no tray runs) or `other_installation` (the running tray belongs to a `mailtriage-tray` elsewhere, which keeps running); with `--json`, `{"schema_version":1,"quit":"quit"}`. It talks to the tray over `tray.sock` next to `tray.lock` in the cache directory and signals no process. It exits 3 with `the tray does not respond; quit it from its menu` when a tray holds its lock but does not answer within 5 seconds. Open categories windows keep running.
+- `mailtriage-tray quit` quits the running tray of this installation, as its menu's Quit does, and prints `quit`, `not_running` (no tray runs) or `other_installation` (the running tray belongs to a `mailtriage-tray` elsewhere, which keeps running); with `--json`, `{"schema_version":1,"quit":"quit"}`.
+
+  It talks to the tray over `tray.sock` next to `tray.lock` in the cache directory and signals no process. It exits 3 with `the tray does not respond; quit it from its menu` when a tray holds its lock but does not answer within 5 seconds. Open categories windows keep running.
 - When `mailtriage-tray` is replaced on disk by a version that runs, the running tray restarts itself onto it within about 15 s, with the same config and `mailtriage`. An open categories window keeps running. After `brew upgrade`, a Homebrew tray restarts onto its `opt` path.
 
 ## Start at login
@@ -138,10 +156,10 @@ Each account shows its name, its identity when that differs, a mark (● running
 | Status unknown | The tray cannot tell which config the service runs (`launchctl` or `systemctl` failed, or systemd needs a reload), or, for a stopped service, whether it starts at login. The submenu says which. | Wait for the next refresh. If it stays, run `mailtriage service status --account NAME --json --config CONFIG`; `mailtriage service install --account NAME --config CONFIG` rewrites the service for this config. |
 | No background service on this system | Neither launchd nor systemd is available. | Run `watch` under [your own supervisor](./service.md#your-own-supervisor). "Edit categories…" still works. |
 
-- **The submenu** shows whether the job runs and the filing mode, then the last check, for example "Last check 12:03, some mail skipped · v0.3.0" (the version of mailtriage that ran it). A job that runs although its manager would not start it again adds "Disabled: won't start again after logout" and keeps "Stop service". While a service command runs, its item reads "Starting…", "Stopping…" or "Installing…".
-- **The summary line** reads "All accounts running", "NAME needs attention", "N of M accounts running", "Stopped", "No background service on this system", or a problem from [When the tray shows a problem](#when-the-tray-shows-a-problem). When no account runs for this config but some run another one, it says so instead of "Stopped": "Runs another config" (the only account), "Every account runs another config", "NAME runs another config" or "N accounts run another config". It is also the icon's tooltip.
-- **The icon** shows the worst state across accounts: an envelope with a `!` badge for a warning, a problem or "Status unknown"; else a plain envelope when a service runs, starts or restarts; else an outline (every account stopped, not installed, running another config, or without a service manager). On macOS it follows the menu bar's light or dark look, so a warning and a problem look the same. Linux uses the same shapes in green, amber, red and grey.
-- **Times** are local `HH:MM`, with the date when not today ("Oct 5, 23:59").
+- **The submenu**: shows whether the job runs and the filing mode, then the last check, for example "Last check 12:03, some mail skipped · v0.3.0" (the version of mailtriage that ran it). A job that runs although its manager would not start it again adds "Disabled: won't start again after logout" and keeps "Stop service". While a service command runs, its item reads "Starting…", "Stopping…" or "Installing…".
+- **The summary line**: reads "All accounts running", "NAME needs attention", "N of M accounts running", "Stopped", "No background service on this system", or a problem from [When the tray shows a problem](#when-the-tray-shows-a-problem). When no account runs for this config but some run another one, it says so instead of "Stopped": "Runs another config" (the only account), "Every account runs another config", "NAME runs another config" or "N accounts run another config". It is also the icon's tooltip.
+- **The icon**: shows the worst state across accounts: an envelope with a `!` badge for a warning, a problem or "Status unknown"; else a plain envelope when a service runs, starts or restarts; else an outline (every account stopped, not installed, running another config, or without a service manager). On macOS it follows the menu bar's light or dark look, so a warning and a problem look the same. Linux uses the same shapes in green, amber, red and gray.
+- **Times**: local `HH:MM`, with the date when not today ("Oct 5, 23:59").
 - **"(stale)"** after the summary: the last refresh failed. The menu keeps the last good state for up to 2 minutes, then shows the failure.
 - **"mailtriage X and tray Y differ; run mailtriage update"** appears when the CLI's version differs from the tray's. `mailtriage update` brings a CLI and the tray next to it to the same release; otherwise install both from the same release.
 - **Notices.** A failed action, or a line from the categories window such as "the categories window is already open", shows under the summary for 60 s, with "Show details" when there is more.
@@ -154,9 +172,15 @@ Open it with "Edit categories…" in an account's submenu, or:
 mailtriage-tray categories --account work
 ```
 
-Without `--account` it shows the first account. One window runs per config. A second start for the same config prints `the categories window is already open` and exits 0; on macOS it first brings the open window to the front. The tray shows that line as a notice. `categories` exits 0 when the window is closed or already open, 2 for invalid arguments, and 3 when `mailtriage` cannot be found or the first load fails, after the window has shown why.
+Without `--account` it shows the first account. One window runs per config. A second start for the same config prints `the categories window is already open` and exits 0; on macOS it first brings the open window to the front. The tray shows that line as a notice.
 
-The window shows the account selector and Reload at the top, the categories on the left (with their mail folder; the default one is marked "default") and the selected category on the right: Name, "What belongs here" (the description), "Use for mail that fits nowhere else" (the default category; exactly one), Mail folder (only when the account's filing is not `off`), Advanced, and "Remove category". The footer shows the check result on the left and "Move filed mail…", Revert and Apply on the right.
+`categories` exits 0 when the window is closed or already open, 2 for invalid arguments, and 3 when `mailtriage` cannot be found or the first load fails, after the window has shown why.
+
+The window lets you change your categories without editing JSON, and it checks every change as you type.
+
+It shows the account selector and Reload at the top, the categories on the left (with their mail folder; the default one is marked "default") and the selected category on the right: Name, "What belongs here" (the description), "Use for mail that fits nowhere else" (the default category; exactly one), Mail folder (only when the account's filing is not `off`), Advanced, and "Remove category".
+
+The footer shows the check result on the left and "Move filed mail…", Revert and Apply on the right.
 
 - **Checks run as you type.** Half a second after your last change, the window writes the categories to a private temporary file and runs `categories validate`. The footer shows the changes in words, for example "1 added, 1 renamed, mail folder changed for Newsletters", or what is wrong, with "Show details".
 - **Apply** is enabled when the latest check of your current edits passed and they differ from what was loaded; otherwise its tooltip says why. Apply (or ⌘/Ctrl+S) lists the changes and asks first. When the change sorts all open mail again, it adds: "All open mail in this account will be sorted again. This uses your OpenRouter key and takes a few passes." After a successful apply, the footer says "Saved." and what happens next, and the window loads the categories again.
@@ -169,15 +193,23 @@ The window shows the account selector and Reload at the top, the categories on t
 - **Revert** drops your unsaved edits without asking. Switching accounts, Reload and closing the window ask first ("Discard changes?").
 - **Feedback.** Every command shows a spinner and a verb ("Loading…", "Checking…", "Applying…", "Moving…"). While a load, Apply or a move runs, the form is read-only. Closing during Apply or a move shows "Finishing…" and closes when it ends. The draft files are removed when the window closes.
 
-**Moving filed mail.** "Move filed mail…" (shown when the account's filing is not `off`) opens a panel below the form. It also opens after an apply that added, removed or re-pointed a category, or sorts mail again. It mirrors `mailtriage filing refile`:
+**Moving filed mail.** "Move filed mail…" (shown when the account's filing is not `off`) opens a panel below the form. It also opens after an apply that added, removed or re-pointed a category, or sorts mail again.
+
+It mirrors `mailtriage filing refile`:
 
 - each folder no longer used, with how many messages can move now and how many may move once they are sorted again, and "Move" (which also marks the waiting ones);
 - "Move all N" for every message whose folder no longer matches its category, including those in folders no longer used;
 - how many messages are still being sorted again, and "Not moved" with each reason and its count.
 
-After a move, the panel says how many messages were marked, for example "Marked 30 messages; 12 more will move if their new category calls for it." The background service moves them at its next pass; when it does not run, the panel says to start it or run `mailtriage sync`. With filing in `dry_run`, the panel only previews and says "Moving filed mail needs filing set to live." "Close" in the panel's heading row hides the panel and gives the form its room back; while a move runs it is disabled, and its tooltip says why. "Move filed mail…" opens the panel again with a fresh preview.
+After a move, the panel says how many messages were marked, for example "Marked 30 messages; 12 more will move if their new category calls for it." The background service moves them at its next pass; when it does not run, the panel says to start it or run `mailtriage sync`.
 
-**Keyboard.** ⌘N (Ctrl+N on Linux) adds a category, ⌘S (Ctrl+S) opens the apply confirmation, Esc closes a dialog, and ⌘W (Ctrl+W) closes the window, asking about unsaved edits. Tab follows the visual order. Every control has a label that screen readers announce.
+With filing in `dry_run`, the panel only previews and says "Moving filed mail needs filing set to live."
+
+"Close" in the panel's heading row hides the panel and gives the form its room back; while a move runs it is disabled, and its tooltip says why. "Move filed mail…" opens the panel again with a fresh preview.
+
+**Keyboard.** ⌘N (Ctrl+N on Linux) adds a category, ⌘S (Ctrl+S) opens the apply confirmation, Esc closes a dialog, and ⌘W (Ctrl+W) closes the window, asking about unsaved edits.
+
+Tab follows the visual order. Every control has a label that screen readers announce.
 
 ## Linux requirements
 

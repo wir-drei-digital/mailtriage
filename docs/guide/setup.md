@@ -1,17 +1,21 @@
 # Guided setup
 
+Guided setup gets you from a fresh install to a checked configuration by asking you questions, one setting at a time:
+
 ```sh
 mailtriage setup
 ```
 
 `setup` asks one question per setting, writes the configuration, checks it and can install the background service. Every answer can also be given as a flag, so it runs without prompts too.
 
-- It writes `~/.config/mailtriage/mailtriage.json`, or the path in `--config` or `MAILTRIAGE_CONFIG`. It never uses `./mailtriage.json`.
-- A new config keeps its state in `state/` next to the config file (`~/.config/mailtriage/state`).
-- It never writes IMAP settings; Himalaya's own wizard does that.
-- It makes no change on the IMAP server.
-- It never asks for, prints or stores the OpenRouter key. The key store's own tool asks for it; setup only checks that the read command prints a key.
-- It never turns on `live` filing.
+What setup does and never does:
+
+- **Where it writes**: `~/.config/mailtriage/mailtriage.json`, or the path in `--config` or `MAILTRIAGE_CONFIG`. It never uses `./mailtriage.json`.
+- **State**: a new config keeps its state in `state/` next to the config file (`~/.config/mailtriage/state`).
+- **IMAP settings**: setup never writes them; Himalaya's own wizard does that.
+- **Your mailbox**: setup makes no change on the IMAP server.
+- **Your OpenRouter key**: setup never asks for, prints or stores it. The key store's own tool asks for it; setup only checks that the read command prints a key.
+- **Filing**: setup never turns on `live` filing.
 
 ## The ten steps
 
@@ -72,21 +76,46 @@ mailtriage setup
 - Key flags with `--provider fake` exit 2: the offline classifier needs no key.
 - All accounts in a config share one provider, so there is one key per config.
 
-**Step 6, categories.** A new account gets six categories: Correspondence, Transactions, Updates, Newsletters, Promotions and Other (the catch-all). Each has `folder` set to its own name. An updated account keeps its categories. Once the config is written, setup prints the commands to change them; see [Categories](./categories.md).
+**Step 6, categories.** A new account gets six categories: Correspondence, Transactions, Updates, Newsletters, Promotions and Other (the catch-all). Each has `folder` set to its own name.
 
-**Step 7, filing.** `--filing dry-run` plans moves and flags and writes nothing; it is the default for a new account, and an updated account defaults to its current mode. `--filing off` only classifies. Setup never selects `live`. An account that is already `live` stays `live` unless you pass `--filing`. To go live, follow the [rollout](./filing.md#rollout).
+An updated account keeps its categories. Once the config is written, setup prints the commands to change them; see [Categories](./categories.md).
 
-**Step 8, write.** `--updates auto|notify|off` sets [`updates`](./updates.md), with no prompt: a new config gets `auto`, and an existing one keeps its value unless `--updates` is given. Setup validates the whole config and writes it atomically with mode 0600, under the configuration lock (`mailtriage.lock`). When another command holds that lock, setup exits 5 (reason `config_busy`); when the file changed since step 1 read it, setup exits 5 (reason `config_changed`). Either way it writes nothing; run it again. The state directory is created with mode 0700. If the result is invalid, setup exits 2 and writes nothing. If the state directory already holds a binding for the account and the new answers would change it, setup exits 5 and writes nothing; see [Updating an account](#updating-an-account).
+**Step 7, filing.** `--filing dry-run` plans moves and flags and writes nothing; it is the default for a new account, and an updated account defaults to its current mode. `--filing off` only classifies.
 
-**Step 9, check.** Setup runs `doctor` for the account. It prints each item (`provider`, `key`, `mail`, `filing` when filing is on, and `update` when `updates` is `auto` but the binary may not be replaced) as `ok`, or as `not ready` with the one command that fixes it. The `update` item does not make `doctor.ready` false, as in `doctor` itself. If `doctor` itself fails, for example because the state database cannot be opened, setup reports a single not-ready `state` item instead. For an untested Himalaya, the `mail` item's fix is `run mailtriage himalaya install, then mailtriage setup --update --account NAME --himalaya-binary PATH`, with the path that command installs to and `--config` when needed. Setup exits 0 even when an item is not ready.
+Setup never selects `live`. An account that is already `live` stays `live` unless you pass `--filing`. To go live, follow the [rollout](./filing.md#rollout).
 
-**Step 10, service.** With prompts on macOS or Linux, setup asks whether to run `watch` in the background (default yes); on other platforms it skips this step. When the key comes from an environment variable, the default is no, because the service does not inherit the variable; setup says so and prints the command that moves the key into a key store. Without prompts, `--service install` installs it and `--service skip` (the default) does not. `--interval-seconds` (1 to 86400, default 60) and `--limit` (1 to 500, default 100) are passed to `watch`. When step 9 reported a not-ready `state` item, setup installs no service, since every pass would fail; it prints the `service install` command to run once that is fixed. See [Background service](./service.md).
+**Step 8, write.** `--updates auto|notify|off` sets [`updates`](./updates.md), with no prompt: a new config gets `auto`, and an existing one keeps its value unless `--updates` is given.
 
-**Next steps.** Setup ends with the commands to run next: `sync` and `watch`, or, with the service installed, `service status` and `list` (`sync` or `watch` would compete with the service for the account lock). Every `mailtriage` command setup prints passes `--config` when a command run in the same directory and environment without it would find another config or none. When a `./mailtriage.json` in the working directory would win over the written config, setup also prints a warning.
+Setup validates the whole config and writes it atomically with mode 0600, under the configuration lock (`mailtriage.lock`). The state directory is created with mode 0700. Setup writes nothing when:
+
+- another command holds that lock: exit 5 (reason `config_busy`);
+- the file changed since step 1 read it: exit 5 (reason `config_changed`);
+- the result is invalid: exit 2;
+- the state directory already holds a binding for the account and the new answers would change it: exit 5; see [Updating an account](#updating-an-account).
+
+After `config_busy` or `config_changed`, run it again.
+
+**Step 9, check.** Setup runs `doctor` for the account. It prints each item (`provider`, `key`, `mail`, `filing` when filing is on, and `update` when `updates` is `auto` but the binary may not be replaced) as `ok`, or as `not ready` with the one command that fixes it.
+
+The `update` item does not make `doctor.ready` false, as in `doctor` itself. If `doctor` itself fails, for example because the state database cannot be opened, setup reports a single not-ready `state` item instead.
+
+For an untested Himalaya, the `mail` item's fix is `run mailtriage himalaya install, then mailtriage setup --update --account NAME --himalaya-binary PATH`, with the path that command installs to and `--config` when needed. Setup exits 0 even when an item is not ready.
+
+**Step 10, service.** With prompts on macOS or Linux, setup asks whether to run `watch` in the background (default yes); on other platforms it skips this step.
+
+When the key comes from an environment variable, the default is no, because the service does not inherit the variable; setup says so and prints the command that moves the key into a key store.
+
+Without prompts, `--service install` installs it and `--service skip` (the default) does not. `--interval-seconds` (1 to 86400, default 60) and `--limit` (1 to 500, default 100) are passed to `watch`.
+
+When step 9 reported a not-ready `state` item, setup installs no service, since every pass would fail; it prints the `service install` command to run once that is fixed. See [Background service](./service.md).
+
+**Next steps.** Setup ends with the commands to run next: `sync` and `watch`, or, with the service installed, `service status` and `list` (`sync` or `watch` would compete with the service for the account lock).
+
+Every `mailtriage` command setup prints passes `--config` when a command run in the same directory and environment without it would find another config or none. When a `./mailtriage.json` in the working directory would win over the written config, setup also prints a warning.
 
 ## Key stores
 
-The key never goes into `mailtriage.json`. Setup records either a command that prints the key (`provider.api_key_command`) or the name of an environment variable (`provider.api_key_env`).
+The key never goes into `mailtriage.json`. Setup records either a command that prints the key (`provider.api_key_command`) or the name of an environment variable (`provider.api_key_env`). On macOS, for example, the key stays in your Keychain, and the config holds only the command that reads it from there.
 
 The menu lists the stores available on this machine, in this order. The first one is the default, also without prompts. When you change an existing OpenRouter classifier with prompts, the menu's default is the store the key comes from now (`command` for a command of your own, `env` for a variable).
 
@@ -116,7 +145,9 @@ mailtriage setup --yes --himalaya-account work --key-store keychain --key-stored
 
 For `command`, `--key-command 'COMMAND'` is any shell command that prints the key; `--key-command` alone implies `--key-store command`. Setup runs it once and requires a key. A command typed at the prompt is asked again after a failure; a failing `--key-command` exits 3.
 
-For `env`, `--key-env NAME` names the variable; `--key-env` alone implies `--key-store env`. The default is the current `api_key_env`, else `OPENROUTER_API_KEY`. Setup removes any `api_key_command` and warns when the variable is not set in its own environment. The variable must be set wherever mailtriage runs; see [Environment variable](./provider.md#environment-variable).
+For `env`, `--key-env NAME` names the variable; `--key-env` alone implies `--key-store env`. The default is the current `api_key_env`, else `OPENROUTER_API_KEY`.
+
+Setup removes any `api_key_command` and warns when the variable is not set in its own environment. The variable must be set wherever mailtriage runs; see [Environment variable](./provider.md#environment-variable).
 
 `--key-command` and `--key-env` exclude each other, and a `--key-store` that contradicts them exits 2.
 
@@ -130,6 +161,8 @@ This keeps the model, endpoint, timeout and `api_key_env`, so no mail is classif
 
 ## Prompts, `--yes` and `--interactive`
 
+You can answer setup at a terminal, or a script or an agent can pass every answer as a flag. These rules decide when it asks:
+
 - Prompts go to stderr. Each shows its default in brackets; Enter accepts it. Menus are numbered. Invalid input is asked again.
 - Prompts are on when stdin is a terminal, or with `--interactive` (answers from a pipe, as the tests do). Otherwise setup runs as with `--yes`.
 - `--yes` turns prompts off. Each value comes from its flag or its default. A value without a default, such as `--himalaya-account`, exits 2 and names the flag.
@@ -139,7 +172,7 @@ This keeps the model, endpoint, timeout and `api_key_env`, so no mail is classif
 
 ## Updating an account
 
-`mailtriage setup --update --account NAME` (or "Update an account" in the menu) keeps:
+Run setup again when something about an account changes, such as your brief or the folders you watch. `mailtriage setup --update --account NAME` (or "Update an account" in the menu) keeps:
 
 - the account's Himalaya binary, config file and account, unless you pass the `--himalaya-*` flags,
 - its categories and `taxonomy_revision`,
@@ -149,7 +182,11 @@ This keeps the model, endpoint, timeout and `api_key_env`, so no mail is classif
 
 Its identity, time zone, brief and folders become the defaults of their questions.
 
-Step 9 binds the account to its mailbox: `doctor` records the identity, the Himalaya account and the IMAP server settings (see [Account binding](./reference.md#account-binding)). Every later command for an account whose binding changed would exit 5, so setup compares the bindings before it writes. An update that would change any of them exits 5 with `step 3 (account): account NAME is bound to its previous mailbox (identity, Himalaya account or IMAP server changed); keep them, or set this mailbox up under a new name with --account NEW` and writes nothing. The same check applies to a new config whose `state/` directory is left over from an earlier one. To use a different mailbox, set it up under a new account name:
+Step 9 binds the account to its mailbox: `doctor` records the identity, the Himalaya account and the IMAP server settings (see [Account binding](./reference.md#account-binding)). Every later command for an account whose binding changed would exit 5, so setup compares the bindings before it writes.
+
+An update that would change any of them exits 5 with `step 3 (account): account NAME is bound to its previous mailbox (identity, Himalaya account or IMAP server changed); keep them, or set this mailbox up under a new name with --account NEW` and writes nothing. The same check applies to a new config whose `state/` directory is left over from an earlier one.
+
+To use a different mailbox, set it up under a new account name:
 
 ```sh
 mailtriage setup --update --account home --himalaya-account home
@@ -184,4 +221,6 @@ Progress and the check summary go to stderr. stdout carries one result object, o
 | 3 | Himalaya missing or not a tested version with IMAP, and the private Himalaya declined or, without prompts, `--himalaya-install` not given; the private Himalaya could not be installed (except on a platform pimalaya has no build for, exit 2); `account check` failed; the folders could not be listed; a key tool or key command failed; the config could not be written; `launchctl` or `systemctl` failed. |
 | 5 | The config exists and `--update` was not given (without prompts); the account is bound to another mailbox (its identity, Himalaya account or IMAP server would change); a service file exists that mailtriage did not write; another command is editing the config (`config_busy`), or it changed since setup read it (`config_changed`). |
 
-Every error except the two abort messages (`setup aborted; nothing was changed`, `setup aborted: input ended`) starts with `step N (name): ` and names the flag or command that fixes it, for example `step 2 (Himalaya): --himalaya-account is required without prompts`. Step 10 errors (`step 10 (service): `) happen after the config is written; they name the `mailtriage service install` command, with `--config` and this run's `--interval-seconds` and `--limit`, to run once the cause is fixed. On a platform without launchd or systemd the fix is to drop `--service install` instead.
+Every error except the two abort messages (`setup aborted; nothing was changed`, `setup aborted: input ended`) starts with `step N (name): ` and names the flag or command that fixes it, for example `step 2 (Himalaya): --himalaya-account is required without prompts`.
+
+Step 10 errors (`step 10 (service): `) happen after the config is written. They name the `mailtriage service install` command, with `--config` and this run's `--interval-seconds` and `--limit`, to run once the cause is fixed. On a platform without launchd or systemd the fix is to drop `--service install` instead.

@@ -1,5 +1,7 @@
 # Configuration
 
+mailtriage keeps the settings for all your accounts in one file, `mailtriage.json`. This page shows where mailtriage looks for it and what each field does, so you can read it or edit it by hand.
+
 ## Where mailtriage finds the config
 
 Every command except `init` and `setup` uses the first of:
@@ -9,13 +11,15 @@ Every command except `init` and `setup` uses the first of:
 3. `./mailtriage.json`, if that file exists in the working directory;
 4. `~/.config/mailtriage/mailtriage.json`.
 
-`setup` uses the same order without step 3: it never picks `./mailtriage.json`. `init` writes `--config PATH` if given, else `./mailtriage.json`; it ignores `MAILTRIAGE_CONFIG`. Step 4 needs `HOME`; without it the error asks for `--config`. A missing config exits 2 with ``configuration not found; run `mailtriage setup` or pass --config``.
+`setup` uses the same order without step 3: it never picks `./mailtriage.json`. `init` writes `--config PATH` if given, else `./mailtriage.json`; it ignores `MAILTRIAGE_CONFIG`.
+
+Step 4 needs `HOME`; without it the error asks for `--config`. A missing config exits 2 with ``configuration not found; run `mailtriage setup` or pass --config``.
 
 Commands therefore need no `--config` when you use the home config. Pass `--config` in scripts that must not depend on the working directory or the environment.
 
 ## A complete configuration
 
-A configuration for one account:
+Here is a configuration for one account. The tables below explain each part.
 
 ```json
 {
@@ -110,7 +114,11 @@ A configuration for one account:
 }
 ```
 
-Each command that opens the configuration checks the whole file. A file that breaks a rule below is refused with exit code 2 and `invalid configuration; check required fields, categories and provider settings`; the message does not name the field, except for an invalid `updates`, which exits 2 with `updates must be auto, notify or off`. Relative paths in `state_dir`, `engine.config` and `engine.binary` resolve against the directory that holds `mailtriage.json`.
+Each command that opens the configuration checks the whole file. A file that breaks a rule below is refused with exit code 2 and `invalid configuration; check required fields, categories and provider settings`.
+
+The message does not name the field, except for an invalid `updates`, which exits 2 with `updates must be auto, notify or off`.
+
+Relative paths in `state_dir`, `engine.config` and `engine.binary` resolve against the directory that holds `mailtriage.json`.
 
 Top level:
 
@@ -159,7 +167,9 @@ Engine (`accounts.NAME.engine`):
 | `timeout_seconds` | Time limit for each Himalaya call, 1 to 600. |
 | `max_output_bytes` | Output limit for each Himalaya call, 1 to 268435456 (256 MiB). A message larger than this cannot be fetched and is recorded as a failed fetch. |
 
-`doctor` reports an engine whose `timeout_seconds` or `max_output_bytes` is out of range as `transport.ready: false`. Configurations written before schema 2 have a `himalaya` block instead of `engine`. mailtriage still reads it and writes it back as `engine` the next time it saves the file. An account cannot have both.
+`doctor` reports an engine whose `timeout_seconds` or `max_output_bytes` is out of range as `transport.ready: false`.
+
+Configurations written before schema 2 have a `himalaya` block instead of `engine`. mailtriage still reads it and writes it back as `engine` the next time it saves the file. An account cannot have both.
 
 Provider (`provider`):
 
@@ -172,7 +182,9 @@ Provider (`provider`):
 | `api_key_env` | The name of the environment variable that holds the API key, such as `OPENROUTER_API_KEY`: uppercase letters `A` to `Z`, digits and `_` only. This is the variable's name, never the key. For `openrouter`, required unless `api_key_command` is set; it may then be empty or missing. Ignored for `fake`. |
 | `timeout_seconds` | Time limit for each provider request, 1 to 300. |
 
-For each message the provider receives the account's `identity`, `timezone` and `brief`, each category's `name` and `description`, and the message's sender, To and Cc addresses, subject, date and body text up to `policy.max_body_chars`. mailtriage never falls back to another provider. A failed request marks the message failed, and a later pass retries it.
+This is what goes to the classifier. For each message the provider receives the account's `identity`, `timezone` and `brief`, each category's `name` and `description`, and the message's sender, To and Cc addresses, subject, date and body text up to `policy.max_body_chars`.
+
+mailtriage never falls back to another provider. A failed request marks the message failed, and a later pass retries it.
 
 Policy (`policy`), with the `init` defaults:
 
@@ -186,7 +198,9 @@ Policy (`policy`), with the `init` defaults:
 | `max_attempts` | `5` | Failed fetch or classification attempts before mailtriage stops retrying a message, 1 to 100. The wait before a retry starts at 1 minute and doubles per attempt, up to 64 minutes. |
 | `freshness_hours` | `24` | Open messages whose classification is older than this are classified again. With OpenRouter, each open message costs one request per period. Must be positive. |
 
-Changing `brief`, `timezone`, a category's `id`, `description`, `examples` or `catch_all`, the `provider` block (except `api_key_command`) or the `policy` block queues every open message for classification again. Setting, changing or removing `api_key_command` does not.
+Changing `brief`, `timezone`, a category's `id`, `description`, `examples` or `catch_all`, the `provider` block (except `api_key_command`) or the `policy` block queues every open message for classification again.
+
+Setting, changing or removing `api_key_command` does not.
 
 Filing (`accounts.NAME.filing`), described in [Filing into folders](./filing.md):
 

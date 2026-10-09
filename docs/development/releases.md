@@ -52,12 +52,16 @@ Monday and on demand, in three jobs:
 
 Before merging such a pull request, read the new version's `--mailbox`
 resolver in Himalaya's source for role changes: the script copies `roles` from
-the previous version. Also update the places in `README.md` and the guide
-pages (`docs/guide/himalaya.md`, `setup.md`, `manual-setup.md` and
+the previous version.
+
+Also update the places in `README.md` and the guide pages
+(`docs/guide/himalaya.md`, `setup.md`, `manual-setup.md` and
 `configuration.md`) that name the tested versions or the newest one. Push these
 edits to the pull request's branch, never to `main` directly. The tests derive
 the tested versions from the data file, so a valid new entry needs no test
-change. The workflow needs one repository setting, made once:
+change.
+
+The workflow needs one repository setting, made once:
 Settings → Actions → General → Workflow permissions → "Allow GitHub Actions
 to create and approve pull requests".
 
@@ -98,14 +102,17 @@ version's `roles`. Then:
 Use the actual package version in place of the example. Pushing the tag
 publishes a GitHub Release after all three native builds and their tests pass.
 The tag must point to a commit on `main` and exactly match the package version.
+
 Tags such as `v0.2.0-rc.1` become prereleases: they are never marked Latest and
 never installed automatically. A stable tag is marked Latest only when it is
 higher than every published stable release, so publishing a fix for an older
-line does not move Latest back. Releases publish one at a time: the publish
-jobs of all tags share one concurrency group, and a later one waits for the
-running one. GitHub keeps only one waiting run per group, so when you push
-several tags at once, a waiting publish can be cancelled by a newer one; rerun
-it as in [Retry a failed release](#retry-a-failed-release).
+line does not move Latest back.
+
+Releases publish one at a time: the publish jobs of all tags share one
+concurrency group, and a later one waits for the running one. GitHub keeps only
+one waiting run per group, so when you push several tags at once, a waiting
+publish can be canceled by a newer one; rerun it as in
+[Retry a failed release](#retry-a-failed-release).
 
 Each release contains:
 
@@ -132,8 +139,9 @@ Linux amd64, Linux arm64 and macOS with `--yes --no-setup`, then
 The `mailtriage` archives contain the executable, README and license, and stay
 free of GUI libraries. The `mailtriage-tray` archives contain `mailtriage-tray`
 and the license. `mailtriage update` installs a tray archive over a
-`mailtriage-tray` next to the CLI (see [Updates](../guide/updates.md)). Linux
-builds use Ubuntu 24.04's GNU libc environment; the macOS executables are
+`mailtriage-tray` next to the CLI (see [Updates](../guide/updates.md)).
+
+Linux builds use Ubuntu 24.04's GNU libc environment; the macOS executables are
 unsigned and not notarized. Validate the Linux build in the target Hermes
 image before rollout.
 
