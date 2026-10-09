@@ -10,7 +10,9 @@ export default defineConfig({
     'Local email classification and attention queries for humans and agents',
   base,
   cleanUrls: true,
+  head: [['link', { rel: 'icon', type: 'image/png', href: `${base}favicon.png` }]],
   themeConfig: {
+    logo: { src: '/logo.png', alt: '' },
     nav: [
       { text: 'Guide', link: '/guide/introduction', activeMatch: '^/guide/' },
       { text: 'Agents', link: '/agents/', activeMatch: '^/agents/' },

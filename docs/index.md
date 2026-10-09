@@ -5,6 +5,9 @@ hero:
   name: mailtriage
   text: An inbox that sorts itself.
   tagline: mailtriage reads your new mail, decides which of your categories each message belongs to, and files it into that category's folder. Mail that needs you gets a flag, so you see at a glance what to answer first, in any mail client.
+  image:
+    src: /mascot.webp
+    alt: The mailtriage mascot, an orange envelope looking through a magnifying glass
   actions:
     - theme: brand
       text: Get started
