@@ -10,9 +10,6 @@ hero:
       text: Get started
       link: /guide/introduction
     - theme: alt
-      text: Try it offline
-      link: /guide/introduction#try-it-offline
-    - theme: alt
       text: GitHub
       link: https://github.com/wir-drei-digital/mailtriage
 
@@ -75,7 +72,7 @@ curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/wir-drei
 
 The script installs mailtriage into `~/.local/bin` and then offers `mailtriage setup`, which asks one question at a time.
 
-**[Get started](/guide/introduction)**: the guide explains what mailtriage changes in your mailbox and lets you try it offline first.
+**[Get started](/guide/introduction)**: the guide explains what mailtriage changes in your mailbox and walks you through setup.
 
 ## What stays and what leaves
 
