@@ -29,6 +29,10 @@ Your mail stays on your mail server, and mailtriage runs on your machine. What l
 
 With the `openrouter` provider, that goes to OpenRouter's Decisions API. The `fake` provider, for trying mailtriage offline, sends nothing.
 
+## Who makes mailtriage
+
+mailtriage is created and maintained by [wirdrei.digital](https://wirdrei.digital). We build it in the open on [GitHub](https://github.com/wir-drei-digital/mailtriage), where you can report a problem or suggest a change.
+
 ---
 
 This site follows `main`, so it can describe a feature that is newer than the latest release.
