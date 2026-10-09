@@ -109,7 +109,9 @@ export default defineConfig({
       text: 'Edit this page on GitHub',
     },
     outline: [2, 3],
-    footer: { message: 'mailtriage by wirdrei.digital' },
+    footer: {
+      message: 'mailtriage by <a href="https://wirdrei.digital">wirdrei.digital</a>',
+    },
   },
   // VitePress fails the build on a link to a missing page, but not on a
   // missing `#anchor`; this does, for every link between the site's pages.
