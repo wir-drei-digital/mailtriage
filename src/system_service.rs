@@ -549,7 +549,7 @@ pub fn install_account(
     let unit = unit_for(config_path, account, interval_seconds, limit)?;
     let mut out = install(ctx, &unit)?;
     let provider = &service.config.provider;
-    if provider.kind == "openrouter" && provider.api_key_command.is_none() {
+    if crate::provider::key_account(provider).is_some() && provider.api_key_command.is_none() {
         out["note"] = json!(env_key_note(ctx.manager, &unit, &provider.api_key_env));
     }
     Ok(out)

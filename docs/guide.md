@@ -8,6 +8,7 @@ This guide is the full reference: setup, configuration, the OpenRouter key, the 
 - [Guided setup](#guided-setup)
 - [Manual setup](#manual-setup)
 - [Configuration](#configuration)
+- [Provider](#provider)
 - [The OpenRouter key](#the-openrouter-key)
 - [Background service](#background-service)
 - [Updates](#updates)
@@ -20,7 +21,7 @@ This guide is the full reference: setup, configuration, the OpenRouter key, the 
 
 ## What mailtriage does and changes
 
-`mailtriage` is a command-line tool that classifies email. For each message it records three decisions: a category from your own list, an urgency (`low`, `medium` or `high`), and whether you need to act. It reads mail over IMAP through the [Himalaya](https://github.com/pimalaya/himalaya) CLI, gets the decisions from OpenRouter's Decisions API with a Jev model, and stores messages and results in a local SQLite database. Listing and reading work from that database without network access.
+`mailtriage` is a command-line tool that classifies email. For each message it records three decisions: a category from your own list, an urgency (`low`, `medium` or `high`), and whether you need to act. It reads mail over IMAP through the [Himalaya](https://github.com/pimalaya/himalaya) CLI, gets the decisions from OpenRouter's Decisions API with a Decisions model (Jev by default), and stores messages and results in a local SQLite database. Listing and reading work from that database without network access.
 
 mailtriage never sends, deletes or expunges mail and never removes the read state (`\Seen`). By default it does not write to the mailbox at all. An account that enables [filing into folders](#filing-into-folders) also creates category folders, moves mail into them and adds `\Flagged`. Only the optional [reply queue](#reply-queue) adds `\Seen`, to answered or done mail you approved. `done` and `reopen` change only the local review state. Every command works on one configured account, named with `--account`.
 
@@ -238,7 +239,7 @@ mailtriage setup
 **Step 5, classifier.**
 
 - `--provider openrouter` (default) or `--provider fake` (offline keyword rules, no key).
-- `--model`: default `typesafe/jev-1.13`. It must start with `typesafe/jev-` or `~typesafe/jev-`.
+- `--model`: any non-empty Decisions model ID. The default is `typesafe/jev-latest` for a new classifier and the current model when you update one; see [Provider](#provider).
 - The key: see [Key stores](#key-stores).
 - On an existing config without classifier flags, setup asks "Keep the current classifier?" (default yes). Without prompts it keeps the classifier. The classifier flags are `--provider`, `--model`, `--key-store`, `--key-command`, `--key-env` and `--key-stored`.
 - Only a key flag (`--key-store`, `--key-command`, `--key-env`, `--key-stored`) changes where an OpenRouter key comes from. `--model` or `--provider openrouter` alone keep `api_key_command` and `api_key_env` as they are and skip the key question. If you answer no to "Keep the current classifier?", the key store menu offers the current store as its default.
@@ -333,7 +334,7 @@ mailtriage setup --update --account home --himalaya-account home
 Progress and the check summary go to stderr. stdout carries one result object, on one line with `--json`:
 
 ```json
-{"schema_version":1,"setup":{"account":"work","config":"/Users/alice/.config/mailtriage/mailtriage.json","doctor":{"items":[{"check":"provider","ready":true},{"check":"key","ready":true},{"check":"mail","ready":true},{"check":"filing","ready":true}],"ready":true},"filing":"dry_run","key_source":"command","key_store":"keychain","mailboxes":["INBOX"],"model":"typesafe/jev-1.13","provider":"openrouter","service":null,"updates":"auto"}}
+{"schema_version":1,"setup":{"account":"work","config":"/Users/alice/.config/mailtriage/mailtriage.json","doctor":{"items":[{"check":"provider","ready":true},{"check":"key","ready":true},{"check":"mail","ready":true},{"check":"filing","ready":true}],"ready":true},"filing":"dry_run","key_source":"command","key_store":"keychain","mailboxes":["INBOX"],"model":"typesafe/jev-latest","provider":"openrouter","service":null,"updates":"auto"}}
 ```
 
 | Field | Content |
@@ -500,7 +501,7 @@ A configuration for one account:
   "state_dir": "state",
   "provider": {
     "kind": "openrouter",
-    "model": "typesafe/jev-1.13",
+    "model": "typesafe/jev-latest",
     "endpoint": "https://openrouter.ai/api/alpha/decisions",
     "api_key_command": ["/usr/bin/security", "find-generic-password", "-s", "mailtriage", "-a", "openrouter", "-w"],
     "api_key_env": "OPENROUTER_API_KEY",
@@ -641,8 +642,8 @@ Provider (`provider`):
 
 | Field | What to set |
 | --- | --- |
-| `kind` | `"openrouter"` for real classification, `"fake"` for offline tests. No other value is accepted. |
-| `model` | For `openrouter`, a Jev Decisions model ID that starts with `typesafe/jev-` or `~typesafe/jev-`, such as `typesafe/jev-1.13`. For `fake`, any non-empty text. |
+| `kind` | `"openrouter"` for real classification, `"fake"` for offline tests. No other value is accepted. See [Provider](#provider). |
+| `model` | For `openrouter`, any non-empty Decisions model ID, such as `typesafe/jev-latest` (what setup writes) or `typesafe/jev-1.13`. For `fake`, any non-empty text. |
 | `endpoint` | For `openrouter`, exactly `https://openrouter.ai/api/alpha/decisions`. An `http://127.0.0.1:PORT/api/alpha/decisions` address is also accepted, for local tests. Ignored for `fake`. |
 | `api_key_command` | Optional. A command that prints the API key, as a list of program and arguments, such as `["/usr/bin/security", "find-generic-password", "-s", "mailtriage", "-a", "openrouter", "-w"]`. The first element must be a non-empty program. When set, it is the only key source. See [Key command rules](#key-command-rules). Ignored for `fake`. |
 | `api_key_env` | The name of the environment variable that holds the API key, such as `OPENROUTER_API_KEY`: uppercase letters `A` to `Z`, digits and `_` only. This is the variable's name, never the key. For `openrouter`, required unless `api_key_command` is set; it may then be empty or missing. Ignored for `fake`. |
@@ -672,6 +673,19 @@ Filing (`accounts.NAME.filing`), described in [Filing into folders](#filing-into
 | `flag` | `true` | Add `\Flagged` to mail that needs action or has `high` urgency; mail the reply queue holds only for `high` urgency. |
 | `max_actions_per_pass` | `200` | Moves and flags per pass, 1 to 1000. |
 | `reply_queue` | `false` | Keep new mail that needs action in its source folder until you answer it or mark it done; see [Reply queue](#reply-queue). Written only when `true`. Change it with `filing enable --reply-queue on` or `off`. |
+
+## Provider
+
+The `provider` block names the service that answers the three questions for every message. There are two kinds:
+
+| `kind` | What it is | Key |
+| --- | --- | --- |
+| `openrouter` | OpenRouter's Decisions API. `model` is any Decisions model ID; setup writes `typesafe/jev-latest`. | Needed; see [The OpenRouter key](#the-openrouter-key). |
+| `fake` | Fixed keyword rules for offline tests ([Try it offline](#try-it-offline)). It makes no network request. | None |
+
+`typesafe/jev-latest` is an alias that OpenRouter moves to the newest Jev model. Your config does not change when it moves, so no mail is queued for classification again. Mail classified after the move gets the newer model, including open mail whose classification is older than `freshness_hours`. Each classification records the model the response named, as `classification.model` in `list` and `read`. To stay on one model, name it, such as `typesafe/jev-1.13`; changing `model` queues open mail for classification again.
+
+Only Decisions-style services fit: they answer each question with a choice, a confidence and a probability per label. See [Adding a provider](provider-contract.md#adding-a-provider).
 
 ## The OpenRouter key
 

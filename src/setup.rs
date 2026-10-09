@@ -31,8 +31,6 @@ use std::{
     time::Duration,
 };
 
-pub const DEFAULT_MODEL: &str = "typesafe/jev-1.13";
-pub const DEFAULT_KEY_ENV: &str = "OPENROUTER_API_KEY";
 const HIMALAYA_TIMEOUT: Duration = Duration::from_secs(60);
 const HIMALAYA_MAX_OUTPUT: usize = 1024 * 1024;
 
@@ -973,11 +971,13 @@ fn classifier_step(
     ]
     .into_iter()
     .find_map(|(given, flag)| given.then_some(flag));
-    if let (Some(flag), Some("fake")) = (key_flag, args.provider.as_deref()) {
-        return Err(err(
-            2,
-            format!("{STEP_KEY}: {flag} has no effect with --provider fake; drop it"),
-        ));
+    if let (Some(flag), Some(kind)) = (key_flag, args.provider.as_deref()) {
+        if provider::provider_for(kind).is_ok_and(|p| p.key_account().is_none()) {
+            return Err(err(
+                2,
+                format!("{STEP_KEY}: {flag} has no effect with --provider {kind}; drop it"),
+            ));
+        }
     }
     let flags = args.provider.is_some() || args.model.is_some() || key_flag.is_some();
     if let Some(current) = current.filter(|_| !flags) {
@@ -993,31 +993,31 @@ fn classifier_step(
     let kind = match args.provider.as_deref() {
         Some(kind) => kind.to_owned(),
         None if p.enabled() => {
-            let options = [
-                "OpenRouter (Jev decisions model; needs an API key)",
-                "Offline demo (fake; keyword rules, no key)",
-            ]
-            .map(String::from);
-            ["openrouter", "fake"][p.choose("Which classifier?", &options, 0)?].to_owned()
+            let options: Vec<String> = provider::KINDS
+                .iter()
+                .map(|&kind| registered(kind).label().to_owned())
+                .collect();
+            provider::KINDS[p.choose("Which classifier?", &options, 0)?].to_owned()
         }
-        None => "openrouter".to_owned(),
+        None => provider::KINDS[0].to_owned(),
     };
-    if kind == "fake" {
-        return Ok((config::default_config().provider, None));
-    }
-    // A current OpenRouter provider changes only where asked, so its
+    let adapter = provider::provider_for(&kind).map_err(|e| {
+        err(
+            2,
+            format!(
+                "{STEP_CLASSIFIER}: {e}; use --provider {}",
+                provider::KINDS.join(" or ")
+            ),
+        )
+    })?;
+    // A provider without a key has nothing to ask (the offline demo).
+    let Some(account) = adapter.key_account() else {
+        return Ok((adapter.new_config(), None));
+    };
+    // A current provider of this kind changes only where asked, so its
     // generation hash, and with it every classification, stays put.
-    let mut provider = current
-        .filter(|c| c.kind == "openrouter")
-        .cloned()
-        .unwrap_or_else(|| ProviderConfig {
-            kind,
-            model: DEFAULT_MODEL.to_owned(),
-            endpoint: provider::DECISIONS_ENDPOINT.to_owned(),
-            api_key_command: None,
-            api_key_env: DEFAULT_KEY_ENV.to_owned(),
-            timeout_seconds: 30,
-        });
+    let current = current.filter(|c| c.kind == kind);
+    let mut provider = current.cloned().unwrap_or_else(|| adapter.new_config());
     provider.model = answer(
         p,
         STEP_CLASSIFIER,
@@ -1025,29 +1025,29 @@ fn classifier_step(
         "--model",
         "Model",
         Some(&provider.model),
-        |m| {
-            if m.starts_with("typesafe/jev-") || m.starts_with("~typesafe/jev-") {
-                Ok(m.to_owned())
-            } else {
-                Err("Use a Jev decisions model such as typesafe/jev-1.13.".to_owned())
-            }
-        },
+        nonempty,
     )?;
-    // A current OpenRouter key stays where it is unless a key flag moves
-    // it: `--model` or `--provider openrouter` never switch its source.
-    let current = current.filter(|c| c.kind == "openrouter");
+    // A current key stays where it is unless a key flag moves it: `--model`
+    // or `--provider` alone never switch its source.
     if flags && key_flag.is_none() && current.is_some() {
         return Ok((provider, None));
     }
-    let store = key_step(args, p, &mut provider, current.map(current_store))?;
+    let default_env = adapter.new_config().api_key_env;
+    let current = current.map(|c| current_store(c, account));
+    let store = key_step(args, p, &mut provider, current, account, &default_env)?;
     Ok((provider, Some(store)))
 }
 
-/// Where a current OpenRouter provider gets its key: the tool-backed store
-/// whose read command it runs, another command, or the environment.
-fn current_store(provider: &ProviderConfig) -> KeyStore {
+/// A kind from `provider::KINDS`, which `provider_for` always knows.
+fn registered(kind: &str) -> &'static dyn provider::DecisionProvider {
+    provider::provider_for(kind).expect("every kind in KINDS is registered")
+}
+
+/// Where a current provider gets its key: the tool-backed store whose read
+/// command for `account` it runs, another command, or the environment.
+fn current_store(provider: &ProviderConfig, account: &str) -> KeyStore {
     match &provider.api_key_command {
-        Some(command) => secrets::store_of(command).unwrap_or(KeyStore::Command),
+        Some(command) => secrets::store_of(command, account).unwrap_or(KeyStore::Command),
         None => KeyStore::Env,
     }
 }
@@ -1112,12 +1112,15 @@ fn chosen_store(args: &SetupArgs, p: &mut Prompter, current: Option<KeyStore>) -
 
 /// How the provider gets the key. Setup never reads the key except to
 /// confirm that a command prints one. `current` is the store of the
-/// OpenRouter provider being changed, if any.
+/// provider being changed, if any; `account` is its key store account and
+/// `default_env` the variable a new config of its kind names.
 fn key_step(
     args: &SetupArgs,
     p: &mut Prompter,
     provider: &mut ProviderConfig,
     current: Option<KeyStore>,
+    account: &str,
+    default_env: &str,
 ) -> Result<KeyStore> {
     let store = chosen_store(args, p, current)?;
     match store {
@@ -1132,8 +1135,8 @@ fn key_step(
                     ),
                 )
             })?;
-            let read = secrets::read_command(store, &tool).expect("tool-backed store");
-            let save = secrets::store_command(store, &tool).expect("tool-backed store");
+            let read = secrets::read_command(store, &tool, account).expect("tool-backed store");
+            let save = secrets::store_command(store, &tool, account).expect("tool-backed store");
             let stored = secrets::run_key_command(&read).is_ok();
             let reuse = stored
                 && (args.key_stored
@@ -1214,7 +1217,7 @@ fn key_step(
         },
         KeyStore::Env => {
             let current = if provider.api_key_env.is_empty() {
-                DEFAULT_KEY_ENV.to_owned()
+                default_env.to_owned()
             } else {
                 provider.api_key_env.clone()
             };
@@ -1355,7 +1358,8 @@ fn doctor_step(
                 let store = provider
                     .api_key_command
                     .as_deref()
-                    .and_then(secrets::store_of)
+                    .zip(provider::key_account(provider))
+                    .and_then(|(command, account)| secrets::store_of(command, account))
                     .unwrap_or(KeyStore::Command);
                 let setup = mailtriage_line(
                     shown,
@@ -1513,7 +1517,8 @@ fn service_step(
         Some(wanted) => wanted,
         None if p.enabled() => match Context::detect() {
             Ok(_) => {
-                let env_key = provider.kind == "openrouter" && provider.api_key_command.is_none();
+                let env_key =
+                    provider::key_account(provider).is_some() && provider.api_key_command.is_none();
                 if env_key {
                     // The store a fresh setup would offer first: the
                     // platform's own when its tool is here, else a command.
@@ -1694,7 +1699,7 @@ fn mailtriage_line(config: Option<&Path>, words: &[&str], args: &[&str]) -> Stri
 }
 
 fn key_source_value(provider: &ProviderConfig) -> Value {
-    if provider.kind == "fake" {
+    if provider::key_account(provider).is_none() {
         Value::Null
     } else {
         json!(secrets::key_source(provider))

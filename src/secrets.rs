@@ -1,4 +1,4 @@
-//! The OpenRouter API key comes from a key command or an environment
+//! The provider's API key comes from a key command or an environment
 //! variable, never from the config file. Only `resolve_key` and
 //! `KeyCache::get` return the key, and only to the provider; errors are
 //! fixed strings that never contain command output.
@@ -144,64 +144,81 @@ pub fn key_store_options(macos: bool, has_tool: impl Fn(&str) -> bool) -> Vec<Ke
     options
 }
 
-/// The command that prints the stored key, with the tool's absolute path.
-pub fn read_command(store: KeyStore, tool: &Path) -> Option<Vec<String>> {
-    let args: &[&str] = match store {
-        KeyStore::Keychain => &[
+/// The command that prints the key stored for the key store account
+/// `account` (a provider's `key_account()`), with the tool's absolute path.
+pub fn read_command(store: KeyStore, tool: &Path, account: &str) -> Option<Vec<String>> {
+    let args = match store {
+        KeyStore::Keychain => strings(&[
             "find-generic-password",
             "-s",
             "mailtriage",
             "-a",
-            "openrouter",
+            account,
             "-w",
-        ],
-        KeyStore::SecretService => &["lookup", "service", "mailtriage", "provider", "openrouter"],
-        KeyStore::Pass => &["show", "mailtriage/openrouter"],
+        ]),
+        KeyStore::SecretService => {
+            strings(&["lookup", "service", "mailtriage", "provider", account])
+        }
+        KeyStore::Pass => vec!["show".to_owned(), format!("mailtriage/{account}")],
         KeyStore::Command | KeyStore::Env => return None,
     };
     Some(with_tool(tool, args))
 }
 
-/// The command that stores the key; the tool asks for it on the terminal.
-pub fn store_command(store: KeyStore, tool: &Path) -> Option<Vec<String>> {
-    let args: &[&str] = match store {
-        KeyStore::Keychain => &[
+/// The command that stores the key for `account`; the tool asks for it on
+/// the terminal.
+pub fn store_command(store: KeyStore, tool: &Path, account: &str) -> Option<Vec<String>> {
+    let args = match store {
+        KeyStore::Keychain => strings(&[
             "add-generic-password",
             "-U",
             "-s",
             "mailtriage",
             "-a",
-            "openrouter",
+            account,
             "-w",
+        ]),
+        KeyStore::SecretService => vec![
+            "store".to_owned(),
+            secret_service_label(account),
+            "service".to_owned(),
+            "mailtriage".to_owned(),
+            "provider".to_owned(),
+            account.to_owned(),
         ],
-        KeyStore::SecretService => &[
-            "store",
-            "--label=mailtriage OpenRouter key",
-            "service",
-            "mailtriage",
-            "provider",
-            "openrouter",
-        ],
-        KeyStore::Pass => &["insert", "mailtriage/openrouter"],
+        KeyStore::Pass => vec!["insert".to_owned(), format!("mailtriage/{account}")],
         KeyStore::Command | KeyStore::Env => return None,
     };
     Some(with_tool(tool, args))
 }
 
-/// The tool-backed store whose read command `command` is, if any.
-pub fn store_of(command: &[String]) -> Option<KeyStore> {
+/// The label Secret Service shows; `openrouter` keeps the one setup has
+/// always written.
+fn secret_service_label(account: &str) -> String {
+    match account {
+        "openrouter" => "--label=mailtriage OpenRouter key".to_owned(),
+        other => format!("--label=mailtriage {other} key"),
+    }
+}
+
+/// The tool-backed store whose read command for `account` `command` is.
+pub fn store_of(command: &[String], account: &str) -> Option<KeyStore> {
     let tool = Path::new(command.first()?);
     [KeyStore::Keychain, KeyStore::SecretService, KeyStore::Pass]
         .into_iter()
         .find(|&store| {
             tool.file_name().and_then(|name| name.to_str()) == store.tool()
-                && read_command(store, tool).as_deref() == Some(command)
+                && read_command(store, tool, account).as_deref() == Some(command)
         })
 }
 
-fn with_tool(tool: &Path, args: &[&str]) -> Vec<String> {
+fn strings(args: &[&str]) -> Vec<String> {
+    args.iter().map(|arg| (*arg).to_owned()).collect()
+}
+
+fn with_tool(tool: &Path, args: Vec<String>) -> Vec<String> {
     std::iter::once(tool.display().to_string())
-        .chain(args.iter().map(|arg| (*arg).to_owned()))
+        .chain(args)
         .collect()
 }
 
@@ -257,7 +274,7 @@ mod tests {
     fn read_and_store_commands_use_the_tool_path() {
         let tool = Path::new("/usr/bin/security");
         assert_eq!(
-            read_command(KeyStore::Keychain, tool).unwrap(),
+            read_command(KeyStore::Keychain, tool, "openrouter").unwrap(),
             [
                 "/usr/bin/security",
                 "find-generic-password",
@@ -269,7 +286,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            store_command(KeyStore::Keychain, tool).unwrap(),
+            store_command(KeyStore::Keychain, tool, "openrouter").unwrap(),
             [
                 "/usr/bin/security",
                 "add-generic-password",
@@ -283,7 +300,7 @@ mod tests {
         );
         let tool = Path::new("/usr/bin/secret-tool");
         assert_eq!(
-            read_command(KeyStore::SecretService, tool).unwrap(),
+            read_command(KeyStore::SecretService, tool, "openrouter").unwrap(),
             [
                 "/usr/bin/secret-tool",
                 "lookup",
@@ -294,7 +311,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            store_command(KeyStore::SecretService, tool).unwrap(),
+            store_command(KeyStore::SecretService, tool, "openrouter").unwrap(),
             [
                 "/usr/bin/secret-tool",
                 "store",
@@ -307,15 +324,40 @@ mod tests {
         );
         let tool = Path::new("/usr/bin/pass");
         assert_eq!(
-            read_command(KeyStore::Pass, tool).unwrap(),
+            read_command(KeyStore::Pass, tool, "openrouter").unwrap(),
             ["/usr/bin/pass", "show", "mailtriage/openrouter"]
         );
         assert_eq!(
-            store_command(KeyStore::Pass, tool).unwrap(),
+            store_command(KeyStore::Pass, tool, "openrouter").unwrap(),
             ["/usr/bin/pass", "insert", "mailtriage/openrouter"]
         );
-        assert_eq!(read_command(KeyStore::Env, tool), None);
-        assert_eq!(store_command(KeyStore::Command, tool), None);
+        assert_eq!(read_command(KeyStore::Env, tool, "openrouter"), None);
+        assert_eq!(store_command(KeyStore::Command, tool, "openrouter"), None);
+    }
+
+    #[test]
+    fn the_key_account_names_the_stored_entry() {
+        let tool = Path::new("/usr/bin/secret-tool");
+        assert_eq!(
+            store_command(KeyStore::SecretService, tool, "acme").unwrap(),
+            [
+                "/usr/bin/secret-tool",
+                "store",
+                "--label=mailtriage acme key",
+                "service",
+                "mailtriage",
+                "provider",
+                "acme"
+            ]
+        );
+        assert_eq!(
+            read_command(KeyStore::Pass, Path::new("/usr/bin/pass"), "acme").unwrap(),
+            ["/usr/bin/pass", "show", "mailtriage/acme"]
+        );
+        assert_eq!(
+            read_command(KeyStore::Keychain, Path::new("/usr/bin/security"), "acme").unwrap()[5],
+            "acme"
+        );
     }
 
     #[test]
@@ -325,18 +367,24 @@ mod tests {
             (KeyStore::SecretService, "/usr/bin/secret-tool"),
             (KeyStore::Pass, "/opt/homebrew/bin/pass"),
         ] {
-            let command = read_command(store, Path::new(tool)).unwrap();
-            assert_eq!(store_of(&command), Some(store));
+            let command = read_command(store, Path::new(tool), "openrouter").unwrap();
+            assert_eq!(store_of(&command, "openrouter"), Some(store));
+            assert_eq!(store_of(&command, "other"), None);
         }
-        let mut other = read_command(KeyStore::Pass, Path::new("/usr/bin/pass")).unwrap();
+        let mut other =
+            read_command(KeyStore::Pass, Path::new("/usr/bin/pass"), "openrouter").unwrap();
         other[2] = "other/key".into();
-        assert_eq!(store_of(&other), None);
-        let renamed = read_command(KeyStore::Pass, Path::new("/usr/bin/gopass")).unwrap();
-        assert_eq!(store_of(&renamed), None);
+        assert_eq!(store_of(&other, "openrouter"), None);
+        let renamed =
+            read_command(KeyStore::Pass, Path::new("/usr/bin/gopass"), "openrouter").unwrap();
+        assert_eq!(store_of(&renamed, "openrouter"), None);
         assert_eq!(
-            store_of(&["/bin/sh".into(), "-c".into(), "cat k".into()]),
+            store_of(
+                &["/bin/sh".into(), "-c".into(), "cat k".into()],
+                "openrouter"
+            ),
             None
         );
-        assert_eq!(store_of(&[]), None);
+        assert_eq!(store_of(&[], "openrouter"), None);
     }
 }

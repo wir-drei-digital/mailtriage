@@ -38,7 +38,7 @@ release was published. No Valea application code was changed.
 ## Live gates
 
 1. In a test config, set `provider` to `kind` `openrouter`, model
-   `typesafe/jev-1.13` and endpoint `https://openrouter.ai/api/alpha/decisions`.
+   `typesafe/jev-latest` and endpoint `https://openrouter.ai/api/alpha/decisions`.
    Provide the key with an `api_key_command` or an exported `api_key_env`
    variable ([The OpenRouter key](guide.md#the-openrouter-key)); mailtriage
    does not read a `.env` file. Check that `doctor --json` reports

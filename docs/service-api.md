@@ -77,7 +77,7 @@ stdout:
   "account": "work",
   "mailboxes": ["INBOX"],
   "provider": "openrouter",
-  "model": "typesafe/jev-1.13",
+  "model": "typesafe/jev-latest",
   "key_source": "command",
   "key_store": "keychain",
   "filing": "dry_run",

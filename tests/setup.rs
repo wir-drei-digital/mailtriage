@@ -217,7 +217,7 @@ fn flags_alone_write_a_ready_config() {
     assert_eq!(s["account"], "work");
     assert_eq!(s["mailboxes"], json!(["INBOX"]));
     assert_eq!(s["provider"], "openrouter");
-    assert_eq!(s["model"], "typesafe/jev-1.13");
+    assert_eq!(s["model"], "typesafe/jev-latest");
     assert_eq!(s["key_source"], "env");
     assert_eq!(s["key_store"], "env");
     assert_eq!(s["filing"], "dry_run");
@@ -228,6 +228,7 @@ fn flags_alone_write_a_ready_config() {
     );
     let c = f.config();
     assert_eq!(c["state_dir"], "state");
+    assert_eq!(c["provider"]["model"], "typesafe/jev-latest");
     assert_eq!(c["provider"]["api_key_env"], "OPENROUTER_API_KEY");
     assert!(c["provider"].get("api_key_command").is_none());
     let a = &c["accounts"]["work"];
@@ -777,6 +778,81 @@ fn changing_the_key_store_keeps_the_rest_of_the_classifier() {
     assert_eq!(f.config()["provider"], before);
 }
 
+/// Provider adapter spec: any non-empty model ID is accepted, and a config
+/// that names a model keeps it through updates.
+#[test]
+fn any_model_is_accepted_and_an_existing_model_is_kept() {
+    let f = Fixture::new();
+    let (out, v) = f.run(
+        &[&WORK_ENV[..], &["--model", "acme/decider-2"]].concat(),
+        "",
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(v["setup"]["model"], "acme/decider-2");
+    let mut c = f.config();
+    c["provider"]["model"] = json!("typesafe/jev-1.13");
+    fs::write(f.config_path(), serde_json::to_vec_pretty(&c).unwrap()).unwrap();
+    let update = [
+        "setup",
+        "--yes",
+        "--update",
+        "--json",
+        "--himalaya-account",
+        "work",
+    ];
+    // Without classifier flags, and with a key flag that re-runs the key step.
+    for extra in [&[][..], &["--key-store", "env"][..]] {
+        let (out, v) = f.run(&[&update[..], extra].concat(), "");
+        assert_eq!(out.status.code(), Some(0), "{extra:?}: {}", stderr(&out));
+        assert_eq!(v["setup"]["model"], "typesafe/jev-1.13", "{extra:?}");
+        assert_eq!(
+            f.config()["provider"]["model"],
+            "typesafe/jev-1.13",
+            "{extra:?}"
+        );
+    }
+}
+
+/// Provider adapter spec: `--provider` and the classifier menu offer
+/// exactly `provider::KINDS`, in that order.
+#[test]
+fn setup_offers_exactly_the_registered_kinds() {
+    let f = Fixture::new();
+    let (out, v) = f.run(&[&WORK_ENV[..], &["--provider", "anthropic"]].concat(), "");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        message(&v).contains(&format!(
+            "[possible values: {}]",
+            mailtriage::provider::KINDS.join(", ")
+        )),
+        "{v}"
+    );
+    // Enter for the Himalaya account, name, identity, time zone, brief,
+    // folders, classifier, model, key variable and filing.
+    let (out, v) = f.run(
+        &["setup", "--interactive", "--json", "--key-store", "env"],
+        &"\n".repeat(10),
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(v["setup"]["provider"], mailtriage::provider::KINDS[0]);
+    let err = stderr(&out);
+    let menu = err
+        .split("Which classifier?\n")
+        .nth(1)
+        .and_then(|rest| rest.split("Choose").next())
+        .unwrap_or_else(|| panic!("{err}"));
+    let expected: String = mailtriage::provider::KINDS
+        .iter()
+        .enumerate()
+        .map(|(i, kind)| {
+            let label = mailtriage::provider::provider_for(kind).unwrap().label();
+            let default = if i == 0 { " (default)" } else { "" };
+            format!("  {}) {label}{default}\n", i + 1)
+        })
+        .collect();
+    assert_eq!(menu, expected);
+}
+
 /// Final review I4: a classifier flag that is not a key flag keeps the key
 /// where it is, and key flags make no sense with the offline classifier.
 #[test]
@@ -1042,7 +1118,7 @@ fn every_error_names_its_step_and_a_fix() {
             "step 4 (folders): --mailbox: ",
         ),
         (
-            [&we[..], &["--model", "gpt-4"]].concat(),
+            [&we[..], &["--model", " "]].concat(),
             "step 5 (classifier): --model: ",
         ),
         (

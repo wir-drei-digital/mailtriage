@@ -1,32 +1,66 @@
-use mailtriage::{config, normalize, policy};
+use mailtriage::{
+    config,
+    domain::AccountConfig,
+    normalize, policy,
+    provider::{self, Choice, Decision, Questions},
+};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 
-fn response(category: &str, urgency: &str, action: f64, confidence: f64) -> serde_json::Value {
-    let mut category_probabilities = json!({"correspondence":0.02,"transactions":0.02,"updates":0.02,"newsletters":0.02,"promotions":0.02,"other":0.9});
-    if category_probabilities.get(category).is_some() {
-        for value in category_probabilities.as_object_mut().unwrap().values_mut() {
-            *value = json!(0.02);
-        }
-        category_probabilities[category] = json!(0.9);
+/// `labels` with `chosen` at 0.9 and the rest of 0.1 spread evenly.
+fn distribution(labels: &[&str], chosen: &str) -> BTreeMap<String, f64> {
+    let rest = 0.1 / (labels.len() - 1) as f64;
+    labels
+        .iter()
+        .map(|&l| (l.to_owned(), if l == chosen { 0.9 } else { rest }))
+        .collect()
+}
+
+const CATEGORIES: [&str; 6] = [
+    "correspondence",
+    "transactions",
+    "updates",
+    "newsletters",
+    "promotions",
+    "other",
+];
+const URGENCIES: [&str; 3] = ["low", "medium", "high"];
+
+/// A decision of the shape the old `response` fixture had: the chosen
+/// labels at 0.9, both choices at `confidence`.
+fn decision(category: &str, urgency: &str, action: f64, confidence: f64) -> Decision {
+    Decision {
+        model: "typesafe/jev-1.13-20260917".into(),
+        category: Some(Choice {
+            choice: category.into(),
+            confidence,
+            probabilities: distribution(&CATEGORIES, category),
+        }),
+        urgency: Some(Choice {
+            choice: urgency.into(),
+            confidence,
+            probabilities: distribution(&URGENCIES, urgency),
+        }),
+        action_required: Some(action),
+        raw: json!({"fixture": true}),
     }
-    let mut urgency_probabilities = json!({"low":0.05,"medium":0.05,"high":0.9});
-    if urgency_probabilities.get(urgency).is_some() {
-        for value in urgency_probabilities.as_object_mut().unwrap().values_mut() {
-            *value = json!(0.05);
-        }
-        urgency_probabilities[urgency] = json!(0.9);
-    }
-    json!({
-        "model": "typesafe/jev-1.13-20260917",
-        "answers": {
-            "category": {"type":"choice", "choice":category, "confidence":confidence,
-                "probabilities":category_probabilities},
-            "urgency": {"type":"choice", "choice":urgency, "confidence":confidence,
-                "probabilities":urgency_probabilities},
-            "action_required": {"type":"noul", "noul":action}
-        }
-    })
+}
+
+fn questions(account: &AccountConfig) -> Questions {
+    Questions::for_account(account)
+}
+
+/// `decision`, after it passed the contract check as `classify` runs it.
+fn checked(d: Decision, account: &AccountConfig) -> Decision {
+    provider::check_decision(&d, &questions(account)).unwrap();
+    d
+}
+
+fn contract_error(d: &Decision, account: &AccountConfig) -> String {
+    provider::check_decision(d, &questions(account))
+        .unwrap_err()
+        .to_string()
 }
 
 #[test]
@@ -101,76 +135,204 @@ fn html_only_mail_is_readable_without_fetching_remote_content() {
     assert!(!m.incomplete);
 }
 
+/// An edit that breaks one contract rule.
+type Change = fn(&mut Decision);
+
 #[test]
-fn response_rejects_unknown_choices_and_invalid_probabilities() {
+fn the_contract_check_keeps_todays_rules_and_texts() {
     let c = config::default_config();
     let a = &c.accounts["work"];
-    let mut r = response("unconfigured", "high", 0.99, 0.99);
-    assert!(policy::decode_response(&r, a, &c.policy, false).is_err());
-    r = response("correspondence", "high", 1.5, 0.99);
-    assert!(policy::decode_response(&r, a, &c.policy, false).is_err());
-    r = response("correspondence", "high", 0.99, 0.99);
-    r["answers"]["category"]["probabilities"]["correspondence"] = json!(0.2);
-    assert!(policy::decode_response(&r, a, &c.policy, false).is_err());
-    r = response("correspondence", "high", 0.99, 0.99);
-    r.as_object_mut().unwrap().remove("model");
-    assert!(policy::decode_response(&r, a, &c.policy, false).is_err());
+    assert!(
+        provider::check_decision(&decision("other", "high", 0.99, 0.99), &questions(a)).is_ok()
+    );
+    // Missing answers are policy's business, not a contract failure.
+    let empty = Decision {
+        category: None,
+        urgency: None,
+        action_required: None,
+        ..decision("other", "high", 0.99, 0.99)
+    };
+    assert!(provider::check_decision(&empty, &questions(a)).is_ok());
+
+    let cases: Vec<(Change, &str)> = vec![
+        (
+            |d| d.model = "  ".into(),
+            "Decisions response missing model",
+        ),
+        (
+            |d| d.category.as_mut().unwrap().choice = "unconfigured".into(),
+            "category choice \"unconfigured\" is not configured",
+        ),
+        (
+            |d| d.urgency.as_mut().unwrap().choice = "urgent".into(),
+            "urgency choice \"urgent\" is not configured",
+        ),
+        (
+            |d| d.category.as_mut().unwrap().confidence = 1.5,
+            "category confidence must be between 0 and 1",
+        ),
+        (
+            |d| d.urgency.as_mut().unwrap().confidence = f64::NAN,
+            "urgency confidence must be between 0 and 1",
+        ),
+        (
+            |d| d.category.as_mut().unwrap().probabilities.clear(),
+            "category probabilities cannot be empty",
+        ),
+        (
+            |d| {
+                d.category
+                    .as_mut()
+                    .unwrap()
+                    .probabilities
+                    .remove("promotions");
+            },
+            "category probabilities must include every configured choice",
+        ),
+        (
+            |d| {
+                let p = &mut d.category.as_mut().unwrap().probabilities;
+                let v = p.remove("promotions").unwrap();
+                p.insert("spam".into(), v);
+            },
+            "category probability class \"spam\" is not configured",
+        ),
+        (
+            |d| {
+                let p = &mut d.urgency.as_mut().unwrap().probabilities;
+                p.insert("low".into(), -0.05);
+                p.insert("medium".into(), 0.15);
+            },
+            "urgency probability low must be between 0 and 1",
+        ),
+        (
+            |d| {
+                let p = &mut d.category.as_mut().unwrap().probabilities;
+                p.insert("other".into(), 0.2);
+                p.insert("correspondence".into(), 0.72);
+            },
+            "category choice does not match highest probability",
+        ),
+        (
+            |d| {
+                d.category
+                    .as_mut()
+                    .unwrap()
+                    .probabilities
+                    .insert("other".into(), 0.85);
+            },
+            "category probabilities must total approximately 1",
+        ),
+        (
+            |d| d.action_required = Some(1.5),
+            "action_required noul must be between 0 and 1",
+        ),
+    ];
+    for (change, expected) in cases {
+        let mut d = decision("other", "high", 0.99, 0.99);
+        change(&mut d);
+        assert_eq!(contract_error(&d, a), expected);
+    }
+    // A choice may trail the highest probability by 0.01, and the total
+    // may miss 1 by up to 0.031 (two-decimal rounding).
+    let mut d = decision("other", "high", 0.99, 0.99);
+    let p = &mut d.category.as_mut().unwrap().probabilities;
+    p.insert("other".into(), 0.45);
+    p.insert("correspondence".into(), 0.46);
+    p.insert("transactions".into(), 0.06);
+    p.insert("updates".into(), 0.0);
+    p.insert("newsletters".into(), 0.0);
+    p.insert("promotions".into(), 0.0);
+    assert!(provider::check_decision(&d, &questions(a)).is_ok());
+}
+
+#[test]
+fn missing_answers_become_reasons() {
+    let c = config::default_config();
+    let a = &c.accounts["work"];
+    let empty = Decision {
+        category: None,
+        urgency: None,
+        action_required: None,
+        ..decision("other", "high", 0.99, 0.99)
+    };
+    let result = policy::apply(checked(empty, a), a, &c.policy, false);
+    assert_eq!(
+        result.reasons,
+        [
+            "category_missing",
+            "urgency_missing",
+            "action_required_missing",
+            "review_mode"
+        ]
+    );
+    assert_eq!(result.state, "uncertain");
+    assert_eq!(result.model, "typesafe/jev-1.13-20260917");
+    assert_eq!(result.raw, json!({"fixture": true}));
 }
 
 #[test]
 fn uncertainty_and_review_mode_remain_attention_items() {
     let mut c = config::default_config();
     let a = &c.accounts["work"];
-    let result = policy::decode_response(
-        &response("correspondence", "low", 0.5, 0.5),
+    let result = policy::apply(
+        checked(decision("correspondence", "low", 0.5, 0.5), a),
         a,
         &c.policy,
         true,
-    )
-    .unwrap();
+    );
     assert_eq!(result.state, "uncertain");
+    assert_eq!(
+        result.reasons,
+        [
+            "category_low_confidence",
+            "urgency_low_confidence",
+            "action_required_uncertain",
+            "input_incomplete",
+            "review_mode"
+        ]
+    );
     assert_eq!(result.action_required, None);
     assert_eq!(result.urgency, None);
     assert!(policy::attention(&result, "open").contains(&"uncertain".into()));
     assert!(policy::attention(&result, "done").is_empty());
     c.policy.review_mode = false;
-    let strong = policy::decode_response(
-        &response("correspondence", "high", 0.99, 0.99),
-        &c.accounts["work"],
+    let a = &c.accounts["work"];
+    let strong = policy::apply(
+        checked(decision("correspondence", "high", 0.99, 0.99), a),
+        a,
         &c.policy,
         false,
-    )
-    .unwrap();
+    );
     assert_eq!(strong.state, "ready");
+    assert!(strong.reasons.is_empty());
     assert!(policy::attention(&strong, "open").contains(&"high_urgency".into()));
-    let weak = policy::decode_response(
-        &response("correspondence", "low", 0.01, 0.99),
-        &c.accounts["work"],
+    let weak = policy::apply(
+        checked(decision("correspondence", "low", 0.01, 0.99), a),
+        a,
         &c.policy,
         true,
-    )
-    .unwrap();
+    );
     assert_eq!(weak.state, "uncertain");
+    assert_eq!(weak.reasons, ["input_incomplete"]);
     assert!(policy::attention(&weak, "open").contains(&"uncertain".into()));
 
-    let medium = policy::decode_response(
-        &response("updates", "medium", 0.01, 0.99),
-        &c.accounts["work"],
+    let medium = policy::apply(
+        checked(decision("updates", "medium", 0.01, 0.99), a),
+        a,
         &c.policy,
         false,
-    )
-    .unwrap();
+    );
     assert_eq!(medium.state, "ready");
     assert_eq!(medium.action_required, Some(false));
     assert!(policy::attention(&medium, "open").contains(&"medium_urgency".into()));
 
-    let quiet = policy::decode_response(
-        &response("newsletters", "low", 0.01, 0.99),
-        &c.accounts["work"],
+    let quiet = policy::apply(
+        checked(decision("newsletters", "low", 0.01, 0.99), a),
+        a,
         &c.policy,
         false,
-    )
-    .unwrap();
+    );
     assert_eq!(quiet.state, "ready");
     assert!(policy::attention(&quiet, "open").is_empty());
 }

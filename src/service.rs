@@ -353,7 +353,7 @@ impl Service {
         let (account, _) = self.ensure(name)?;
         let provider_valid = provider::validate_configuration(&self.config.provider).is_ok();
         let provider_cfg = &self.config.provider;
-        let (key_source, key_error) = if provider_cfg.kind == "fake" {
+        let (key_source, key_error) = if provider::key_account(provider_cfg).is_none() {
             (Value::Null, None)
         } else {
             (
@@ -419,17 +419,16 @@ impl Service {
         mark_skipped(&mut out, skipped);
         Ok(out)
     }
-    /// Why classification cannot run in this command: the OpenRouter key is
-    /// unavailable. Resolved once per `Service` through the key cache, before
-    /// any job is leased, so an unavailable key consumes no attempts and its
-    /// mail stays queued. The reason is a fixed key-error string. Callers ask
-    /// only when a job is eligible to lease, so an idle pass never runs the
-    /// key command.
+    /// Why classification cannot run in this command: the provider needs a
+    /// key, and it is unavailable. Resolved once per `Service` through the
+    /// key cache, before any job is leased, so an unavailable key consumes no
+    /// attempts and its mail stays queued. The reason is a fixed key-error
+    /// string. Callers ask only when a job is eligible to lease, so an idle
+    /// pass never runs the key command.
     fn classification_skipped(&self) -> Option<String> {
         let provider = &self.config.provider;
-        if provider.kind != "openrouter" {
-            return None;
-        }
+        // A provider without a key never skips.
+        provider::key_account(provider)?;
         self.key.get(provider).err().map(|e| e.to_string())
     }
     fn process_one(

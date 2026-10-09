@@ -4,6 +4,7 @@ use mailtriage::{
     domain::{Category, FilingMode, UpdateMode},
     engine::ConfigChanged,
     prompt::{self, Prompter},
+    provider,
     secrets::KeyStore,
     service::{
         error_reason, is_config_change, Backfill, ListOptions, RefileOptions, RetryTarget, Service,
@@ -194,7 +195,7 @@ struct SetupArg {
     /// A folder to watch; repeat for several.
     #[arg(long = "mailbox")]
     mailboxes: Vec<String>,
-    #[arg(long, value_parser = ["openrouter", "fake"])]
+    #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(provider::KINDS.iter().copied()))]
     provider: Option<String>,
     #[arg(long)]
     model: Option<String>,
