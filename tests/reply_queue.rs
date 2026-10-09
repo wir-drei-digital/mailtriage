@@ -489,3 +489,29 @@ fn held_mail_in_a_folder_an_alias_leads_elsewhere_is_not_read() {
     assert_eq!(out["filing"]["replies_checked"], 1, "{out}");
     assert_eq!(out["filing"]["reply_exits"], 1, "{out}");
 }
+
+#[test]
+fn reopened_mail_leaves_the_approval_list_and_is_never_read() {
+    let h = queued(Live);
+    h.sync();
+    h.fake
+        .deliver("INBOX", &mail("i", "Invoice", "Please pay by next month"));
+    h.sync();
+    let id = id_of(&h, "i");
+    h.service().review("work", &id, true).unwrap();
+    h.fake.inject(FakeOp::Move, Fault::ErrorBefore);
+    h.sync(); // the done exit is claimed, its move fails before it runs
+    let replies = h.service().filing_replies("work", false, &[]).unwrap();
+    assert_eq!(replies["waiting"], 1, "the claim requested approval");
+    h.service().review("work", &id, false).unwrap();
+    h.sync(); // recovery supersedes the exit
+    assert_eq!(place(&h, "i").0, "INBOX");
+    let replies = h.service().filing_replies("work", false, &[]).unwrap();
+    assert_eq!(replies["items"], serde_json::json!([]), "{replies}");
+    let approved = h.service().filing_replies("work", true, &[]).unwrap();
+    assert_eq!(approved["approved"], serde_json::json!([]));
+    h.sync();
+    h.sync();
+    assert_eq!(seen_writes(&h), 0);
+    assert!(!has(&flags(&h, "i"), "\\Seen"));
+}

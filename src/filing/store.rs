@@ -1169,6 +1169,7 @@ impl Store {
     }
 
     /// Sets the state and `updated_at`; patch fields that are `Some` overwrite.
+    /// One transaction, with the read approval row `write_intent` may remove.
     pub fn update_intent(
         &mut self,
         id: i64,
@@ -1176,7 +1177,10 @@ impl Store {
         patch: IntentPatch,
         now: &str,
     ) -> Result<()> {
-        write_intent(&self.db, id, state, &patch, now)
+        let tx = self.db.transaction()?;
+        write_intent(&tx, id, state, &patch, now)?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Claims a move in one transaction: refused (`None`) when the placement's
@@ -1202,9 +1206,9 @@ impl Store {
 
     /// `claim_move` with the target snapshot as `(epoch, UIDNEXT)`. A refile
     /// claim records that the intent consumes the refile mark (refile spec);
-    /// a reply exit enters the read approval list once, a repeated claim
-    /// keeping the first request, and consumes the message's flag attempt
-    /// (reply queue spec).
+    /// a reply exit enters the read approval list once, as the row of its
+    /// intent (a repeated claim keeps the first request), and consumes the
+    /// message's flag attempt (reply queue spec).
     pub fn claim_move_with(
         &mut self,
         account: &str,
@@ -1250,8 +1254,9 @@ impl Store {
         let id = tx.last_insert_rowid();
         if claim == MoveClaim::ReplyExit {
             tx.execute(
-                "INSERT OR IGNORE INTO read_approvals(account,message_id,requested_at) VALUES(?1,?2,?3)",
-                params![account, message_id, now],
+                "INSERT INTO read_approvals(account,message_id,requested_at,intent_id) VALUES(?1,?2,?3,?4)
+                 ON CONFLICT(account,message_id) DO UPDATE SET intent_id=excluded.intent_id WHERE read_approvals.applied_at IS NULL",
+                params![account, message_id, now, id],
             )?;
             // Answered mail needs no flag once filed, with the queue on or off.
             tx.execute(
@@ -1830,6 +1835,9 @@ fn reopen_inferred_in(
     Ok(true)
 }
 
+/// An intent's state and patch, inside the caller's transaction; a reply
+/// exit that ends `failed`, `lost` or `superseded` also removes the read
+/// approval row its claim requested, unless `\Seen` was already added.
 fn write_intent(
     db: &Connection,
     id: i64,
@@ -1853,6 +1861,12 @@ fn write_intent(
     )?;
     if n == 0 {
         bail!("unknown filing intent");
+    }
+    if matches!(state, "failed" | "lost" | "superseded") {
+        db.execute(
+            "DELETE FROM read_approvals WHERE intent_id=?1 AND applied_at IS NULL",
+            [id],
+        )?;
     }
     Ok(())
 }

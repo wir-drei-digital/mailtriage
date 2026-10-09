@@ -55,6 +55,7 @@ fn schema_10_keeps_the_read_approvals_of_schema_9() {
         .execute_batch(
             "ALTER TABLE read_approvals DROP COLUMN attempt_folder;
 ALTER TABLE read_approvals DROP COLUMN attempt_epoch;
+ALTER TABLE read_approvals DROP COLUMN intent_id;
 PRAGMA user_version=9;
 INSERT INTO read_approvals(account,message_id,requested_at,approved_at) VALUES('work','m1','t1','t2');",
         )
@@ -346,7 +347,7 @@ fn claims_check_revision_and_consume_flag_attempt() {
 fn a_reply_exit_claim_enters_the_read_approval_list_in_its_transaction() {
     use mailtriage::filing::{
         planner::{Action, Locator},
-        MoveClaim,
+        FilingWrite, IntentPatch, MoveClaim,
     };
     let (_d, mut s) = store();
     s.ensure_account("work", "id", "g1").unwrap();
@@ -402,6 +403,26 @@ fn a_reply_exit_claim_enters_the_read_approval_list_in_its_transaction() {
         p.flag_attempted_at.is_some(),
         "the exit consumes the flag attempt"
     );
+    // An exit that ends without its move takes the row with it, in the
+    // same transaction as its state.
+    s.update_intent(intent, "uncertain", IntentPatch::default(), NOW)
+        .unwrap();
+    assert_eq!(s.read_approvals("work", true).unwrap().len(), 1);
+    s.update_intent(intent, "superseded", IntentPatch::default(), NOW)
+        .unwrap();
+    assert!(s.read_approvals("work", false).unwrap().is_empty());
+    // A row whose `\Seen` was added stays.
+    let again = claim(&mut s, &exit(0), "b3").unwrap();
+    s.mark_read_applied("work", &id, NOW).unwrap();
+    let failed = FilingWrite::Intent {
+        id: again,
+        state: "failed",
+        patch: IntentPatch::default(),
+    };
+    assert!(s.commit_filing("work", &[failed], NOW).unwrap());
+    let rows = s.read_approvals("work", false).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].applied_at.as_deref(), Some(NOW));
 }
 
 #[test]

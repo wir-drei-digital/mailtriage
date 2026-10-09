@@ -121,12 +121,14 @@ ALTER TABLE pass_heartbeats ADD COLUMN reason_at TEXT;",
     ),
     // Reply queue: the folder and epoch of an `add_seen` session whose
     // outcome is not known yet, so a lost outcome followed by an epoch
-    // change is a suspected race; nullable, so processes of the previous
-    // release keep inserting rows.
+    // change is a suspected race, and the reply exit intent that requested
+    // the row, so an exit that ends without its move removes it; nullable,
+    // so processes of the previous release keep inserting rows.
     (
         10,
         "ALTER TABLE read_approvals ADD COLUMN attempt_folder TEXT;
-ALTER TABLE read_approvals ADD COLUMN attempt_epoch INTEGER;",
+ALTER TABLE read_approvals ADD COLUMN attempt_epoch INTEGER;
+ALTER TABLE read_approvals ADD COLUMN intent_id INTEGER;",
     ),
 ];
 

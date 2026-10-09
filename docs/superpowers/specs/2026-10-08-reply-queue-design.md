@@ -86,7 +86,11 @@ reading every config that does not. Turn it on with
    verification, race handling and recovery. A reply exit enters the read
    approval list in the transaction that claims its move
    (`Store::claim_move_with` with `MoveClaim::ReplyExit`), once per
-   message, so a crash cannot separate the two.
+   message, so a crash cannot separate the two. The row records the
+   claim's intent (`intent_id`): when that intent ends without its move
+   (`failed`, `lost` or `superseded`), the row leaves the list in the same
+   transaction, approved or not, unless `\Seen` was already added. A later
+   exit enters the list again.
 4. **Read.** After the moves, `filing::reply::apply_reads` adds `\Seen` to
    every approved message that is not read yet, in its current home: known,
    unblocked, not being moved, its folder unpaused and in its discovery
@@ -128,7 +132,9 @@ stays where it is.
   the exit's move has run keeps the message held: recovery checks a move
   intent before each retry (`filing::reply::holds_again`) and supersedes
   it (error `held`) when the planner would hold the message now, as the
-  refile rules recheck a refile intent.
+  refile rules recheck a refile intent. The superseded exit takes the
+  message off the read approval list, so approving the list cannot mark
+  the held message read.
 - **A client move into a category folder** is a correction, as today. It
   does not enter the list.
 - **A client move into a non-watched folder** (archive, `INBOX/Done`) is done
@@ -144,7 +150,8 @@ mailtriage filing replies --account work --approve  # approve all
 mailtriage filing replies --account work --approve --id ID --id ID
 ```
 
-The list holds every reply exit whose `\Seen` is not added yet: `id`,
+The list holds every reply exit whose `\Seen` is not added yet and whose
+move has not been given up (see Apply): `id`,
 `subject`, `from`, `folder` (its known home; it shows the source folder until
 the next pass confirms the move), `answered` (`false` for a `done` exit),
 `requested_at` and `approved_at`. `waiting` counts the unapproved rows,
@@ -192,7 +199,7 @@ The other invariants are untouched.
 | Read | `filing::reply::apply_reads`, after `apply` in `plan_and_apply`; `filing::reply::recover_reads` in `recover`, for attempts whose outcome was lost. |
 | Recovery | `filing::reply::holds_again` before a move retry: an intent whose message is held again is superseded. |
 | CLI | `filing replies [--approve [--id ID]...]`; `Service::filing_replies`. |
-| State | Holding is recomputed every pass from placement, effective decision, flags and review state. SQLite v9 adds `read_approvals(account, message_id, requested_at, approved_at, applied_at)`; a new table, so processes of the previous release are unaffected, but a binary before v9 refuses the database. SQLite v10 adds the nullable `read_approvals.attempt_folder` and `attempt_epoch`. |
+| State | Holding is recomputed every pass from placement, effective decision, flags and review state. SQLite v9 adds `read_approvals(account, message_id, requested_at, approved_at, applied_at)`; a new table, so processes of the previous release are unaffected, but a binary before v9 refuses the database. SQLite v10 adds the nullable `read_approvals.attempt_folder`, `attempt_epoch` and `intent_id`. |
 
 ## Option B: a separate queue folder
 
@@ -242,7 +249,8 @@ job that reads `mailtriage list --json`) before the job is switched off.
   race after an epoch change and converges without one; backfilled mail
   that needs action files and is flagged as before; answered mail is not
   flagged after its exit, even with the queue turned off; a done exit
-  reopened before its retry stays held and is not moved again.
+  reopened before its retry stays held and is not moved again, and it
+  leaves the approval list, so approving all marks nothing read.
 - tests/engine_contract.rs: the exact `add_seen` text.
 - tests/config_v2.rs: the queue alone makes a config schema 4.
 - Dovecot e2e (flat and prefix), step 6: held unread and unflagged in INBOX,

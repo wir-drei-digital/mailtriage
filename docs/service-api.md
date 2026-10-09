@@ -577,7 +577,12 @@ an `add_seen` session whose outcome is not known yet. A live pass writes
 them (`FilingWrite::ReadAttempt`) before the session and clears them once
 its outcome is known; `filing::reply::recover_reads`, run by
 `filing::recover::recover`, compares a remaining attempt with the folder's
-epoch. Additive, so a process of the previous release keeps inserting rows.
+epoch. It also adds `read_approvals.intent_id`, the reply exit intent whose
+claim wrote the row: every intent state write (`Store::update_intent`,
+`FilingWrite::Intent`) that ends an intent `failed`, `lost` or `superseded`
+deletes that intent's row in the same transaction unless `applied_at` is
+set. Additive, so a process of the previous release keeps inserting rows
+(without `intent_id`, so they are not removed this way).
 `store::LATEST` is 10.
 
 - `filing enable --reply-queue on|off` (`Service::filing_enable_with`); the
@@ -601,7 +606,7 @@ epoch. Additive, so a process of the previous release keeps inserting rows.
 - Recovery supersedes a move intent before a retry when the planner would
   now hold its message (`filing::reply::holds_again`: queue on, no explicit
   request, held, neither answered nor done); the intent's `error` is
-  `held`.
+  `held`, and its read approval row is removed with it.
 - `MailEngine::add_seen(folder, uids)`: one session `a1 SELECT; a2 UID
   STORE uids +FLAGS.SILENT (\Seen)`, returning a `WriteOutcome` like
   `add_flagged`. `filing::reply::apply_reads` maps it: `selected`,
