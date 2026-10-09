@@ -595,6 +595,8 @@ epoch. Additive, so a process of the previous release keeps inserting rows.
 - `filing replies [--approve [--id ID]...]` (`Service::filing_replies`):
   `{"schema_version":1,"account":"work","waiting":W,"approved_pending":A,"approved":[ids],"items":[{"id","subject","from","folder","answered","requested_at","approved_at"}]}`.
   An `--id` that is not waiting is exit code 2 and approves nothing.
+  Neither approval nor `apply_reads` depends on `filing.reply_queue`:
+  rows approved before the queue was turned off are still read.
 - `filing plan`: a reply exit's move carries `"reason":"reply_exit"`.
 - Recovery supersedes a move intent before a retry when the planner would
   now hold its message (`filing::reply::holds_again`: queue on, no explicit

@@ -122,8 +122,8 @@ pub struct FilingConfig {
     #[serde(default = "default_max_actions")]
     pub max_actions_per_pass: usize,
     /// Reply queue spec: new mail that needs action stays in its source
-    /// folder until it is answered (or marked done), then gets `\Seen` and
-    /// moves to its category folder.
+    /// folder until it is answered (or marked done), then moves to its
+    /// category folder unread; `\Seen` follows once the user approves it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reply_queue: bool,
 }

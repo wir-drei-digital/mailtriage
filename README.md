@@ -4,7 +4,7 @@ mailtriage is a local command-line tool that classifies your email. For each mes
 
 ## How it works
 
-- `sync` and `watch` read new mail over IMAP through Himalaya. mailtriage never sends, deletes or expunges mail and never marks mail unread. Only the optional reply queue marks mail read: answered mail you approved.
+- `sync` and `watch` read new mail over IMAP through Himalaya. mailtriage never sends, deletes or expunges mail and never marks mail unread. Only the optional reply queue marks mail read: answered or done mail you approved.
 - Each new message goes to OpenRouter's Decisions API, which returns the three decisions.
 - Messages and decisions are stored in a local SQLite database. `list` and `read` work from it without network access.
 - Filing is `off`, `dry_run` (plans moves and changes nothing) or `live` (creates the folders, moves mail and flags mail that needs action).

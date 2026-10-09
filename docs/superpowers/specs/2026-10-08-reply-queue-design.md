@@ -30,8 +30,8 @@ open, in any mail client, phone included.
 | Exit | A held message observed with `\Answered` is moved to its category folder at once, **unread**, and enters the read approval list. |
 | Read approval | `mailtriage filing replies` lists that mail; `--approve` (all, or each `--id`) lets the next pass add `\Seen`. |
 | Manual exits | `mailtriage done --id` on a held message triggers the same exit. A client move into a category folder still counts as a correction plus exit. Archiving still means done. |
-| Read state | mailtriage **adds** `\Seen` only to answered mail the user approved. It still never removes `\Seen` and never removes a flag. |
-| Off switch | `filing.reply_queue: false` (the default) keeps today's behaviour exactly. |
+| Read state | mailtriage **adds** `\Seen` only to answered or done mail the user approved. It still never removes `\Seen` and never removes a flag. |
+| Off switch | `filing.reply_queue: false` (the default) keeps today's behaviour exactly. Turning it off holds no more mail; reads already approved are still applied. |
 | Invoices | A payment sets no `\Answered`; a paid invoice leaves the queue with `done`. |
 | Existing mail | Only new mail is held. Mail in INBOX before filing was enabled is left alone, and backfilled mail files as before. |
 | Hermes | mailtriage replaces the Hermes `mail-triage` job for `michael@` (see below). |
@@ -165,7 +165,7 @@ fails with exit code 2 and approves nothing; `--id` needs `--approve`.
 ## Safety invariants (amendments)
 
 - **Invariant 1:** "no `\Seen` change" becomes "never removes `\Seen`; adds
-  it only to answered mail the user approved". The engine trait has exactly
+  it only to answered or done mail the user approved". The engine trait has exactly
   one new method, `add_seen`. tests/engine_contract.rs pins its exact text,
   and `assert_no_forbidden` now accepts `Seen` only in a STORE without a
   MOVE.

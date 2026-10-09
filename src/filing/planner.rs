@@ -49,8 +49,8 @@ pub struct Plan {
     /// Refile spec: messages whose `Move` consumes their refile mark.
     #[serde(skip_serializing_if = "BTreeSet::is_empty")]
     pub refile_moves: BTreeSet<String>,
-    /// Reply queue spec: messages whose `Move` is a reply exit, sent with
-    /// `\Seen` in the same session.
+    /// Reply queue spec: messages whose `Move` is a reply exit: moved
+    /// unread, entering the read approval list.
     #[serde(skip_serializing_if = "BTreeSet::is_empty")]
     pub reply_exits: BTreeSet<String>,
     /// Reply queue spec: messages held in their source folder until they
@@ -139,7 +139,7 @@ enum MoveDecision {
     Move(Action),
     /// A move that consumes the message's refile mark.
     Refile(Action),
-    /// A held message leaves its source folder with `\Seen`.
+    /// A held message leaves its source folder, unread, for read approval.
     ReplyExit(Action),
     /// A held message stays in its source folder.
     Held,

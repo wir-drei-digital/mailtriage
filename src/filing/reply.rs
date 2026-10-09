@@ -139,7 +139,8 @@ fn refresh_batch(
 /// retried on a later pass. Each UID is checked to still name the
 /// message (its stored Message-ID and size, as batch verification checks)
 /// right before the write; a message that already carries `\Seen` needs no
-/// write.
+/// write. It runs whatever `filing.reply_queue` says, so reads approved
+/// before the queue was turned off are still applied.
 pub fn apply_reads(
     store: &mut Store,
     ctx: &PassContext,
