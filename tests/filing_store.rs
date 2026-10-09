@@ -46,6 +46,32 @@ fn migration_reaches_the_latest_schema_and_is_idempotent() {
 }
 
 #[test]
+fn schema_10_keeps_the_read_approvals_of_schema_9() {
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("db");
+    drop(Store::open(&p).unwrap());
+    rusqlite::Connection::open(&p)
+        .unwrap()
+        .execute_batch(
+            "ALTER TABLE read_approvals DROP COLUMN attempt_folder;
+ALTER TABLE read_approvals DROP COLUMN attempt_epoch;
+ALTER TABLE read_approvals DROP COLUMN intent_id;
+PRAGMA user_version=9;
+INSERT INTO read_approvals(account,message_id,requested_at,approved_at) VALUES('work','m1','t1','t2');",
+        )
+        .unwrap();
+    let s = Store::open(&p).unwrap();
+    assert_eq!(s.schema_version().unwrap(), LATEST);
+    let rows = s.read_approvals("work", true).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].approved_at.as_deref(), Some("t2"));
+    assert_eq!(
+        (rows[0].attempt_folder.as_deref(), rows[0].attempt_epoch),
+        (None, None)
+    );
+}
+
+#[test]
 fn filing_mode_transitions_keep_or_reset_enabled_at() {
     let (_d, mut s) = store();
     s.ensure_account("work", "id", "g1").unwrap();
@@ -315,6 +341,88 @@ fn claims_check_revision_and_consume_flag_attempt() {
         .unwrap()
         .flag_attempted_at
         .is_some());
+}
+
+#[test]
+fn a_reply_exit_claim_enters_the_read_approval_list_in_its_transaction() {
+    use mailtriage::filing::{
+        planner::{Action, Locator},
+        FilingWrite, IntentPatch, MoveClaim,
+    };
+    let (_d, mut s) = store();
+    s.ensure_account("work", "id", "g1").unwrap();
+    let raw = b"Message-ID: <a@t>\r\nSubject: s\r\n\r\nbody";
+    let msg = normalize::rfc822(raw, 1000).unwrap();
+    s.checkpoint("work", "INBOX", &snap(5, 5)).unwrap();
+    let none = BTreeMap::new();
+    s.stage_with(
+        "work",
+        "INBOX",
+        5,
+        1,
+        &[env(1, "a")],
+        "g1",
+        true,
+        &opts(&none),
+    )
+    .unwrap();
+    let id = s.arrivals("work", None).unwrap()[0].message_id.clone();
+    s.attach("work", &id, &msg).unwrap();
+    s.ensure_placement("work", &id, &["INBOX".to_string()])
+        .unwrap();
+    let exit = |desired_rev| Action::Move {
+        message_id: id.clone(),
+        from: Locator {
+            folder: "INBOX".into(),
+            epoch: 5,
+            uid: 1,
+        },
+        to: "News".into(),
+        desired_rev,
+        consumes_eligible: false,
+    };
+    let claim = |s: &mut Store, action: &Action, batch| {
+        s.claim_move_with("work", action, (1, 1), batch, NOW, MoveClaim::ReplyExit)
+            .unwrap()
+    };
+    assert!(claim(&mut s, &exit(9), "b1").is_none());
+    assert!(
+        s.read_approvals("work", false).unwrap().is_empty(),
+        "a refused claim requests nothing"
+    );
+    let intent = claim(&mut s, &exit(0), "b2").unwrap();
+    let rows = s.read_approvals("work", true).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        (rows[0].message_id.as_str(), rows[0].requested_at.as_str()),
+        (id.as_str(), NOW)
+    );
+    assert!(!s.intent(intent).unwrap().unwrap().consumes_refile);
+    let p = s.placement("work", &id).unwrap().unwrap();
+    assert!(
+        p.flag_attempted_at.is_some(),
+        "the exit consumes the flag attempt"
+    );
+    // An exit that ends without its move takes the row with it, in the
+    // same transaction as its state.
+    s.update_intent(intent, "uncertain", IntentPatch::default(), NOW)
+        .unwrap();
+    assert_eq!(s.read_approvals("work", true).unwrap().len(), 1);
+    s.update_intent(intent, "superseded", IntentPatch::default(), NOW)
+        .unwrap();
+    assert!(s.read_approvals("work", false).unwrap().is_empty());
+    // A row whose `\Seen` was added stays.
+    let again = claim(&mut s, &exit(0), "b3").unwrap();
+    s.mark_read_applied("work", &id, NOW).unwrap();
+    let failed = FilingWrite::Intent {
+        id: again,
+        state: "failed",
+        patch: IntentPatch::default(),
+    };
+    assert!(s.commit_filing("work", &[failed], NOW).unwrap());
+    let rows = s.read_approvals("work", false).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].applied_at.as_deref(), Some(NOW));
 }
 
 #[test]

@@ -27,6 +27,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 pub enum FakeOp {
     Move,
     Flag,
+    /// `add_seen` (reply queue).
+    Seen,
     Create,
     Subscribe,
 }
@@ -638,6 +640,68 @@ impl MailEngine for FakeEngine {
     }
 
     fn move_messages(&self, folder: &str, uids: &[u64], target: &str) -> Result<WriteOutcome> {
+        self.move_with(folder, uids, target)
+    }
+
+    fn add_flagged(&self, folder: &str, uids: &[u64]) -> Result<WriteOutcome> {
+        self.store_flag(folder, uids, ("flag", FakeOp::Flag, "\\Flagged"))
+    }
+
+    fn add_seen(&self, folder: &str, uids: &[u64]) -> Result<WriteOutcome> {
+        self.store_flag(folder, uids, ("seen", FakeOp::Seen, "\\Seen"))
+    }
+
+    fn set_watch_scope(&self, folders: &[String]) {
+        let mut s = self.state();
+        s.all_calls.push(format!("scope {}", folders.join(",")));
+        s.watch_scope = folders.iter().cloned().collect();
+    }
+
+    fn alias_conflicts(&self, folders: &[String]) -> Result<Vec<String>> {
+        let mut s = self.state();
+        s.enter(None, format!("alias_conflicts {}", folders.join(",")), &[])?;
+        if s.alias_check_fails {
+            bail!("cannot read the Himalaya configuration: it is not valid TOML");
+        }
+        Ok(folders
+            .iter()
+            .filter(|f| s.alias_conflicts.contains(*f))
+            .cloned()
+            .collect())
+    }
+}
+
+impl FakeEngine {
+    /// `add_flagged` and `add_seen`: SELECT, then `+FLAGS.SILENT (flag)`.
+    fn store_flag(
+        &self,
+        folder: &str,
+        uids: &[u64],
+        (verb, op, flag): (&str, FakeOp, &str),
+    ) -> Result<WriteOutcome> {
+        let mut s = self.state();
+        let call = format!("{verb} {folder} {}", raw::uid_set(uids));
+        s.validate(&call, &[folder], Some(uids))?;
+        s.enter(Some(op), call, &[folder])?;
+        let fault = s.take_fault(op);
+        let Some(epoch) = s.select(folder, fault)? else {
+            return Ok(WriteOutcome::default());
+        };
+        for m in &mut s.folder(folder).msgs {
+            if uids.contains(&m.uid) {
+                m.flags.insert(flag.into());
+            }
+        }
+        let out = WriteOutcome {
+            selected: true,
+            session_epoch: Some(epoch),
+            completed: fault != Some(Fault::PartialCopy),
+            copyuid: None,
+        };
+        respond(out, fault)
+    }
+
+    fn move_with(&self, folder: &str, uids: &[u64], target: &str) -> Result<WriteOutcome> {
         let mut s = self.state();
         let call = format!("move {folder} {} -> {target}", raw::uid_set(uids));
         s.validate(&call, &[folder, target], Some(uids))?;
@@ -676,48 +740,6 @@ impl MailEngine for FakeEngine {
             });
         }
         respond(out, fault)
-    }
-
-    fn add_flagged(&self, folder: &str, uids: &[u64]) -> Result<WriteOutcome> {
-        let mut s = self.state();
-        let call = format!("flag {folder} {}", raw::uid_set(uids));
-        s.validate(&call, &[folder], Some(uids))?;
-        s.enter(Some(FakeOp::Flag), call, &[folder])?;
-        let fault = s.take_fault(FakeOp::Flag);
-        let Some(epoch) = s.select(folder, fault)? else {
-            return Ok(WriteOutcome::default());
-        };
-        for m in &mut s.folder(folder).msgs {
-            if uids.contains(&m.uid) {
-                m.flags.insert("\\Flagged".into());
-            }
-        }
-        let out = WriteOutcome {
-            selected: true,
-            session_epoch: Some(epoch),
-            completed: fault != Some(Fault::PartialCopy),
-            copyuid: None,
-        };
-        respond(out, fault)
-    }
-
-    fn set_watch_scope(&self, folders: &[String]) {
-        let mut s = self.state();
-        s.all_calls.push(format!("scope {}", folders.join(",")));
-        s.watch_scope = folders.iter().cloned().collect();
-    }
-
-    fn alias_conflicts(&self, folders: &[String]) -> Result<Vec<String>> {
-        let mut s = self.state();
-        s.enter(None, format!("alias_conflicts {}", folders.join(",")), &[])?;
-        if s.alias_check_fails {
-            bail!("cannot read the Himalaya configuration: it is not valid TOML");
-        }
-        Ok(folders
-            .iter()
-            .filter(|f| s.alias_conflicts.contains(*f))
-            .cloned()
-            .collect())
     }
 }
 

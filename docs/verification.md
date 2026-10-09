@@ -108,6 +108,7 @@ which never writes.
 | INTERNALDATE, size and Message-ID before and after a move | | | |
 | `\Flagged` in the provider's web and mobile clients | | | |
 | `\Seen` unchanged by fetch, move and store | | | |
+| Reply queue: `\Answered` set by the web and mobile clients on reply; answered mail moved unread; `\Seen` added by `a2 UID STORE` only after `filing replies --approve` | | | |
 | Gmail: label semantics of MOVE from INBOX, archive, and a message carrying two category labels | | | |
 | Login rate: one `watch` with seven watched folders at a 60-second interval for 30 minutes without throttling; if throttled, whether pipelined STATUS via `imap raw` resolves it | | | |
 
@@ -125,6 +126,7 @@ which never writes.
 | INTERNALDATE, size and Message-ID before and after a move | | | |
 | `\Flagged` in the provider's web and mobile clients | | | |
 | `\Seen` unchanged by fetch, move and store | | | |
+| Reply queue: `\Answered` set by the web and mobile clients on reply; answered mail moved unread; `\Seen` added by `a2 UID STORE` only after `filing replies --approve` | | | |
 | Login rate: one `watch` with seven watched folders at a 60-second interval for 30 minutes without throttling; if throttled, whether pipelined STATUS via `imap raw` resolves it | | | |
 
 ### iCloud
@@ -141,6 +143,7 @@ which never writes.
 | INTERNALDATE, size and Message-ID before and after a move | | | |
 | `\Flagged` in the provider's web and mobile clients | | | |
 | `\Seen` unchanged by fetch, move and store | | | |
+| Reply queue: `\Answered` set by the web and mobile clients on reply; answered mail moved unread; `\Seen` added by `a2 UID STORE` only after `filing replies --approve` | | | |
 | Login rate: one `watch` with seven watched folders at a 60-second interval for 30 minutes without throttling; if throttled, whether pipelined STATUS via `imap raw` resolves it | | | |
 
 ### Fastmail or a Dovecot host
@@ -157,6 +160,7 @@ which never writes.
 | INTERNALDATE, size and Message-ID before and after a move | | | |
 | `\Flagged` in the provider's web and mobile clients | | | |
 | `\Seen` unchanged by fetch, move and store | | | |
+| Reply queue: `\Answered` set by the web and mobile clients on reply; answered mail moved unread; `\Seen` added by `a2 UID STORE` only after `filing replies --approve` | | | |
 | Login rate: one `watch` with seven watched folders at a 60-second interval for 30 minutes without throttling; if throttled, whether pipelined STATUS via `imap raw` resolves it | | | |
 
 ### Outcome

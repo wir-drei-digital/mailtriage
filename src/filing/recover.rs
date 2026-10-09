@@ -3,14 +3,14 @@
 //! assuming an outcome. Presence counts only for occurrences whose identity is
 //! established (COPYUID or fingerprint) in the folder's current epoch.
 use super::apply::{
-    close, commit, commit_with_placement, dispatch_moves, dispatch_reverts, event, flag_applied,
-    flag_raced, has_flagged, matches_meta, paused, race_problem, race_until_uid, revert_failed,
-    target_watched, write_failed,
+    close, commit, commit_with_placement, dispatch_moves, dispatch_reverts, error_patch, event,
+    flag_applied, flag_raced, has_flagged, matches_meta, paused, race_problem, race_until_uid,
+    revert_failed, target_watched, write_failed,
 };
 use super::arrivals::in_race_window;
 use super::observe::FolderMap;
 use super::planner::{CategoryFolder, Locator};
-use super::refile;
+use super::{refile, reply};
 use super::{
     FilingSummary, FilingWrite, Intent, IntentPatch, LocationState, PassContext, Placement,
 };
@@ -21,9 +21,10 @@ use chrono::{DateTime, Duration, Utc};
 use serde_json::json;
 use std::collections::BTreeMap;
 
-/// Walks open intents oldest first, then the reverts (mode not off). Engine
-/// writes (retries, reverts) happen only when `map.writes_allowed`. Each
-/// folder's epoch is read at most once per call (see `Epochs`).
+/// Walks open intents oldest first, then the reply queue's `\Seen`
+/// attempts (`reply::recover_reads`), then the reverts (mode not off).
+/// Engine writes (retries, reverts) happen only when `map.writes_allowed`.
+/// Each folder's epoch is read at most once per call (see `Epochs`).
 pub fn recover(
     store: &mut Store,
     ctx: &PassContext,
@@ -47,6 +48,7 @@ pub fn recover(
             write_failed(e, "recovery_failed", &intent.folder, summary)?;
         }
     }
+    reply::recover_reads(store, ctx, summary)?;
     for r in store.reverts(ctx.account, true)? {
         // The session outcome of an interrupted revert is unknown.
         if r.state == "in_flight" {
@@ -587,7 +589,8 @@ fn mark_lost(store: &mut Store, ctx: &PassContext, intent: &Intent) -> Result<()
 /// In F only with T settled: retried (re-claimed with job backoff) while the
 /// intent's `desired_rev` is current, `failed` with `move_failed` once
 /// `attempts` reach `max_attempts`, `superseded` when the request moved on
-/// (a new revision, a block, or a target no longer filed into). The retry
+/// (a new revision, a block, a target no longer filed into, or a message
+/// the reply queue holds again, error `held`). The retry
 /// waits (no state change) for `next_after`, for writes to be allowed, and for
 /// both folders to be writable.
 fn retry_or_supersede(
@@ -610,6 +613,11 @@ fn retry_or_supersede(
         if let Some(reason) = refile::intents::recheck(store, ctx, map, intent, &from)? {
             return refile::intents::cancel(store, ctx, intent, reason);
         }
+    }
+    // Reply queue spec: a reply exit whose message is held again (reopened)
+    // is not retried.
+    if map.caps.is_some() && reply::holds_again(store, ctx, map, intent)? {
+        return store.update_intent(intent.id, "superseded", error_patch("held"), &ctx.now);
     }
     if intent.attempts >= ctx.max_attempts {
         return block(

@@ -267,4 +267,54 @@ fn filing_against_real_dovecot() {
     assert_eq!(invoice["placement"]["location_state"], "known");
     assert_eq!(invoice["placement"]["folder"], "INBOX");
     assert_eq!(invoice["placement"]["pinned"], true);
+    // 6. Reply queue: mail that needs action waits in INBOX, unread and
+    // unflagged, until the client sets \Answered; then it is filed unread
+    // and gets \Seen only after the user approved it.
+    mt(
+        &e,
+        &[
+            "filing",
+            "enable",
+            "--account",
+            "work",
+            "--mode",
+            "live",
+            "--reply-queue",
+            "on",
+        ],
+    );
+    let q = write_mail(
+        e.dir.path(),
+        "q.eml",
+        "<q@e2e>",
+        "Invoice",
+        "Payment due next month",
+    );
+    imap(&e, &["append", "INBOX", q.to_str().unwrap()]);
+    for _ in 0..2 {
+        sync(&e);
+    }
+    let held = only_location(&e, "<q@e2e>");
+    assert_eq!(held.0, "INBOX");
+    assert!(!held.1.contains(&"\\Seen".to_string()), "{held:?}");
+    assert!(!held.1.contains(&"\\Flagged".to_string()), "{held:?}");
+    let status = mt(&e, &["filing", "status", "--account", "work"]);
+    assert_eq!(status["awaiting_reply"], 1, "{status}");
+    imap(&e, &["answer", "INBOX", "<q@e2e>"]);
+    let out = sync(&e);
+    assert_eq!(out["filing"]["reply_exits"], 1, "{out}");
+    sync(&e);
+    let filed = only_location(&e, "<q@e2e>");
+    assert_eq!(filed.0, folder(&e, "Transactions"));
+    assert!(filed.1.contains(&"\\Answered".to_string()), "{filed:?}");
+    assert!(!filed.1.contains(&"\\Seen".to_string()), "{filed:?}");
+    let replies = mt(&e, &["filing", "replies", "--account", "work"]);
+    assert_eq!(replies["waiting"], 1, "{replies}");
+    mt(&e, &["filing", "replies", "--account", "work", "--approve"]);
+    let out = sync(&e);
+    assert_eq!(out["filing"]["reads_applied"], 1, "{out}");
+    let read = only_location(&e, "<q@e2e>");
+    assert_eq!(read.0, folder(&e, "Transactions"));
+    assert!(read.1.contains(&"\\Seen".to_string()), "{read:?}");
+    assert!(read.1.contains(&"\\Answered".to_string()), "{read:?}");
 }

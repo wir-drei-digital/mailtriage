@@ -96,6 +96,7 @@ fn input_of(
         .into_iter()
         .map(|(record, p, meta)| {
             let mut m = plan_message(&p, &meta, effective(&record, ctx.generation));
+            m.done = record.review_state == "done";
             m.open_move_intent = has_open(&p.message_id, "move");
             m.open_flag_intent = has_open(&p.message_id, "flag");
             m
@@ -105,6 +106,7 @@ fn input_of(
         mode: ctx.mode,
         preview,
         flag_enabled: ctx.cfg.filing.flag,
+        reply_queue: ctx.cfg.filing.reply_queue,
         max_actions: ctx.cfg.filing.max_actions_per_pass,
         enabled_at: enabled_second(store.filing_state(ctx.account)?.enabled_at.as_deref()),
         categories: map.categories.clone(),
@@ -170,6 +172,7 @@ fn plan_message(p: &Placement, meta: &MessageMeta, effective: Effective) -> Plan
         blocked: p.blocked_reason.is_some(),
         open_move_intent: false,
         open_flag_intent: false,
+        done: false,
         effective,
     }
 }

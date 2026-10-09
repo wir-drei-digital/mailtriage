@@ -1,6 +1,7 @@
 //! Narrow Himalaya IMAP adapter for the tested versions in
 //! `himalaya-versions.json`. Its only writes are folder create and
-//! subscribe, UID MOVE and adding \Flagged, the last two through `imap raw`.
+//! subscribe, UID MOVE, adding \Flagged, and adding \Seen to approved
+//! answered mail, the last three through `imap raw`.
 use super::{
     raw,
     targets::Resolver,
@@ -577,6 +578,17 @@ impl MailEngine for Himalaya {
             raw::quote_mailbox(folder)?,
             raw::uid_set(uids),
             raw::quote_mailbox(target)?
+        );
+        write_outcome(&self.raw_text(&text)?)
+    }
+
+    fn add_seen(&self, folder: &str, uids: &[u64]) -> Result<WriteOutcome> {
+        self.check_mailbox(folder)?;
+        check_write_uids(uids)?;
+        let text = format!(
+            "a1 SELECT {}\r\na2 UID STORE {} +FLAGS.SILENT (\\Seen)\r\n",
+            raw::quote_mailbox(folder)?,
+            raw::uid_set(uids)
         );
         write_outcome(&self.raw_text(&text)?)
     }

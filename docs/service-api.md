@@ -519,7 +519,7 @@ Apply result: `{"schema_version":1,"account":"work","marked":N,"waiting_marked":
 
 Errors: 2 for `--apply` outside `live` (`refile --apply requires filing mode live`), an unknown category, a folder that names no category or retired folder (`unknown folder: not a category or retired folder`) or several (`folder name matches several folders; pass the native name: A, B`), a limit outside 1..=500, an unknown account; 3 when the state database is unavailable; 5 when `mailtriage.json` changed (`reason: config_changed`) or the placements kept changing (`placements changed concurrently; retry`).
 
-Schema v6 (migration 6): `placements.refile_once`, `placements.filed_home_folder`/`filed_home_epoch`/`filed_home_uid` (the occurrence a COPYUID-proven mailtriage move produced; kept only while it is the known home), `filing_intents.consumes_refile`, `folders.drain_until_uid` (NULL: frozen; 0: retained in the last pass; N: draining until UID N). The newer-schema guard is the public `store::LATEST` (8 since schema v8, below).
+Schema v6 (migration 6): `placements.refile_once`, `placements.filed_home_folder`/`filed_home_epoch`/`filed_home_uid` (the occurrence a COPYUID-proven mailtriage move produced; kept only while it is the known home), `filing_intents.consumes_refile`, `folders.drain_until_uid` (NULL: frozen; 0: retained in the last pass; N: draining until UID N). The newer-schema guard is the public `store::LATEST` (10 since schema v10, see "Reply queue").
 
 Also: `filing status` gains `refile_marked` and `refile_candidates`; `categories apply` gains `hint` (null with filing `off`); `filing plan` refile moves carry `"reason":"refile"`; events `refile_marked`, `refile_cleared {reason}`, `refile_cancelled {intent_id, reason}`, and `moved` with `"reason":"refile"`.
 
@@ -553,3 +553,67 @@ worker holds the account lock), `binding_conflict` and the other reasons, and
 the migration (it updates `finished_at` but neither `reason` nor `reason_at`),
 so a reason never outlives its pass. `store::LATEST` is public: tests name the
 latest schema `LATEST` and a newer one `LATEST + 1`.
+
+## Reply queue (config schema 4)
+
+`filing.reply_queue` (default `false`, written only when true) holds new mail
+that needs action in its source folder until it is answered or marked done
+(spec: `docs/superpowers/specs/2026-10-08-reply-queue-design.md`). A config
+that turns it on is written as `schema_version` 4; every other config stays
+3. `config::SCHEMA_VERSION` (4) is the newest schema a binary reads;
+`config::written_schema` is the one a write produces.
+
+Schema v9 (migration 9) adds the table `read_approvals(account, message_id,
+requested_at, approved_at, applied_at)`, the read approval list. A reply
+exit enters it once, in its move claim's transaction
+(`Store::claim_move_with(.., MoveClaim::ReplyExit)`; `MoveClaim::Refile`
+marks a refile move, `MoveClaim::Plain` any other);
+`Store::approve_reads` sets `approved_at`, and a live pass sets `applied_at`
+after adding `\Seen` (`Store::mark_read_applied`).
+
+Schema v10 (migration 10) adds the nullable columns
+`read_approvals.attempt_folder` and `attempt_epoch`: the folder and epoch of
+an `add_seen` session whose outcome is not known yet. A live pass writes
+them (`FilingWrite::ReadAttempt`) before the session and clears them once
+its outcome is known; `filing::reply::recover_reads`, run by
+`filing::recover::recover`, compares a remaining attempt with the folder's
+epoch. It also adds `read_approvals.intent_id`, the reply exit intent whose
+claim wrote the row: every intent state write (`Store::update_intent`,
+`FilingWrite::Intent`) that ends an intent `failed`, `lost` or `superseded`
+deletes that intent's row in the same transaction unless `applied_at` is
+set. Additive, so a process of the previous release keeps inserting rows
+(without `intent_id`, so they are not removed this way).
+`store::LATEST` is 10.
+
+- `filing enable --reply-queue on|off` (`Service::filing_enable_with`); the
+  result gains `reply_queue`.
+- `filing status` gains `reply_queue`, `awaiting_reply` and
+  `awaiting_reply_ids` (up to 50).
+- `filing status` also gains `read_waiting` and `read_approved_pending`.
+- The sync `filing` object (and the stored last pass) gains
+  `awaiting_reply`, `reply_exits`, `replies_checked` and `reads_applied`,
+  each only when not 0; problems `reply_check_failed:<folder>`,
+  `read_failed:<folder>`, `read_incomplete:<folder>` and
+  `read_mismatch:<folder>` (a UID that shows another Message-ID or size;
+  no error count, the row waits), and `epoch_race:<folder>` for a `\Seen`
+  race.
+- `filing replies [--approve [--id ID]...]` (`Service::filing_replies`):
+  `{"schema_version":1,"account":"work","waiting":W,"approved_pending":A,"approved":[ids],"items":[{"id","subject","from","folder","answered","requested_at","approved_at"}]}`.
+  An `--id` that is not waiting is exit code 2 and approves nothing.
+  Neither approval nor `apply_reads` depends on `filing.reply_queue`:
+  rows approved before the queue was turned off are still read.
+- `filing plan`: a reply exit's move carries `"reason":"reply_exit"`.
+- Recovery supersedes a move intent before a retry when the planner would
+  now hold its message (`filing::reply::holds_again`: queue on, no explicit
+  request, held, neither answered nor done); the intent's `error` is
+  `held`, and its read approval row is removed with it.
+- `MailEngine::add_seen(folder, uids)`: one session `a1 SELECT; a2 UID
+  STORE uids +FLAGS.SILENT (\Seen)`, returning a `WriteOutcome` like
+  `add_flagged`. `filing::reply::apply_reads` maps it: `selected`,
+  `completed` and the verified `session_epoch` set `applied_at`; `selected`
+  in another epoch is an epoch race (pause `epoch_race`, event `epoch_race`
+  with `{"kind":"seen","error":"epoch_race","epoch":E}` per message, rows
+  kept approved); anything else leaves the rows for the next pass
+  (`read_incomplete`); an error keeps the attempt for recovery, which
+  reports another epoch as a suspected race (`"error":"epoch_race_suspected"`).
+

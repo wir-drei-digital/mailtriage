@@ -22,7 +22,7 @@ This guide is the full reference: setup, configuration, the OpenRouter key, the 
 
 `mailtriage` is a command-line tool that classifies email. For each message it records three decisions: a category from your own list, an urgency (`low`, `medium` or `high`), and whether you need to act. It reads mail over IMAP through the [Himalaya](https://github.com/pimalaya/himalaya) CLI, gets the decisions from OpenRouter's Decisions API with a Jev model, and stores messages and results in a local SQLite database. Listing and reading work from that database without network access.
 
-mailtriage never sends, deletes or expunges mail and never changes the read state (`\Seen`). By default it does not write to the mailbox at all. An account that enables [filing into folders](#filing-into-folders) also creates category folders, moves mail into them and adds `\Flagged`. `done` and `reopen` change only the local review state. Every command works on one configured account, named with `--account`.
+mailtriage never sends, deletes or expunges mail and never removes the read state (`\Seen`). By default it does not write to the mailbox at all. An account that enables [filing into folders](#filing-into-folders) also creates category folders, moves mail into them and adds `\Flagged`. Only the optional [reply queue](#reply-queue) adds `\Seen`, to answered or done mail you approved. `done` and `reopen` change only the local review state. Every command works on one configured account, named with `--account`.
 
 ## Try it offline
 
@@ -592,7 +592,7 @@ Top level:
 
 | Field | What to set |
 | --- | --- |
-| `schema_version` | `3`, as written by `init`, `setup` and every command that edits the file. mailtriage reads schemas 1 to 3. Releases before automatic updates read only 1 and 2, so they refuse a schema 3 file instead of rewriting it without `updates`. |
+| `schema_version` | `3`, or `4` while an account has `filing.reply_queue` on, as written by `init`, `setup` and every command that edits the file. mailtriage reads schemas 1 to 4. Releases before automatic updates read only 1 and 2, and releases before the reply queue only 1 to 3, so they refuse a newer file instead of rewriting it without `updates` or `reply_queue`. |
 | `updates` | What `watch` does about new releases: `"auto"` installs them, `"notify"` only reports them, `"off"` makes no network call. A config without the key means `"auto"`. See [Updates](#updates). |
 | `state_dir` | Directory for the SQLite database and normalized message text. mailtriage creates it with mode 0700. Keep it on a local filesystem. |
 | `provider` | The classification provider, below. |
@@ -669,8 +669,9 @@ Filing (`accounts.NAME.filing`), described in [Filing into folders](#filing-into
 | Field | Default | Effect |
 | --- | --- | --- |
 | `mode` | `"off"` | `"off"`, `"dry_run"` or `"live"`. Change it with `filing enable` and `filing disable`. |
-| `flag` | `true` | Add `\Flagged` to mail that needs action or has `high` urgency. |
+| `flag` | `true` | Add `\Flagged` to mail that needs action or has `high` urgency; mail the reply queue holds only for `high` urgency. |
 | `max_actions_per_pass` | `200` | Moves and flags per pass, 1 to 1000. |
+| `reply_queue` | `false` | Keep new mail that needs action in its source folder until you answer it or mark it done; see [Reply queue](#reply-queue). Written only when `true`. Change it with `filing enable --reply-queue on` or `off`. |
 
 ## The OpenRouter key
 
@@ -1254,7 +1255,29 @@ mailtriage adds the server's personal namespace prefix (for example `INBOX.`) to
 
 A message is moved automatically at most once, only out of a source folder, and only when its classification is current or you corrected its category. A current classification was made under the current categories, provider and policy, from complete input. Review mode does not hold filing back.
 
-`\Flagged` is added once, when the effective decision is `action_required` or `high` urgency, and only to new mail, backfilled mail or mail that mailtriage filed. A message that already carries `\Flagged` counts as flagged, so removing the flag in a mail client is respected. Set `filing.flag` to `false` to add no flags.
+`\Flagged` is added once, when the effective decision is `action_required` or `high` urgency, and only to new mail, backfilled mail or mail that mailtriage filed. A message that already carries `\Flagged` counts as flagged, so removing the flag in a mail client is respected. Set `filing.flag` to `false` to add no flags. With the [reply queue](#reply-queue) on, a message it holds is flagged only for `high` urgency, and mail it filed after your reply is not flagged, even once the queue is off; other mail is flagged as without the queue.
+
+### Reply queue
+
+With the reply queue, the inbox holds exactly the mail that still needs you. New mail whose effective decision is `action_required` stays in its source folder instead of moving to its category folder. Once you have answered it, mailtriage moves it to its category folder, unread, and lists it for your approval. Only mail you approve is marked read.
+
+```sh
+mailtriage filing enable --account work --mode live --reply-queue on
+mailtriage filing status --account work --json
+mailtriage filing replies --account work
+mailtriage filing replies --account work --approve
+```
+
+`--reply-queue off` turns it off; without the flag, `filing enable` keeps the configured value (`filing.reply_queue`, default `false`). With the queue off, held mail files like other mail, and mail you already approved in `filing replies` is still marked read. A config with the queue on is written as schema 4, which mailtriage releases without the reply queue refuse to read.
+
+- **Answered.** A mail client sets `\Answered` when you reply from it. Each pass reads the flags of the held mail again, and the next pass after your reply moves it to its category folder without changing its read state.
+- **Approval.** `filing replies` lists the answered or done mail that mailtriage filed, or is filing, and has not marked read: `id`, `subject`, `from`, `folder` (the source folder until the next pass confirms the move), `answered`, `requested_at` and `approved_at`. Mail whose move is given up (it failed, the mail vanished, or you reopened it first) leaves the list, even if you approved it. `--approve` approves all of it, `--approve --id ID` (repeatable) single messages; an id that is not waiting fails with exit code 2 and approves nothing. The next live pass adds `\Seen` to approved mail where it is now, after checking that its UID still names it; if it does not, the pass reports `read_mismatch` and the message waits.
+- **Done.** `mailtriage done --account work --id ID` releases a held message the same way, into the approval list. Use it for a reply sent from another program or device that does not set `\Answered`, for a paid invoice, or when no answer is needed after all. `reopen` before the move has happened keeps the message held and takes it off the approval list.
+- **Only new mail.** Mail that was in the folder before filing was enabled stays where it is, and backfilled mail files as before. A held message whose decision changes to "no action" files like other mail and is not listed.
+- **Your own moves win.** Moving a held message into a category folder is a correction, archiving it means done, and `filing pin --id ID` keeps it in the inbox even after your reply.
+- **Visibility.** `filing status` reports `reply_queue`, `awaiting_reply`, `awaiting_reply_ids` (up to 50), `read_waiting` and `read_approved_pending`. A pass reports `awaiting_reply`, `reply_exits`, `replies_checked` and `reads_applied` when they are not 0, and `filing plan` marks a reply exit's move with `"reason": "reply_exit"`.
+
+Before you rely on it, check that the mail clients you answer from set `\Answered`: reply from each one to a test message and run `mailtriage filing plan --account work --json`.
 
 ### Corrections from a mail client
 
@@ -1280,6 +1303,7 @@ Archiving or deleting a message in a mail client means done. Once the message is
 | `ambiguous`, `ambiguous_ids` | Messages found in several watched folders; up to 50 ids. |
 | `unresolved_arrivals`, `unresolved_arrival_items` | Mail mailtriage could not identify; up to 50 items. |
 | `eligible_unfiled` | Messages in a source folder that the next passes may file. |
+| `reply_queue`, `awaiting_reply`, `awaiting_reply_ids` | Whether the [reply queue](#reply-queue) is on, and the messages it holds; up to 50 ids. |
 | `stale_requests` | `count` and `ids` of requests for a category that no longer exists. Correct or unpin them. |
 | `alias_conflicts`, `problems`, `last_pass` | Folder alias conflicts, problems of the last pass, and its summary. |
 
@@ -1287,9 +1311,9 @@ Archiving or deleting a message in a mail client means done. Once the message is
 
 ### Safety rules
 
-mailtriage never deletes or expunges mail, never removes a flag, never changes `\Seen`, and never renames or deletes a folder. It writes only to servers with the IMAP MOVE extension; there is no copy-and-delete fallback. Every move and flag is journaled before it is sent and is resolved by observation after a failure or crash. If a write may have run against a recreated mailbox, mailtriage reverts it where the server reported where the mail went. Otherwise it pauses that folder and quarantines the mail that arrived. Nothing is written to a paused folder or a blocked message until you act.
+mailtriage never deletes or expunges mail, never removes a flag or `\Seen`, and never renames or deletes a folder. It adds `\Seen` only with the [reply queue](#reply-queue), to answered or done mail you approved. It writes only to servers with the IMAP MOVE extension; there is no copy-and-delete fallback. Every move and flag is journaled before it is sent, and each `\Seen` write is recorded on its approval entry; all are resolved by observation after a failure or crash. If a write may have run against a recreated mailbox, mailtriage reverts a move where the server reported where the mail went. Otherwise it pauses that folder and quarantines the mail that arrived. A flag or `\Seen` that may have reached another message stays there and is reported as `epoch_race` in `filing log`. Nothing is written to a paused folder or a blocked message until you act.
 
-A Himalaya mailbox alias that points a watched folder elsewhere stops that folder's scanning and fetches, and all filing writes, until the alias is fixed. A change to the Himalaya configuration during a pass, or to `mailtriage.json` before the pass writes, aborts the pass with exit code 5. `sync` exits with that code; `watch` prints the error object, continues, and uses the new configuration in its next pass.
+A Himalaya mailbox alias that points a watched folder elsewhere stops that folder's scanning, fetches and reply queue checks, and all filing writes, until the alias is fixed. A change to the Himalaya configuration during a pass, or to `mailtriage.json` before the pass writes, aborts the pass with exit code 5. `sync` exits with that code; `watch` prints the error object, continues, and uses the new configuration in its next pass.
 
 ### Lifting blocks and pauses
 

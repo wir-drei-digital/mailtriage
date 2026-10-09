@@ -7,6 +7,7 @@ pub mod observe;
 pub mod planner;
 pub mod recover;
 pub mod refile;
+pub mod reply;
 pub mod store;
 pub mod transitions;
 pub mod types;
@@ -31,11 +32,27 @@ pub struct FilingSummary {
     pub unresolved: usize,
     pub folders_created: usize,
     pub hydrated: usize,
+    /// Reply queue spec: held messages this pass, and reply exits claimed
+    /// (moved unread, waiting in the read approval list).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub awaiting_reply: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub reply_exits: usize,
+    /// Held messages whose flags were read again this pass.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub replies_checked: usize,
+    /// Approved messages that got `\Seen` this pass.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub reads_applied: usize,
     pub errors: usize,
     /// Codes only, never message text.
     pub problems: Vec<String>,
     /// What the engine reported this pass; `filing status` reads it back.
     pub capabilities: Option<EngineCapabilities>,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 /// What every filing step of one pass needs. It borrows nothing from

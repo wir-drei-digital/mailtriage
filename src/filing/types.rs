@@ -241,6 +241,17 @@ pub struct NewIntent<'a> {
     pub now: &'a str,
 }
 
+/// What a move claim records besides its intent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum MoveClaim {
+    Plain,
+    /// Refile spec: the intent consumes the refile mark.
+    Refile,
+    /// Reply queue spec: the message enters the read approval list, once,
+    /// in the claim's transaction.
+    ReplyExit,
+}
+
 /// Fields that are `Some` overwrite the stored value; `None` keeps it.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, Default)]
 pub struct IntentPatch {
@@ -306,6 +317,12 @@ pub enum FilingWrite<'a> {
         epoch: u64,
         uid: u64,
     },
+    /// A read approval row's `\Seen` attempt: the folder and epoch of the
+    /// `add_seen` session about to run, or `None` once its outcome is known.
+    ReadAttempt {
+        message_id: &'a str,
+        attempt: Option<(&'a str, u64)>,
+    },
     /// One audit event.
     Event {
         message_id: Option<&'a str>,
@@ -323,4 +340,19 @@ pub fn rfc_message_id(env: &SourceEnvelope) -> Option<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
+}
+
+/// Reply queue spec: an answered message mailtriage filed, waiting for the
+/// user to approve its read state (`approved_at`), and when `\Seen` was
+/// added (`applied_at`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ReadApproval {
+    pub message_id: String,
+    pub requested_at: String,
+    pub approved_at: Option<String>,
+    pub applied_at: Option<String>,
+    /// The folder and epoch of an `add_seen` session whose outcome is not
+    /// known yet; recovery checks them for a suspected race.
+    pub attempt_folder: Option<String>,
+    pub attempt_epoch: Option<u64>,
 }

@@ -1,8 +1,9 @@
 //! The boundary between mailtriage and a mailbox. The service only talks to
 //! `MailEngine`; Himalaya is one implementation, a native IMAP engine can be
-//! another. No method can delete, expunge, unflag, change \Seen, or delete or
-//! rename folders. Writes are limited to creating and subscribing folders,
-//! UID MOVE and adding \Flagged.
+//! another. No method can delete, expunge, unflag, remove \Seen, or delete
+//! or rename folders. Writes are limited to creating and subscribing folders,
+//! UID MOVE, adding \Flagged, and adding \Seen to answered mail the user
+//! approved (reply queue spec).
 pub mod fake;
 pub mod himalaya;
 pub mod raw;
@@ -89,6 +90,9 @@ pub trait MailEngine {
     fn envelopes(&self, folder: &str, uids: &[u64]) -> Result<Vec<SourceEnvelope>>;
     /// One session: SELECT folder; UID MOVE uids target.
     fn move_messages(&self, folder: &str, uids: &[u64], target: &str) -> Result<WriteOutcome>;
+    /// Reply queue, once the user approved the read state: one session:
+    /// SELECT folder; UID STORE uids +FLAGS.SILENT (\Seen).
+    fn add_seen(&self, folder: &str, uids: &[u64]) -> Result<WriteOutcome>;
     /// One session: SELECT folder; UID STORE uids +FLAGS.SILENT (\Flagged).
     fn add_flagged(&self, folder: &str, uids: &[u64]) -> Result<WriteOutcome>;
     /// Folders beyond the configured sources this engine may touch this pass (category and referenced retired folders). Default: no restriction.

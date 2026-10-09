@@ -2,7 +2,7 @@
 use super::{
     mode_str, open_states_sql, planner::Action, rfc_message_id, Arrival, CheckpointState,
     FilingStateRow, FilingWrite, FolderRecord, HydrationBatch, Intent, IntentPatch, LocationState,
-    MessageMeta, NewIntent, Placement, Revert, StageOptions,
+    MessageMeta, MoveClaim, NewIntent, Placement, ReadApproval, Revert, StageOptions,
 };
 use crate::domain::{FilingMode, MailboxSnapshot, SourceEnvelope};
 use crate::store::{bump, envelope_of, merge_envelope, now, row_record, Record, Store};
@@ -94,6 +94,72 @@ impl Store {
         self.db.execute(
             "INSERT INTO filing_state(account,bootstrap_done) VALUES(?1,?2) ON CONFLICT(account) DO UPDATE SET bootstrap_done=excluded.bootstrap_done",
             params![account, done],
+        )?;
+        Ok(())
+    }
+
+    /// The read approval list, oldest request first; with `open_only`, the
+    /// rows whose `\Seen` is not added yet.
+    pub fn read_approvals(&self, account: &str, open_only: bool) -> Result<Vec<ReadApproval>> {
+        let sql = if open_only {
+            "SELECT message_id,requested_at,approved_at,applied_at,attempt_folder,attempt_epoch FROM read_approvals WHERE account=? AND applied_at IS NULL ORDER BY requested_at,message_id"
+        } else {
+            "SELECT message_id,requested_at,approved_at,applied_at,attempt_folder,attempt_epoch FROM read_approvals WHERE account=? ORDER BY requested_at,message_id"
+        };
+        let mut st = self.db.prepare(sql)?;
+        let rows = st
+            .query_map([account], |r| {
+                Ok(ReadApproval {
+                    message_id: r.get(0)?,
+                    requested_at: r.get(1)?,
+                    approved_at: r.get(2)?,
+                    applied_at: r.get(3)?,
+                    attempt_folder: r.get(4)?,
+                    attempt_epoch: r.get(5)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Approves the read state of the waiting rows (all, or those in `ids`);
+    /// returns the ids it approved. An id that is not waiting is skipped.
+    pub fn approve_reads(
+        &mut self,
+        account: &str,
+        ids: Option<&[String]>,
+        at: &str,
+    ) -> Result<Vec<String>> {
+        let tx = self.db.transaction()?;
+        let waiting: Vec<String> = {
+            let mut st = tx.prepare(
+                "SELECT message_id FROM read_approvals WHERE account=? AND approved_at IS NULL ORDER BY requested_at,message_id",
+            )?;
+            let rows = st
+                .query_map([account], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        let approved: Vec<String> = waiting
+            .into_iter()
+            .filter(|id| ids.is_none_or(|ids| ids.contains(id)))
+            .collect();
+        for id in &approved {
+            tx.execute(
+                "UPDATE read_approvals SET approved_at=?3 WHERE account=?1 AND message_id=?2",
+                params![account, id, at],
+            )?;
+        }
+        tx.commit()?;
+        Ok(approved)
+    }
+
+    /// Records that `\Seen` was added to an approved message; its attempt
+    /// is settled.
+    pub fn mark_read_applied(&mut self, account: &str, id: &str, at: &str) -> Result<()> {
+        self.db.execute(
+            "UPDATE read_approvals SET applied_at=?3,attempt_folder=NULL,attempt_epoch=NULL WHERE account=?1 AND message_id=?2",
+            params![account, id, at],
         )?;
         Ok(())
     }
@@ -1103,6 +1169,7 @@ impl Store {
     }
 
     /// Sets the state and `updated_at`; patch fields that are `Some` overwrite.
+    /// One transaction, with the read approval row `write_intent` may remove.
     pub fn update_intent(
         &mut self,
         id: i64,
@@ -1110,7 +1177,10 @@ impl Store {
         patch: IntentPatch,
         now: &str,
     ) -> Result<()> {
-        write_intent(&self.db, id, state, &patch, now)
+        let tx = self.db.transaction()?;
+        write_intent(&tx, id, state, &patch, now)?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Claims a move in one transaction: refused (`None`) when the placement's
@@ -1130,12 +1200,15 @@ impl Store {
             (target_epoch, target_uid_next),
             batch,
             now,
-            false,
+            MoveClaim::Plain,
         )
     }
 
-    /// `claim_move` with the target snapshot as `(epoch, UIDNEXT)`; the
-    /// intent records whether it consumes a refile mark (refile spec).
+    /// `claim_move` with the target snapshot as `(epoch, UIDNEXT)`. A refile
+    /// claim records that the intent consumes the refile mark (refile spec);
+    /// a reply exit enters the read approval list once, as the row of its
+    /// intent (a repeated claim keeps the first request), and consumes the
+    /// message's flag attempt (reply queue spec).
     pub fn claim_move_with(
         &mut self,
         account: &str,
@@ -1143,7 +1216,7 @@ impl Store {
         (target_epoch, target_uid_next): (u64, u64),
         batch: &str,
         now: &str,
-        consumes_refile: bool,
+        claim: MoveClaim,
     ) -> Result<Option<i64>> {
         let Action::Move {
             message_id,
@@ -1174,10 +1247,24 @@ impl Store {
         if !ok {
             return Ok(None);
         }
+        let consumes_refile = claim == MoveClaim::Refile;
         tx.execute("INSERT INTO filing_intents(account,message_id,kind,folder,epoch,uid,target,target_epoch,target_uid_next,desired_rev,consumes_eligible,consumes_refile,batch,state,dispatched_at,created_at,updated_at)
                 VALUES(?,?,'move',?,?,?,?,?,?,?,?,?,?,'in_flight',?,?,?)",
             params![account, message_id, from.folder, from.epoch, from.uid, to, target_epoch, target_uid_next, desired_rev, consumes_eligible, consumes_refile, batch, now, now, now])?;
         let id = tx.last_insert_rowid();
+        if claim == MoveClaim::ReplyExit {
+            tx.execute(
+                "INSERT INTO read_approvals(account,message_id,requested_at,intent_id) VALUES(?1,?2,?3,?4)
+                 ON CONFLICT(account,message_id) DO UPDATE SET intent_id=excluded.intent_id WHERE read_approvals.applied_at IS NULL",
+                params![account, message_id, now, id],
+            )?;
+            // Answered mail needs no flag once filed, with the queue on or off.
+            tx.execute(
+                "UPDATE placements SET flag_attempted_at=COALESCE(flag_attempted_at,?3) WHERE account=?1 AND message_id=?2",
+                params![account, message_id, now],
+            )?;
+            bump(&tx)?;
+        }
         tx.commit()?;
         Ok(Some(id))
     }
@@ -1630,6 +1717,15 @@ fn apply_write(tx: &Connection, account: &str, w: &FilingWrite<'_>, now: &str) -
         FilingWrite::RemoveOccurrence { folder, epoch, uid } => {
             delete_occurrence(tx, account, folder, *epoch, *uid)?;
         }
+        FilingWrite::ReadAttempt {
+            message_id,
+            attempt,
+        } => {
+            tx.execute(
+                "UPDATE read_approvals SET attempt_folder=?3,attempt_epoch=?4 WHERE account=?1 AND message_id=?2",
+                params![account, message_id, attempt.map(|a| a.0), attempt.map(|a| a.1)],
+            )?;
+        }
         FilingWrite::Event {
             message_id,
             folder,
@@ -1739,6 +1835,9 @@ fn reopen_inferred_in(
     Ok(true)
 }
 
+/// An intent's state and patch, inside the caller's transaction; a reply
+/// exit that ends `failed`, `lost` or `superseded` also removes the read
+/// approval row its claim requested, unless `\Seen` was already added.
 fn write_intent(
     db: &Connection,
     id: i64,
@@ -1762,6 +1861,12 @@ fn write_intent(
     )?;
     if n == 0 {
         bail!("unknown filing intent");
+    }
+    if matches!(state, "failed" | "lost" | "superseded") {
+        db.execute(
+            "DELETE FROM read_approvals WHERE intent_id=?1 AND applied_at IS NULL",
+            [id],
+        )?;
     }
     Ok(())
 }

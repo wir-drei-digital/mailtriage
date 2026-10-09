@@ -6,7 +6,7 @@ use super::observe::FolderMap;
 use super::planner::{Action, Locator, Plan};
 use super::refile;
 use super::{
-    is_config_changed, rfc_message_id, FilingSummary, FilingWrite, Intent, IntentPatch,
+    is_config_changed, rfc_message_id, FilingSummary, FilingWrite, Intent, IntentPatch, MoveClaim,
     PassContext, Placement, Revert,
 };
 use crate::domain::{FilingMode, SourceEnvelope};
@@ -22,7 +22,8 @@ const BATCH: usize = 100;
 
 /// Step 9 in `live`: clears satisfied explicit requests, consumes the flag
 /// attempt of already-flagged messages, then claims and applies flags (per
-/// folder and epoch) and moves (per folder, epoch and target) in batches of
+/// folder and epoch) and moves (per folder, epoch, target, and whether they
+/// are reply exits, whose claims enter the read approval list) in batches of
 /// at most 100. Nothing happens unless writes are allowed. Returns the
 /// messages whose UID batch verification dropped (absent, or another
 /// Message-ID or size), for placement re-evaluation.
@@ -42,10 +43,10 @@ pub fn apply(
         consume_flag_attempt(store, ctx, id)?;
     }
     let flags = group(plan, |a| match a {
-        Action::Flag { at, .. } => Some((at.folder.clone(), at.epoch, String::new())),
+        Action::Flag { at, .. } => Some((at.folder.clone(), at.epoch, String::new(), false)),
         Action::Move { .. } => None,
     });
-    for ((folder, epoch, _), actions) in &flags {
+    for ((folder, epoch, _, _), actions) in &flags {
         for chunk in actions.chunks(BATCH) {
             let batch = flag_batch(store, ctx, (folder, *epoch), chunk, &mut dropped, summary);
             if let Err(e) = batch {
@@ -54,16 +55,26 @@ pub fn apply(
         }
     }
     let moves = group(plan, |a| match a {
-        Action::Move { from, to, .. } => Some((from.folder.clone(), from.epoch, to.clone())),
+        Action::Move {
+            message_id,
+            from,
+            to,
+            ..
+        } => Some((
+            from.folder.clone(),
+            from.epoch,
+            to.clone(),
+            plan.reply_exits.contains(message_id),
+        )),
         Action::Flag { .. } => None,
     });
-    for ((folder, epoch, to), actions) in &moves {
+    for ((folder, epoch, to, reply_exit), actions) in &moves {
         for chunk in actions.chunks(BATCH) {
             let batch = move_batch(
                 store,
                 ctx,
                 map,
-                (folder, *epoch, to),
+                (folder, *epoch, to, *reply_exit),
                 chunk,
                 &plan.refile_moves,
                 &mut dropped,
@@ -77,7 +88,8 @@ pub fn apply(
     Ok(dropped)
 }
 
-type BatchKey = (String, u64, String);
+/// Folder, epoch, move target ("" for flags), reply exit.
+type BatchKey = (String, u64, String, bool);
 
 /// Actions grouped by `key`, groups and members in plan order.
 fn group(plan: &Plan, key: impl Fn(&Action) -> Option<BatchKey>) -> Vec<(BatchKey, Vec<&Action>)> {
@@ -436,13 +448,14 @@ pub(crate) fn race_problem(folder: &str, summary: &mut FilingSummary) {
 }
 
 /// One move batch: verify, snapshot the target, claim (a refile move as
-/// one, checked again right after its claim), dispatch.
+/// one, checked again right after its claim; a reply exit entering the read
+/// approval list in its claim), dispatch.
 #[allow(clippy::too_many_arguments)] // One move batch with its pass context.
 fn move_batch(
     store: &mut Store,
     ctx: &PassContext,
     map: &FolderMap,
-    (folder, epoch, to): (&str, u64, &str),
+    (folder, epoch, to, reply_exit): (&str, u64, &str, bool),
     actions: &[&Action],
     refile: &BTreeSet<String>,
     dropped: &mut Vec<String>,
@@ -465,15 +478,14 @@ fn move_batch(
     let mut claimed = Vec::new();
     for action in verified.kept {
         let consumes_refile = refile.contains(action.message_id());
+        let kind = match (consumes_refile, reply_exit) {
+            (true, _) => MoveClaim::Refile,
+            (false, true) => MoveClaim::ReplyExit,
+            (false, false) => MoveClaim::Plain,
+        };
         let target_snapshot = (target.uid_validity, target.uid_next);
-        let claim = store.claim_move_with(
-            ctx.account,
-            action,
-            target_snapshot,
-            &batch,
-            &at,
-            consumes_refile,
-        )?;
+        let claim =
+            store.claim_move_with(ctx.account, action, target_snapshot, &batch, &at, kind)?;
         let Some(id) = claim else {
             continue;
         };
@@ -485,7 +497,11 @@ fn move_batch(
     if claimed.is_empty() {
         return Ok(());
     }
-    dispatch_moves(store, ctx, folder, epoch, to, &claimed, summary)
+    dispatch_moves(store, ctx, folder, epoch, to, &claimed, summary)?;
+    if reply_exit {
+        summary.reply_exits += claimed.len();
+    }
+    Ok(())
 }
 
 /// Refile spec "Intents", at claim time: a refile intent that fails its

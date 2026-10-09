@@ -4,7 +4,7 @@ use mailtriage::{
     domain::{MailboxSnapshot, SourceEnvelope},
     filing::{
         planner::{Action, Locator},
-        IntentPatch, LocationState, StageOptions,
+        IntentPatch, LocationState, MoveClaim, StageOptions,
     },
     normalize,
     store::{Store, LATEST},
@@ -83,6 +83,7 @@ ALTER TABLE folders DROP COLUMN drain_until_uid;
 ALTER TABLE pass_heartbeats DROP COLUMN version;
 ALTER TABLE pass_heartbeats DROP COLUMN reason;
 ALTER TABLE pass_heartbeats DROP COLUMN reason_at;
+DROP TABLE read_approvals;
 PRAGMA user_version=5;";
 
 /// One placement per migration case, with its move intents (ids ascend in
@@ -265,7 +266,7 @@ fn a_refile_claim_records_that_it_consumes_the_mark() {
         consumes_eligible: false,
     };
     let refile = s
-        .claim_move_with("work", &action, (9, 1), "b1", NOW, true)
+        .claim_move_with("work", &action, (9, 1), "b1", NOW, MoveClaim::Refile)
         .unwrap()
         .unwrap();
     let intent = s.intent(refile).unwrap().unwrap();
