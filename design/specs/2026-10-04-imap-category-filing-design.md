@@ -14,7 +14,7 @@ mail app. Agents (Claude, Hermes) keep using the CLI; every capability in this
 spec is a CLI command with JSON output.
 
 This spec lifts the first-release "never move mail" boundary of
-[`docs/design.md`](../../design.md) for accounts that explicitly enable filing.
+[`design/history/design.md`](../history/design.md) for accounts that explicitly enable filing.
 Everything else in that design (discovery, classification, overrides, Done,
 read-only fetch, full-fingerprint identity) remains in force.
 
@@ -804,7 +804,7 @@ Error text never includes message bodies, subjects or credentials.
 The first implementation task, before filing logic is built on the engine. It
 needs one throwaway test account per provider, configured in Himalaya by the
 user; no credentials enter this repository. For Gmail, Microsoft 365, iCloud
-and Fastmail or a Dovecot host, record in `docs/verification.md`:
+and Fastmail or a Dovecot host, record in `docs/development/verification.md`:
 
 - `imap raw` output for pipelined `CAPABILITY`/`NAMESPACE`, `SELECT` +
   `UID MOVE` (UIDVALIDITY, COPYUID), `SELECT` + `UID STORE`, and
@@ -824,7 +824,7 @@ and Fastmail or a Dovecot host, record in `docs/verification.md`:
 
 Outcome per provider: go, go with noted differences, or no-go. A no-go blocks
 enabling `live` for that provider until resolved and is documented in the
-guide's [Provider check](../../guide.md#provider-check) section.
+guide's [Provider check](../../docs/guide/provider-check.md) page.
 
 ## Out of scope
 

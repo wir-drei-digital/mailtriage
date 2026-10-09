@@ -1,7 +1,8 @@
 name: Install check
 
 # The install script from main against the real GitHub release, on each
-# platform. Dispatch it once a release is published (see docs/releases.md).
+# platform. Dispatch it once a release is published (see
+# docs/development/releases.md).
 on:
   workflow_dispatch:
 

@@ -8,11 +8,11 @@ mailtriage is a local command-line tool that classifies your email. For each mes
 - Each new message goes to OpenRouter's Decisions API, which returns the three decisions.
 - Messages and decisions are stored in a local SQLite database. `list` and `read` work from it without network access.
 - Filing is `off`, `dry_run` (plans moves and changes nothing) or `live` (creates the folders, moves mail and flags mail that needs action).
-- With the [reply queue](docs/guide.md#reply-queue), mail that needs action stays in the inbox until you answer it; then it is filed, and marked read once you approve it.
+- With the [reply queue](https://wir-drei-digital.github.io/mailtriage/guide/filing#reply-queue), mail that needs action stays in the inbox until you answer it; then it is filed, and marked read once you approve it.
 
 ## Requirements
 
-- [Himalaya](https://github.com/pimalaya/himalaya) with IMAP support, in a version mailtriage is tested with (2.1.0 or 2.2.1). `mailtriage setup` offers to install one for mailtriage when none is found ([Himalaya versions](docs/guide.md#himalaya-versions)).
+- [Himalaya](https://github.com/pimalaya/himalaya) with IMAP support, in a version mailtriage is tested with (2.1.0 or 2.2.1). `mailtriage setup` offers to install one for mailtriage when none is found ([Himalaya versions](https://wir-drei-digital.github.io/mailtriage/guide/himalaya)).
 - An IMAP account. Filing needs a server with the MOVE extension.
 - An [OpenRouter](https://openrouter.ai) API key.
 - macOS or Linux. The background service uses launchd on macOS and systemd on Linux.
@@ -29,7 +29,7 @@ or, with Homebrew:
 brew install wir-drei-digital/tap/mailtriage
 ```
 
-The script installs mailtriage, and on macOS the tray app, into `~/.local/bin` (macOS arm64, Linux amd64 or arm64), then offers `mailtriage setup`; script installs keep themselves up to date. Homebrew installs update with `brew upgrade`. The guide's [Install](docs/guide.md#install) section has the options, building from source and uninstalling.
+The script installs mailtriage, and on macOS the tray app, into `~/.local/bin` (macOS arm64, Linux amd64 or arm64), then offers `mailtriage setup`; script installs keep themselves up to date. Homebrew installs update with `brew upgrade`. The guide's [Install](https://wir-drei-digital.github.io/mailtriage/guide/install) page has the options, building from source and uninstalling.
 
 ## Get started
 
@@ -60,7 +60,7 @@ mailtriage list --account work
 mailtriage setup --yes --himalaya-install --himalaya-account work --key-store env
 ```
 
-`--yes` turns prompts off. Each answer then comes from its flag or its default, and a missing required flag exits 2 and names the flag. `--himalaya-install` installs a tested Himalaya for mailtriage when none is found. With `--key-store env`, set `OPENROUTER_API_KEY` in the environment of the process that runs mailtriage. The [agent guide](docs/hermes.md) covers the other flags, exit codes and health checks.
+`--yes` turns prompts off. Each answer then comes from its flag or its default, and a missing required flag exits 2 and names the flag. `--himalaya-install` installs a tested Himalaya for mailtriage when none is found. With `--key-store env`, set `OPENROUTER_API_KEY` in the environment of the process that runs mailtriage. The [agent guide](https://wir-drei-digital.github.io/mailtriage/agents/) covers the other flags, exit codes and health checks.
 
 ## Everyday commands
 
@@ -73,12 +73,12 @@ mailtriage setup --yes --himalaya-install --himalaya-account work --key-store en
 | `mailtriage correct --account work --id ID --category transactions` | Overrides a decision. |
 | `mailtriage done --account work --id ID` | Marks a message handled. Nothing changes on the server. |
 | `mailtriage filing plan --account work` | Shows what the next pass would move and flag. |
-| `mailtriage filing enable --account work --mode live` | Starts moving mail. Do the [provider check](docs/guide.md#provider-check) first. |
+| `mailtriage filing enable --account work --mode live` | Starts moving mail. Do the [provider check](https://wir-drei-digital.github.io/mailtriage/guide/provider-check) first. |
 | `mailtriage service status --account work` | Shows whether the background service runs, and the last pass. |
 
 Add `--json` to any command for one line of JSON.
 
-A tray app, `mailtriage-tray`, shows each account's state in the menu bar and edits categories; see [Tray](docs/guide.md#tray).
+A tray app, `mailtriage-tray`, shows each account's state in the menu bar and edits categories; see [Tray](https://wir-drei-digital.github.io/mailtriage/guide/tray).
 
 ## Try it offline
 
@@ -92,10 +92,11 @@ mailtriage list --account work --json
 
 ## Documentation
 
-- [Guide](docs/guide.md): setup in detail, manual setup, configuration, the OpenRouter key, the background service, categories, filing and exit codes.
-- [Agent guide](docs/hermes.md): non-interactive setup and safe use from Hermes or another agent.
-- [Service API](docs/service-api.md): the library API and the JSON results of `setup`, `doctor` and `service`.
-- [Verification](docs/verification.md): what has been tested, and the checks to run before `live` filing and on a real machine.
+The documentation is at [wir-drei-digital.github.io/mailtriage](https://wir-drei-digital.github.io/mailtriage/). It follows `main`, so it can describe a feature that is newer than the latest release.
+
+- [Guide](https://wir-drei-digital.github.io/mailtriage/guide/introduction): setup in detail, manual setup, configuration, the provider and its key, the background service, categories, filing and exit codes.
+- [Agents](https://wir-drei-digital.github.io/mailtriage/agents/): non-interactive setup and safe use from Hermes or another agent.
+- [Development](https://wir-drei-digital.github.io/mailtriage/development/): the service API, adding a provider, releases, and what has been verified.
 
 ## License
 

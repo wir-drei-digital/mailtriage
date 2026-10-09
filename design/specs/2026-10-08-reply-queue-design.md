@@ -225,7 +225,7 @@ With live filing:
 - The Hermes digest would see only held mail. Newsletters, system mail and
   finance mail would already be filed, so its counts per category would drop
   out.
-- Infomaniak needs the provider check from docs/verification.md before
+- Infomaniak needs the provider check from docs/development/verification.md before
   `live`.
 
 Decided on 2026-10-08: mailtriage replaces the Hermes job for `michael@`.

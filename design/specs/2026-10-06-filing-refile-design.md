@@ -1,7 +1,7 @@
 # Refiling filed mail after category changes
 
 Date: 2026-10-06
-Status: Implemented (plan: docs/superpowers/plans/2026-10-06-filing-refile.md). Design approved in conversation; written spec revised after three Codex review rounds.
+Status: Implemented (plan: design/plans/2026-10-06-filing-refile.md). Design approved in conversation; written spec revised after three Codex review rounds.
 Builds on: [IMAP category filing](2026-10-04-imap-category-filing-design.md) and [guided setup](2026-10-05-guided-setup-design.md).
 
 ## Goal
@@ -325,7 +325,7 @@ folder cannot gain one. Mail in such a folder is not refiled (preview reason
 ## Docs
 
 `docs/guide.md` (Filing into folders: a "Refiling after category changes" section
-with the workflows above), `docs/hermes.md` (agent usage), `docs/service-api.md`
+with the workflows above), `docs/agents/index.md` (agent usage), `docs/development/service-api.md`
 (command and JSON), and this spec's status.
 
 ## Out of scope

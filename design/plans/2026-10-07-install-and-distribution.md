@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 2021 (stable 1.92), clap 4, serde/serde_json, toml, reqwest blocking (rustls), fs2, flate2/tar, sha2; POSIX `sh` for `install.sh` (dash on Ubuntu, bash as `sh` on macOS); bash and python3 for CI helpers; GitHub Actions; Homebrew. No new crates: `Cargo.toml` and `Cargo.lock` do not change.
 
-**Spec:** `docs/superpowers/specs/2026-10-07-install-and-distribution-design.md`. Read it before every task. Where this plan and the spec disagree, the spec wins, except for the rulings under "Decisions this plan adds". It builds on `docs/superpowers/specs/2026-10-06-auto-update-design.md` (install transaction, cache, restart rule) and `docs/superpowers/specs/2026-10-06-tray-design.md` (tray instances, paths, restart, autostart).
+**Spec:** `design/specs/2026-10-07-install-and-distribution-design.md`. Read it before every task. Where this plan and the spec disagree, the spec wins, except for the rulings under "Decisions this plan adds". It builds on `design/specs/2026-10-06-auto-update-design.md` (install transaction, cache, restart rule) and `design/specs/2026-10-06-tray-design.md` (tray instances, paths, restart, autostart).
 
 ## Execution
 
@@ -53,7 +53,7 @@ Rulings on points the spec leaves open. Each says what it costs if wrong.
 17. **Homebrew launch paths** are computed from the path's shape (`<prefix>/Cellar/mailtriage/<version>/bin/<name>`) and used when `<prefix>/opt/mailtriage/bin/<name>` exists: by `service install` (other installs keep recording `current_exe()` as before), by autostart for the tray and `--mailtriage`, by the tray for its CLI and for starting windows, and by both restart rules, whose re-exec target is always the `opt` path of a keg. The tray crate duplicates the two functions. Cost: duplication.
 18. **`install.sh` details.** A `MAILTRIAGE_INSTALL_URL` that is not `http://127.0.0.1…` or `http://localhost…`, or contains `@`, exits 2 instead of being ignored, so a mistyped mirror never downloads from GitHub silently. Only with that override does `MAILTRIAGE_INSTALL_TTY` replace `/dev/tty` (tests). `--uninstall` skips the tool and platform checks. Environment booleans must be empty, 0 or 1. The truncation test skips the one cut that only drops the trailing newline, which leaves the whole script. Cost: lines.
 19. **Release archives** are packed with `COPYFILE_DISABLE=1`, and the build checks their exact layout, because `install.sh` refuses anything else. `install.sh` is attached to releases but not listed in `SHA256SUMS`. Cost: one CI step.
-20. **Real runs** are `install-check.yml`, dispatched by hand after a release; a schedule would fail until the first release with the script exists. Cost: a manual step, named in `docs/releases.md`.
+20. **Real runs** are `install-check.yml`, dispatched by hand after a release; a schedule would fail until the first release with the script exists. Cost: a manual step, named in `docs/development/releases.md`.
 21. **The weekly check** does nothing more when `himalaya/VERSION` already exists on the remote (no duplicate pull requests). Its `report` job takes the version from the `test` job's output and falls back to asking for the latest release. Cost: none.
 22. **The tap update is a script** (`packaging/homebrew/publish.sh`, bash with a python3 version comparison), so the never-backwards and conflict-retry logic is tested against local bare repositories; `render.sh` stays POSIX `sh`. Cost: one more script.
 23. **The tap's test workflow** skips its steps until `Formula/mailtriage.rb` exists, so the first push of its README and workflow is green. Cost: conditions.
@@ -119,7 +119,7 @@ The single source of tested versions (`src/engine/himalaya-versions.json`, compi
 
 **Files:**
 - Create: `src/engine/himalaya-versions.json`, `src/engine/versions.rs`
-- Modify: `src/engine/mod.rs`, `src/engine/himalaya.rs`, `src/service.rs`, `src/setup.rs`, `README.md`, `docs/guide.md`, `docs/hermes.md`
+- Modify: `src/engine/mod.rs`, `src/engine/himalaya.rs`, `src/service.rs`, `src/setup.rs`, `README.md`, `docs/guide.md`, `docs/agents/index.md`
 - Test: `tests/himalaya_versions.rs` (new)
 
 **Interfaces:**
@@ -1260,7 +1260,7 @@ mailtriage runs Himalaya for every mailbox operation and accepts only the versio
 ## Daily use
 ```
 
-In `docs/hermes.md`, replace:
+In `docs/agents/index.md`, replace:
 
 ```markdown
    | 3 | Himalaya is missing or not v2.1.0, `himalaya account check` failed, the folders could not be listed, a key tool or key command failed, or `launchctl`/`systemctl` failed. | Report the message to the user. It names the command that shows the cause; fixing it needs a person (credentials, Himalaya, the key store). |
@@ -1280,7 +1280,7 @@ Expected: all pass.
 ```bash
 git add README.md \
   docs/guide.md \
-  docs/hermes.md \
+  docs/agents/index.md \
   src/engine/himalaya-versions.json \
   src/engine/himalaya.rs \
   src/engine/mod.rs \
@@ -1301,7 +1301,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 **Files:**
 - Create: `src/engine/targets.rs`
-- Modify: `src/engine/mod.rs`, `src/engine/himalaya.rs`, `src/filing/observe.rs`, `src/filing/store.rs`, `src/engine/fake.rs`, `src/service.rs`, `docs/guide.md`, `docs/service-api.md`
+- Modify: `src/engine/mod.rs`, `src/engine/himalaya.rs`, `src/filing/observe.rs`, `src/filing/store.rs`, `src/engine/fake.rs`, `src/service.rs`, `docs/guide.md`, `docs/development/service-api.md`
 - Test: `tests/effective_target.rs` (new), `tests/read_guard.rs` (new), `tests/adapters.rs`
 
 **Interfaces:**
@@ -2576,7 +2576,7 @@ A watched folder or category folder whose result is another mailbox (with `INBOX
 ## Daily use
 ```
 
-In `docs/service-api.md`, replace:
+In `docs/development/service-api.md`, replace:
 
 ```markdown
 ## Classification without a key
@@ -2602,7 +2602,7 @@ Expected: all pass.
 
 ```bash
 git add docs/guide.md \
-  docs/service-api.md \
+  docs/development/service-api.md \
   src/engine/fake.rs \
   src/engine/himalaya.rs \
   src/engine/mod.rs \
@@ -3580,7 +3580,7 @@ Create `src/distribution/mod.rs`:
 
 ```rust
 //! Installing mailtriage and what it needs (spec:
-//! docs/superpowers/specs/2026-10-07-install-and-distribution-design.md):
+//! design/specs/2026-10-07-install-and-distribution-design.md):
 //! the protected path rule and a private, tested Himalaya.
 pub mod himalaya;
 pub mod protected;
@@ -4137,7 +4137,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 Setup's step 2: when the Himalaya it picked (flag, stored account, or `PATH`) is missing or untested, it says why and offers `Install Himalaya 2.2.1 for mailtriage? [Y/n]`; `--himalaya-install` answers yes, also without prompts; otherwise it fails with the fix. A Himalaya in a Homebrew keg gets the one `brew pin` note. Step 9's `mail` item names the fix for an untested version. The shared test helpers start here.
 
 **Files:**
-- Modify: `src/distribution/himalaya.rs`, `src/setup.rs`, `src/cli.rs`, `README.md`, `docs/guide.md`, `docs/hermes.md`
+- Modify: `src/distribution/himalaya.rs`, `src/setup.rs`, `src/cli.rs`, `README.md`, `docs/guide.md`, `docs/agents/index.md`
 - Test: `tests/install_support/mod.rs` (new), `tests/setup_himalaya.rs` (new)
 
 **Interfaces:**
@@ -4936,7 +4936,7 @@ with:
 ## Daily use
 ```
 
-In `docs/hermes.md`, replace:
+In `docs/agents/index.md`, replace:
 
 ```markdown
    - `--himalaya-account NAME` is required: an account with IMAP in the Himalaya configuration. Add `--himalaya-binary PATH` when `himalaya` is not on the agent's `PATH`, and `--himalaya-config PATH` when the file is not in Himalaya's default location. Setup stores both as absolute paths.
@@ -4948,7 +4948,7 @@ with:
    - `--himalaya-account NAME` is required: an account with IMAP in the Himalaya configuration. Add `--himalaya-install` to install a tested Himalaya for mailtriage when none is found or the one found is untested, `--himalaya-binary PATH` when `himalaya` is not on the agent's `PATH`, and `--himalaya-config PATH` when the file is not in Himalaya's default location. Setup stores both as absolute paths.
 ```
 
-In `docs/hermes.md`, replace:
+In `docs/agents/index.md`, replace:
 
 ```markdown
    | 3 | Himalaya is missing or not a tested version (see [Himalaya versions](guide.md#himalaya-versions)), `himalaya account check` failed, the folders could not be listed, a key tool or key command failed, or `launchctl`/`systemctl` failed. | Report the message to the user. It names the command that shows the cause; fixing it needs a person (credentials, Himalaya, the key store). |
@@ -4968,7 +4968,7 @@ Expected: all pass.
 ```bash
 git add README.md \
   docs/guide.md \
-  docs/hermes.md \
+  docs/agents/index.md \
   src/cli.rs \
   src/distribution/himalaya.rs \
   src/setup.rs \
@@ -4987,7 +4987,7 @@ The Dovecot workflow reads its matrix from the data file and never changes when 
 
 **Files:**
 - Create: `.github/scripts/himalaya_matrix.py`, `scripts/add-himalaya-version.sh`, `.github/workflows/himalaya-compat.yml`
-- Modify: `tests/e2e/run.sh`, `.github/workflows/e2e.yml`, `docs/releases.md`, `docs/verification.md`
+- Modify: `tests/e2e/run.sh`, `.github/workflows/e2e.yml`, `docs/development/releases.md`, `docs/development/verification.md`
 - Test: `tests/himalaya_scripts.rs` (new)
 
 **Interfaces:**
@@ -5715,7 +5715,7 @@ Expected: PASS (4 tests).
 
 - [ ] **Step 5: Document it**
 
-In `docs/releases.md`, replace:
+In `docs/development/releases.md`, replace:
 
 ```markdown
 ## Publish a version
@@ -5768,7 +5768,7 @@ every listed version.
 ## Publish a version
 ````
 
-In `docs/verification.md`, replace:
+In `docs/development/verification.md`, replace:
 
 ```markdown
 `main`, on pull requests and on demand. It uses the real `mailtriage` binary,
@@ -5787,7 +5787,7 @@ pinned by the SHA-256 in the same file) and a `dovecot/dovecot:2.3.21`
 container in two namespace layouts: no prefix with
 ```
 
-In `docs/verification.md`, replace:
+In `docs/development/verification.md`, replace:
 
 ```markdown
 Docker with a running daemon, Python 3, Cargo and a Himalaya v2.1.0 binary.
@@ -5808,8 +5808,8 @@ Expected: all pass.
 git add .github/scripts/himalaya_matrix.py \
   .github/workflows/e2e.yml \
   .github/workflows/himalaya-compat.yml \
-  docs/releases.md \
-  docs/verification.md \
+  docs/development/releases.md \
+  docs/development/verification.md \
   scripts/add-himalaya-version.sh \
   tests/e2e/run.sh \
   tests/himalaya_scripts.rs
@@ -6225,7 +6225,7 @@ In `src/distribution/mod.rs`, replace:
 
 ```rust
 //! Installing mailtriage and what it needs (spec:
-//! docs/superpowers/specs/2026-10-07-install-and-distribution-design.md):
+//! design/specs/2026-10-07-install-and-distribution-design.md):
 //! the protected path rule and a private, tested Himalaya.
 pub mod himalaya;
 pub mod protected;
@@ -6235,7 +6235,7 @@ with:
 
 ```rust
 //! Installing mailtriage and what it needs (spec:
-//! docs/superpowers/specs/2026-10-07-install-and-distribution-design.md):
+//! design/specs/2026-10-07-install-and-distribution-design.md):
 //! the protected path rule and a private, tested Himalaya.
 pub mod brew;
 pub mod himalaya;
@@ -9461,7 +9461,7 @@ In `src/distribution/mod.rs`, replace:
 
 ```rust
 //! Installing mailtriage and what it needs (spec:
-//! docs/superpowers/specs/2026-10-07-install-and-distribution-design.md):
+//! design/specs/2026-10-07-install-and-distribution-design.md):
 //! the protected path rule and a private, tested Himalaya.
 pub mod brew;
 pub mod himalaya;
@@ -9472,7 +9472,7 @@ with:
 
 ```rust
 //! Installing mailtriage and what it needs (spec:
-//! docs/superpowers/specs/2026-10-07-install-and-distribution-design.md):
+//! design/specs/2026-10-07-install-and-distribution-design.md):
 //! the protected path rule, a private tested Himalaya, Homebrew launch
 //! paths, and `self install`.
 pub mod brew;
@@ -10592,7 +10592,7 @@ In `src/distribution/mod.rs`, replace:
 
 ```rust
 //! Installing mailtriage and what it needs (spec:
-//! docs/superpowers/specs/2026-10-07-install-and-distribution-design.md):
+//! design/specs/2026-10-07-install-and-distribution-design.md):
 //! the protected path rule, a private tested Himalaya, Homebrew launch
 //! paths, and `self install`.
 pub mod brew;
@@ -10605,7 +10605,7 @@ with:
 
 ```rust
 //! Installing mailtriage and what it needs (spec:
-//! docs/superpowers/specs/2026-10-07-install-and-distribution-design.md):
+//! design/specs/2026-10-07-install-and-distribution-design.md):
 //! the protected path rule, a private tested Himalaya, Homebrew launch
 //! paths, the tray's login item, and `self install` and `self uninstall`.
 pub mod brew;
@@ -10765,7 +10765,7 @@ The bootstrapper at the repository root: one brace group (truncation-safe), `set
 
 **Files:**
 - Create: `install.sh`, `.github/workflows/install-check.yml`
-- Modify: `.github/workflows/ci.yml`, `.github/workflows/build.yml`, `.github/workflows/release.yml`, `README.md`, `docs/guide.md`, `docs/hermes.md`, `docs/releases.md`
+- Modify: `.github/workflows/ci.yml`, `.github/workflows/build.yml`, `.github/workflows/release.yml`, `README.md`, `docs/guide.md`, `docs/agents/index.md`, `docs/development/releases.md`
 - Test: `tests/install_script.rs` (new)
 
 **Interfaces:**
@@ -11772,7 +11772,7 @@ Create `.github/workflows/install-check.yml`:
 name: Install check
 
 # The install script from main against the real GitHub release, on each
-# platform. Dispatch it once a release is published (see docs/releases.md).
+# platform. Dispatch it once a release is published (see docs/development/releases.md).
 on:
   workflow_dispatch:
 
@@ -11966,7 +11966,7 @@ mailtriage self uninstall [--dir DIR] [--yes] [--json]
 The script's `--uninstall` runs `DIR/mailtriage self uninstall --dir DIR`, with `--yes` when given, and downloads nothing; it asks through your terminal like the install does. `self uninstall` removes the installation in `DIR`, by default the directory of the `mailtriage` that runs it, and nothing else:
 ````
 
-In `docs/hermes.md`, replace:
+In `docs/agents/index.md`, replace:
 
 ```markdown
 1. Install a release binary on the same host as the state directory (see [Install](guide.md#install)). The examples use `/opt/mailtriage/mailtriage`.
@@ -11984,7 +11984,7 @@ with:
    It installs into `~/.local/bin` (`--dir DIR` for another directory) and prints the [`self install`](guide.md#mailtriage-self-install) result; exit 0 means done, 1 a failed download or check, 2 invalid options, an unsupported platform or a refused downgrade. A host where provisioning owns the binary can unpack a release archive itself instead (see [Install](guide.md#install)). The examples use `/opt/mailtriage/mailtriage`.
 ````
 
-In `docs/hermes.md`, replace:
+In `docs/agents/index.md`, replace:
 
 ```markdown
    /opt/mailtriage/mailtriage setup --yes --himalaya-account work --key-store pass --key-stored --json
@@ -11996,7 +11996,7 @@ with:
    /opt/mailtriage/mailtriage setup --yes --himalaya-install --himalaya-account work --key-store pass --key-stored --json
 ```
 
-In `docs/releases.md`, replace:
+In `docs/development/releases.md`, replace:
 
 ```markdown
 - A `.sha256` file for each archive, and a combined `SHA256SUMS` that lists
@@ -12033,8 +12033,8 @@ git add .github/workflows/build.yml \
   .github/workflows/release.yml \
   README.md \
   docs/guide.md \
-  docs/hermes.md \
-  docs/releases.md \
+  docs/agents/index.md \
+  docs/development/releases.md \
   install.sh \
   tests/install_script.rs
 git commit -m "Add the install script and attach it to releases
@@ -12050,7 +12050,7 @@ The formula template (`packaging/homebrew/mailtriage.rb.in`, placeholders for th
 
 **Files:**
 - Create: `packaging/homebrew/mailtriage.rb.in`, `packaging/homebrew/render.sh`, `packaging/homebrew/publish.sh`, `packaging/homebrew/tap/README.md`, `packaging/homebrew/tap/.github/workflows/test.yml`
-- Modify: `.github/workflows/release.yml`, `.github/workflows/ci.yml`, `README.md`, `docs/guide.md`, `docs/releases.md`, `docs/verification.md`
+- Modify: `.github/workflows/release.yml`, `.github/workflows/ci.yml`, `README.md`, `docs/guide.md`, `docs/development/releases.md`, `docs/development/verification.md`
 - Test: `tests/homebrew.rs` (new)
 
 **Interfaces:**
@@ -12762,7 +12762,7 @@ The formula in [wir-drei-digital/homebrew-tap](https://github.com/wir-drei-digit
 - To uninstall, run `mailtriage service uninstall --account NAME` for each account, then `brew uninstall mailtriage`; `mailtriage self uninstall` refuses a Homebrew install.
 ````
 
-In `docs/releases.md`, replace:
+In `docs/development/releases.md`, replace:
 
 ```markdown
 No additional secret is required: only the publish job receives
@@ -12777,7 +12777,7 @@ Publishing needs no additional secret: only the publish job receives
 `HOMEBREW_TAP_TOKEN` (see [Homebrew tap](#homebrew-tap)). Model API keys and mailbox
 ```
 
-In `docs/releases.md`, replace:
+In `docs/development/releases.md`, replace:
 
 ```markdown
 ## Retry a failed release
@@ -12819,7 +12819,7 @@ on macOS and runs `ruby -c` and `brew style` on it.
 ## Retry a failed release
 ```
 
-In `docs/verification.md`, replace:
+In `docs/development/verification.md`, replace:
 
 ```markdown
 | Step 9: `update` exits 0 with `update.tray.action` `skipped` and an `error` starting `mailtriage-tray does not run here:` that names the missing library; nothing is downloaded for the tray: no `mailtriage-tray.previous`, and its `sha256sum` is unchanged | | | |
@@ -12864,8 +12864,8 @@ git add .github/workflows/ci.yml \
   .github/workflows/release.yml \
   README.md \
   docs/guide.md \
-  docs/releases.md \
-  docs/verification.md \
+  docs/development/releases.md \
+  docs/development/verification.md \
   packaging/homebrew/mailtriage.rb.in \
   packaging/homebrew/publish.sh \
   packaging/homebrew/render.sh \
@@ -12883,9 +12883,9 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 The automated tests never reach GitHub or Homebrew, never run a real release or a real Himalaya, and run `install.sh` only against a loopback server. After the first release with this feature:
 
-1. In GitHub, set Settings → Actions → General → Workflow permissions → "Allow GitHub Actions to create and approve pull requests", and add the secret `HOMEBREW_TAP_TOKEN` (`docs/releases.md`).
+1. In GitHub, set Settings → Actions → General → Workflow permissions → "Allow GitHub Actions to create and approve pull requests", and add the secret `HOMEBREW_TAP_TOKEN` (`docs/development/releases.md`).
 2. The main session pushes `packaging/homebrew/tap/` to `wir-drei-digital/homebrew-tap`, with the user's go-ahead.
-3. Dispatch **Install check** and run "Install paths on a real machine" from `docs/verification.md` on macOS arm64 and Linux.
+3. Dispatch **Install check** and run "Install paths on a real machine" from `docs/development/verification.md` on macOS arm64 and Linux.
 
 ## Spec coverage
 

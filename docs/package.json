@@ -1,0 +1,12 @@
+{
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --bun vitepress dev",
+    "build": "bun --bun vitepress build",
+    "preview": "bun --bun vitepress preview"
+  },
+  "devDependencies": {
+    "vitepress": "1.6.4"
+  }
+}

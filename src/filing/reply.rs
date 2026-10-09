@@ -1,4 +1,4 @@
-//! Reply queue (`docs/superpowers/specs/2026-10-08-reply-queue-design.md`):
+//! Reply queue (`design/specs/2026-10-08-reply-queue-design.md`):
 //! held messages stay in their source folder until the server reports
 //! `\Answered` or the user marks them done, then move to their category
 //! folder unread and enter the read approval list. Flags are stored once at

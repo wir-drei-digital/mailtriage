@@ -1,5 +1,5 @@
 //! Refiling filed mail after category changes (refile spec,
-//! `docs/superpowers/specs/2026-10-06-filing-refile-design.md`).
+//! `design/specs/2026-10-06-filing-refile-design.md`).
 pub mod command;
 pub mod intents;
 pub mod retired;

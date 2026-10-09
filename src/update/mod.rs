@@ -1,5 +1,5 @@
 //! Automatic updates from GitHub Releases (spec:
-//! docs/superpowers/specs/2026-10-06-auto-update-design.md): release
+//! design/specs/2026-10-06-auto-update-design.md): release
 //! information, installing a release, restarting `watch` onto a replaced
 //! binary, and reporting what is installed.
 pub mod archive;

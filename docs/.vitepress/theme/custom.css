@@ -1,0 +1,7 @@
+/* The default theme with the wirdrei.digital accent, #E8541A. */
+:root {
+  --vp-c-brand-1: #e8541a;
+  --vp-c-brand-2: #d94a12;
+  --vp-c-brand-3: #c2410c;
+  --vp-c-brand-soft: rgba(232, 84, 26, 0.14);
+}

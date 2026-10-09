@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 2021 (stable), rusqlite (bundled SQLite), serde/serde_json, toml, sha2, chrono, clap 4, Himalaya v2.1.0 CLI as a subprocess. No new crate dependencies.
 
-**Spec:** `docs/superpowers/specs/2026-10-04-imap-category-filing-design.md`. Read it before every task; section names in this plan refer to it. Where this plan and the spec disagree, the spec wins, except for the one deliberate change below.
+**Spec:** `design/specs/2026-10-04-imap-category-filing-design.md`. Read it before every task; section names in this plan refer to it. Where this plan and the spec disagree, the spec wins, except for the one deliberate change below.
 
 **Deliberate deviation from the spec:** the spec puts the live provider check first. It needs the user's own test accounts, so it cannot run inside autonomous execution. This plan builds and verifies against `FakeEngine` and a real Dovecot server (Task 10), and leaves the live provider check as a human gate before `live` mode is used on a real mailbox (final section).
 
@@ -74,7 +74,7 @@ These are the inputs most likely to hurt a real user that no task would otherwis
 | `tests/filing_cli.rs` | create | Task 9 |
 | `tests/e2e_dovecot.rs`, `tests/e2e/` | create | Task 10 |
 | `.github/workflows/e2e.yml` | create | Task 10 |
-| `README.md`, `docs/hermes.md`, `docs/design.md`, `docs/verification.md` | modify | Tasks 9 and 10 |
+| `README.md`, `docs/agents/index.md`, `design/history/design.md`, `docs/development/verification.md` | modify | Tasks 9 and 10 |
 
 ---
 
@@ -3179,7 +3179,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 Exposes everything to humans and agents through the CLI with JSON output, extends `doctor`, `categories apply` and `sync` reporting, and documents the feature.
 
 **Files:**
-- Modify: `src/service.rs`, `src/cli.rs`, `src/filing/observe.rs` (offline map), `src/filing/mod.rs` (`FilingSummary.capabilities`), `README.md`, `docs/hermes.md`, `docs/design.md`
+- Modify: `src/service.rs`, `src/cli.rs`, `src/filing/observe.rs` (offline map), `src/filing/mod.rs` (`FilingSummary.capabilities`), `README.md`, `docs/agents/index.md`, `design/history/design.md`
 - Test: `tests/filing_cli.rs`
 
 **Interfaces:**
@@ -3243,8 +3243,8 @@ Behaviour:
     - Map `dry-run` to `FilingMode::DryRun`. Errors go through `service_error` like every other command.
 12. **Docs:**
     - `README.md` gains a "Filing into folders" section: what filing does; the three modes and the recommended rollout (`enable --mode dry-run` → `filing plan` for a few days → `--mode live` → `backfill`); flags; correcting by moving mail in any client; pins; archive means done; `filing status`/`log`; the safety rules (never deletes, never expunges, never removes flags, never changes read state); the provider check gate; and exit codes.
-    - `docs/hermes.md` gains agent usage: read `filing status` before acting, use `filing plan` to preview, `correct --category` moves mail, `filing pin` keeps a message in the inbox, never loop on `filing retry`.
-    - `docs/design.md` gains a dated note under "Purpose and first-release boundary" pointing to the filing spec for accounts that enable it.
+    - `docs/agents/index.md` gains agent usage: read `filing status` before acting, use `filing plan` to preview, `correct --category` moves mail, `filing pin` keeps a message in the inbox, never loop on `filing retry`.
+    - `design/history/design.md` gains a dated note under "Purpose and first-release boundary" pointing to the filing spec for accounts that enable it.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -3403,7 +3403,7 @@ Proves the whole flow against a real IMAP server with the real Himalaya v2.1.0 b
 
 **Files:**
 - Create: `tests/e2e/dovecot-flat.conf`, `tests/e2e/dovecot-prefix.conf`, `tests/e2e/run.sh`, `tests/e2e/imap_client.py`, `tests/e2e/himalaya.toml.in`, `tests/e2e_dovecot.rs`, `.github/workflows/e2e.yml`
-- Modify: `docs/verification.md`
+- Modify: `docs/development/verification.md`
 
 **Interfaces:**
 - Consumes: the built `mailtriage` binary (`CARGO_BIN_EXE_mailtriage`), a Himalaya v2.1.0 binary, Docker.
@@ -3596,7 +3596,7 @@ Run: `docker info >/dev/null 2>&1 && MT_E2E_HIMALAYA=$(which himalaya) bash test
 
 On macOS the local `himalaya` is v2.1.0 from Homebrew. Expected: PASS for both layouts. If the Docker daemon is not running, record "not run locally: Docker daemon unavailable" in the task report; CI covers it on the next push. Also run `cargo test --locked` to confirm the ignored test does not run by default.
 
-- [ ] **Step 5: Add the provider checklist to `docs/verification.md`**
+- [ ] **Step 5: Add the provider checklist to `docs/development/verification.md`**
 
 Append a section "Live provider check (required before `live` on a real mailbox)". It has one table per provider (Gmail, Microsoft 365, iCloud, Fastmail or Dovecot host), with rows copied from the spec's "Live provider check" bullets and columns `Result`, `Evidence`, `Date`. Below the tables, add the go / go with differences / no-go outcome line. State that the Dovecot e2e job covers the protocol contract but not provider behaviour.
 
@@ -3616,7 +3616,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 Not executed by agents. Before setting `filing.mode` to `live` on a real mailbox, the user:
 
 1. Creates one throwaway account per provider (Gmail, Microsoft 365, iCloud, Fastmail or a Dovecot host) and configures each in Himalaya.
-2. Works through the checklist added to `docs/verification.md` in Task 10, filling in results and evidence.
+2. Works through the checklist added to `docs/development/verification.md` in Task 10, filling in results and evidence.
 3. Records go / go with differences / no-go per provider, and adds any no-go to the README.
 
 Until then, `dry_run` is safe on any mailbox: it never writes.

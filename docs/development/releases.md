@@ -11,7 +11,7 @@ versioned archive with a SHA-256 checksum as a workflow artifact.
 
 Installed copies with `updates: auto`, the default, install every published
 stable release within about a day, and their background services switch to it
-between passes (see [Updates](guide.md#updates)). Before you push a `vX.Y.Z`
+between passes (see [Updates](../guide/updates.md)). Before you push a `vX.Y.Z`
 tag:
 
 - Try the build on one machine first with a release candidate tag,
@@ -24,7 +24,7 @@ tag:
   time. A release whose migration cannot follow this rule must not be
   published as a stable release.
 - A bad release is fixed by a newer one; there is no rollback command (see
-  [Rolling back by hand](guide.md#rolling-back-by-hand)).
+  [Rolling back by hand](../guide/updates.md#rolling-back-by-hand)).
 
 ## Tested Himalaya versions
 
@@ -52,8 +52,9 @@ Monday and on demand, in three jobs:
 
 Before merging such a pull request, read the new version's `--mailbox`
 resolver in Himalaya's source for role changes: the script copies `roles` from
-the previous version. Also update the places in `README.md` and
-`docs/guide.md` that name the tested versions or the newest one. Push these
+the previous version. Also update the places in `README.md` and the guide
+pages (`docs/guide/himalaya.md`, `setup.md`, `manual-setup.md` and
+`configuration.md`) that name the tested versions or the newest one. Push these
 edits to the pull request's branch, never to `main` directly. The tests derive
 the tested versions from the data file, so a valid new entry needs no test
 change. The workflow needs one repository setting, made once:
@@ -75,8 +76,9 @@ version's `roles`. Then:
 1. Check the roles against the new version's `--mailbox` resolver; correct
    `roles` and the tests that pin them (`src/engine/versions.rs`,
    `src/engine/targets.rs`) if it changed.
-2. Update the places in `README.md` and `docs/guide.md` that name the tested
-   versions or the newest one.
+2. Update the places in `README.md` and the guide pages
+   (`docs/guide/himalaya.md`, `setup.md`, `manual-setup.md` and
+   `configuration.md`) that name the tested versions or the newest one.
 3. Push the branch and open a pull request; never push to `main` directly.
    The pull request runs CI and `e2e.yml`, which runs the suite for every
    listed version.
@@ -130,7 +132,7 @@ Linux amd64, Linux arm64 and macOS with `--yes --no-setup`, then
 The `mailtriage` archives contain the executable, README and license, and stay
 free of GUI libraries. The `mailtriage-tray` archives contain `mailtriage-tray`
 and the license. `mailtriage update` installs a tray archive over a
-`mailtriage-tray` next to the CLI (see [Updates](guide.md#updates)). Linux
+`mailtriage-tray` next to the CLI (see [Updates](../guide/updates.md)). Linux
 builds use Ubuntu 24.04's GNU libc environment; the macOS executables are
 unsigned and not notarized. Validate the Linux build in the target Hermes
 image before rollout.

@@ -176,7 +176,7 @@ one, such as `typesafe/jev-1.13`; changing `model` reclassifies, as today.
 - Guide: the provider section and config table: the two kinds, any Decisions
   model for `openrouter`, the default `typesafe/jev-latest` and what `latest`
   means; the `--model` line in setup.
-- `docs/provider-contract.md`, `docs/service-api.md` and `docs/verification.md`:
+- `docs/development/providers.md`, `docs/development/service-api.md` and `docs/development/verification.md`:
   `jev-1.13` as the default becomes `jev-latest`; the contract notes say that
   any Decisions model is accepted.
 

@@ -289,7 +289,7 @@ the state database and works without any service.
 - README setup leads with `mailtriage setup`; the manual steps remain as a
   reference (in `docs/guide.md`, which holds the full reference; the README is
   short).
-- `docs/hermes.md`: non-interactive setup for agents (`--yes`, flags,
+- `docs/agents/index.md`: non-interactive setup for agents (`--yes`, flags,
   `--key-stored` or `--key-env`), `service status` for health.
 
 ## Out of scope

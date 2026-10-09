@@ -40,6 +40,9 @@ const STEP_ACCOUNT: &str = "step 3 (account)";
 const STEP_CLASSIFIER: &str = "step 5 (classifier)";
 const STEP_KEY: &str = "step 5 (key)";
 const STEP_SERVICE: &str = "step 10 (service)";
+/// The docs page that records which mail providers passed the live check.
+pub const PROVIDER_CHECK_URL: &str =
+    "https://wir-drei-digital.github.io/mailtriage/guide/provider-check";
 
 /// Answers given as flags. `None` (or empty) means: ask, or without
 /// prompts take the default, or fail naming the flag.
@@ -1481,7 +1484,7 @@ fn next_steps(
             mailtriage_line(shown, &["filing", "plan"], &account),
         ));
         p.say(&format!(
-            "Go live only after the provider checklist (docs/verification.md): `{}`.",
+            "Go live only after the provider check ({PROVIDER_CHECK_URL}): `{}`.",
             mailtriage_line(
                 shown,
                 &["filing", "enable"],

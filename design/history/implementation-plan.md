@@ -62,7 +62,7 @@ Errors use `anyhow::Result`; CLI maps error categories into stable exit codes.
   versioned serde_json::Value response from each public service method. CLI
   arguments live in cli.rs; main.rs stays minimal.
 
-Specific service signatures will be published in `docs/service-api.md` before
+Specific service signatures will be published in `docs/development/service-api.md` before
 the CLI agent starts. A versioned JSON config avoids adding a second parser;
 strict validation applies to meaningful known fields with explicit errors.
 

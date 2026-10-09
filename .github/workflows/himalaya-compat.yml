@@ -162,7 +162,7 @@ jobs:
           This adds $VERSION to \`src/engine/himalaya-versions.json\` with the digests from its release and \`roles\` copied from the previous version. The tests derive the tested versions from that file, so they need no change for the new entry. Before merging:
 
           - Read this version's \`--mailbox\` resolver in Himalaya's source (\`Account::resolve_mailbox\`, \`MailboxArg\` and the IMAP backend's mailbox parsing) for role changes; correct \`roles\` and the tests that pin it (\`src/engine/versions.rs\`, \`src/engine/targets.rs\`) if it changed.
-          - Update the places in \`README.md\` and \`docs/guide.md\` that name the tested versions or the newest one (search for the previous newest version).
+          - Update the places in \`README.md\` and the guide pages \`docs/guide/himalaya.md\`, \`setup.md\`, \`manual-setup.md\` and \`configuration.md\` that name the tested versions or the newest one (search for the previous newest version).
           - Push these edits to this branch, \`$branch\`, and merge through this pull request; never push to \`main\` directly.
 
           CI and the end-to-end matrix were started on this branch.

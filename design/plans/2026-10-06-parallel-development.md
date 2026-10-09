@@ -34,7 +34,7 @@ conflicts there.
      the tray's new service control in its own functions or module, not interleaved
      with existing ones.
    - Edits to shared files (`src/cli.rs`, `src/service.rs`, `src/system_service.rs`,
-     `src/store.rs`, `docs/guide.md`, `docs/hermes.md`, `README.md`,
+     `src/store.rs`, `docs/guide.md`, `docs/agents/index.md`, `README.md`,
      `.github/workflows/*`, `Cargo.toml`) stay small and additive.
    - Docs get new sections rather than rewrites of existing ones.
 4. **Cross-feature outputs come from fixtures until Phase B.**

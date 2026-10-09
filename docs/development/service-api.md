@@ -1,8 +1,8 @@
 # Service API for CLI implementation
 
 Use `mailtriage::service::{Service,ListOptions}` from the binary (src/cli.rs can
-be declared in main.rs). All service methods return anyhow::Result<Value>.
-Construct once per command: `Service::open(&Path)` -> Result<Self>. State path
+be declared in main.rs). All service methods return `anyhow::Result<Value>`.
+Construct once per command: `Service::open(&Path) -> Result<Self>`. State path
 and relative Himalaya config path resolve against app config file's parent.
 
 ```rust
@@ -50,8 +50,8 @@ returns successful Value with `partial:true`; CLI exits4 after printing.
 Never print raw debug chain from provider/transport errors (possible secrets).
 
 Develop CLI against these signatures. Do not edit lib.rs/service.rs/store.rs;
-coordinator provides them. Own src/main.rs src/cli.rs README.md examples/, docs/
-hermes.md, .github/workflows/ci.yml and tests/cli.rs. Offline tests run explicit
+coordinator provides them. Own src/main.rs src/cli.rs README.md examples/,
+docs/agents/index.md, .github/workflows/ci.yml and tests/cli.rs. Offline tests run explicit
 fake provider using temporary config. release.yml optional with artifacts.
 
 ## Config resolution
@@ -230,7 +230,7 @@ The CLI wraps each in `{"schema_version":1,"service":{...}}`.
 `mailtriage update [--check]`; it opens no config. Errors are `ServiceError`s:
 3 for network, release, archive, smoke-test and replaceability problems of the
 CLI, 5 when the installation lock stayed held for 60 s. The JSON results are
-in the [guide](guide.md#updates). The code is in `src/update/`: `github` (URL
+in the [guide](../guide/updates.md). The code is in `src/update/`: `github` (URL
 rules, release list, downloads), `release` (candidate, archive names,
 `SHA256SUMS`), `cache` (`update.json`), `schedule`, `check` (one refresh,
 and `due`: when `watch` refreshes), `platform` (file identity,
@@ -466,8 +466,8 @@ pub fn stop(ctx: &Context, service: &Service, config_path: &Path, account: &str,
 - `start`, launchd: `launchctl enable gui/<uid>/<label>`, then nothing more
   when the job was loaded and running (`already_running`), `kickstart
   gui/<uid>/<label>` when it was loaded but not running, else `bootstrap
-  gui/<uid> <plist>` (`started`). systemd: `systemctl --user enable --now
-  <unit>`; `already_running` when the unit was running, else `started`. After
+  gui/<uid> <plist>` (`started`). systemd: `systemctl --user enable
+  --now <unit>`; `already_running` when the unit was running, else `started`. After
   `started` it polls every 200 ms for up to `wait` (the CLI passes
   `START_WAIT`) until `launchctl print` shows a PID or `systemctl --user
   is-active` prints `active`; otherwise exit 3, `service did not start; see
@@ -558,7 +558,7 @@ latest schema `LATEST` and a newer one `LATEST + 1`.
 
 `filing.reply_queue` (default `false`, written only when true) holds new mail
 that needs action in its source folder until it is answered or marked done
-(spec: `docs/superpowers/specs/2026-10-08-reply-queue-design.md`). A config
+(spec: `design/specs/2026-10-08-reply-queue-design.md`). A config
 that turns it on is written as `schema_version` 4; every other config stays
 3. `config::SCHEMA_VERSION` (4) is the newest schema a binary reads;
 `config::written_schema` is the one a write produces.
@@ -616,4 +616,3 @@ set. Additive, so a process of the previous release keeps inserting rows
   kept approved); anything else leaves the rows for the next pass
   (`read_incomplete`); an error keeps the attempt for recovery, which
   reports another epoch as a suspected race (`"error":"epoch_race_suspected"`).
-

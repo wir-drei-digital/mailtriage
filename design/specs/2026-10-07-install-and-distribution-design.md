@@ -186,7 +186,7 @@ the literal name. mailtriage passes `--mailbox` only to `message read`.
      `Himalaya VERSION fails the end-to-end suite` with the failing step's log tail.
   - The candidate binary only ever runs in the read-only job.
   - Actions must be allowed to create pull requests, a one-time repository setting
-    that `docs/releases.md` names.
+    that `docs/development/releases.md` names.
 
 ## `install.sh`: the bootstrapper
 
@@ -508,13 +508,13 @@ own concurrency group `homebrew-tap` (queued, never cancelled):
   - a "Himalaya versions" section: the tested list, `himalaya install`,
     `brew pin himalaya`, and what `doctor` says;
   - rollback stays as documented, and the script never downgrades.
-- **`docs/releases.md`:**
+- **`docs/development/releases.md`:**
   - the tap job and `HOMEBREW_TAP_TOKEN`;
   - the weekly Himalaya check and its repository setting;
   - adding a version by hand with `scripts/add-himalaya-version.sh`.
-- **`docs/hermes.md`:** the non-interactive line
+- **`docs/agents/index.md`:** the non-interactive line
   `curl … | sh -s -- --yes --no-tray --no-setup`, then `setup --yes --himalaya-install …`.
-- **`docs/verification.md`:** a human check of both install paths, and of
+- **`docs/development/verification.md`:** a human check of both install paths, and of
   `brew upgrade` with a running service, on a real Mac and a real Linux host after
   the first release.
 

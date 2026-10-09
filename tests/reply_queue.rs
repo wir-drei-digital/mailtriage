@@ -1,4 +1,4 @@
-//! Reply queue spec (`docs/superpowers/specs/2026-10-08-reply-queue-design.md`)
+//! Reply queue spec (`design/specs/2026-10-08-reply-queue-design.md`)
 //! through `sync` passes against the fake engine.
 mod common;
 use common::{mail, Harness};

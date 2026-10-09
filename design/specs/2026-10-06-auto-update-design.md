@@ -2,7 +2,7 @@
 
 Date: 2026-10-06
 Status: Design approved in conversation; written spec revised after three Codex review rounds.
-Builds on: [guided setup](2026-10-05-guided-setup-design.md) (background service, `doctor`, heartbeats), [refiling](2026-10-06-filing-refile-design.md) (schema v6) and [releases](../../releases.md).
+Builds on: [guided setup](2026-10-05-guided-setup-design.md) (background service, `doctor`, heartbeats), [refiling](2026-10-06-filing-refile-design.md) (schema v6) and [releases](../../docs/development/releases.md).
 Extended by: [tray app](2026-10-06-tray-design.md) (tray archive, exit code 4).
 Implementation order: after refile; this spec's migration (v7) needs refile's v6.
 
@@ -487,7 +487,7 @@ update has committed.
 ## Releases and rollout
 
 - **Every published stable release is a deployment.** Copies in `auto` install it
-  within about a day. `docs/releases.md` says so. It recommends a `vX.Y.Z-rc.N` tag (a
+  within about a day. `docs/development/releases.md` says so. It recommends a `vX.Y.Z-rc.N` tag (a
   prerelease, never installed automatically) to try a build on one machine first, and
   drops the note about the repository being private.
 - **Release workflow changes.**

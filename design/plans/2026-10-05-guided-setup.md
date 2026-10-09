@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 2021 (stable, 1.92 locally), clap 4, serde/serde_json, toml, rusqlite. Himalaya v2.1.0 CLI as a subprocess. No new crate dependencies.
 
-**Spec:** `docs/superpowers/specs/2026-10-05-guided-setup-design.md`. Read it before every task. Where this plan and the spec disagree, the spec wins, except for the rulings listed under "Decisions this plan adds".
+**Spec:** `design/specs/2026-10-05-guided-setup-design.md`. Read it before every task. Where this plan and the spec disagree, the spec wins, except for the rulings listed under "Decisions this plan adds".
 
 ## Verified Himalaya v2.1.0 behaviour
 
@@ -120,7 +120,7 @@ Inputs the spec implies but no task's own tests would otherwise exercise, most l
 | `tests/setup.rs` (new) | 3, 4, 5 | Setup through the binary with a fake Himalaya and fake key tools on `PATH` |
 | `tests/system_service.rs` (new) | 5 | Pure text, both managers against fake tools, CLI `service` commands |
 | `tests/heartbeat.rs` (new) | 5 | Heartbeat per pass |
-| `README.md`, `docs/guide.md` (new), `docs/hermes.md`, `docs/service-api.md`, `docs/verification.md`, the spec | 6 | Short README, full guide, agent setup, references |
+| `README.md`, `docs/guide.md` (new), `docs/agents/index.md`, `docs/development/service-api.md`, `docs/development/verification.md`, the spec | 6 | Short README, full guide, agent setup, references |
 
 ---
 
@@ -2897,7 +2897,7 @@ fn next_steps(p: &mut Prompter, name: &str, mode: FilingMode) {
             "Filing is a dry run: `mailtriage filing plan --account {name}` shows what would move."
         ));
         p.say(&format!(
-            "Go live only after the provider checklist (docs/verification.md): `mailtriage filing enable --account {name} --mode live`."
+            "Go live only after the provider checklist (docs/development/verification.md): `mailtriage filing enable --account {name} --mode live`."
         ));
     }
 }
@@ -4734,7 +4734,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 6: Documentation
 
 **Files:**
-- Modify: `README.md` (rewrite, short), `docs/hermes.md`, `docs/service-api.md`, `docs/verification.md`, `docs/superpowers/specs/2026-10-05-guided-setup-design.md`
+- Modify: `README.md` (rewrite, short), `docs/agents/index.md`, `docs/development/service-api.md`, `docs/development/verification.md`, `design/specs/2026-10-05-guided-setup-design.md`
 - Create: `docs/guide.md`
 
 **Interfaces:**
@@ -4774,31 +4774,31 @@ Sections, in order:
 3. Requirements: Himalaya v2.1.0 with IMAP; an OpenRouter API key; macOS or Linux for the background service.
 4. Install: the existing install instructions, shortened.
 5. Get started: `mailtriage setup`, in 5–8 lines covering what it asks, that the key goes into the Keychain, Secret Service, `pass`, a command or an environment variable, and that it can install the background service. Then `mailtriage sync --account NAME` and `mailtriage list --account NAME`.
-6. For agents: one `mailtriage setup --yes --himalaya-account work --key-store env` example, and a link to `docs/hermes.md`.
+6. For agents: one `mailtriage setup --yes --himalaya-account work --key-store env` example, and a link to `docs/agents/index.md`.
 7. Everyday commands: a table with one line each for:
    - `sync`, `watch`, `list`, `read`, `correct`, `done`;
    - `filing plan`, `filing enable`;
    - `service status`.
 8. Try it offline: `init` with the fake provider, 3–4 lines.
-9. Documentation: links to `docs/guide.md`, `docs/hermes.md`, `docs/service-api.md` and `docs/verification.md`.
+9. Documentation: links to `docs/guide.md`, `docs/agents/index.md`, `docs/development/service-api.md` and `docs/development/verification.md`.
 10. License.
 
 Style: short, precise sentences; no marketing; every command copy-pasteable.
 
 - [ ] **Step 3: Agent and reference docs**
 
-- `docs/hermes.md` "Host setup":
+- `docs/agents/index.md` "Host setup":
   - non-interactive setup (`--yes`, the required `--himalaya-account`, `--key-store` with `--key-stored`, `--key-command` or `--key-env`, `--service install`);
   - exit codes 2, 3 and 5 with the fix for each;
   - `service status --json` and `last_pass` for health checks;
   - that `--config` is optional now.
-- `docs/service-api.md`:
+- `docs/development/service-api.md`:
   - config resolution;
   - the `setup` result object;
   - doctor's `provider.key_source`/`key_error`;
   - the `service` result objects;
   - `pass_heartbeats` (schema v5).
-- `docs/verification.md`: a section "Guided setup on a real machine (human check)", covering:
+- `docs/development/verification.md`: a section "Guided setup on a real machine (human check)", covering:
   - macOS: Keychain store with the real `security`, the first Keychain access dialog, and `service install` with real `launchctl`, then `service status`;
   - Linux: `secret-tool`, the systemd user unit, and `loginctl enable-linger`.
 - The spec: set Status to "Implemented" and replace its two "confirmed in the plan's first task" phrases with the verified facts from this plan's "Verified Himalaya v2.1.0 behaviour".
@@ -4812,7 +4812,7 @@ cargo build && for c in setup "service install" "service status" "service uninst
 ```
 
 ```bash
-git add README.md docs/guide.md docs/hermes.md docs/service-api.md docs/verification.md docs/superpowers/specs/2026-10-05-guided-setup-design.md
+git add README.md docs/guide.md docs/agents/index.md docs/development/service-api.md docs/development/verification.md design/specs/2026-10-05-guided-setup-design.md
 git commit -m "Shorten the README and document setup, key command and service
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
@@ -4822,4 +4822,4 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ## Human gate
 
-Before relying on the background service and tool-backed key stores on a real machine, a person runs the "Guided setup on a real machine" checks from `docs/verification.md` (Task 6). Automated tests use fake `security`, `secret-tool`, `pass`, `launchctl` and `systemctl`.
+Before relying on the background service and tool-backed key stores on a real machine, a person runs the "Guided setup on a real machine" checks from `docs/development/verification.md` (Task 6). Automated tests use fake `security`, `secret-tool`, `pass`, `launchctl` and `systemctl`.

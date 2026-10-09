@@ -1,4 +1,4 @@
-# Hermes integration
+# Agent guide
 
 Hermes, or any other agent, calls `mailtriage` as an ordinary process. It needs no SDK and no direct database access. Pass `--json` in every call. `--config` is optional; see [Config location](#config-location).
 
@@ -10,7 +10,7 @@ Hermes, or any other agent, calls `mailtriage` as an ordinary process. It needs 
    curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/wir-drei-digital/mailtriage/main/install.sh | sh -s -- --yes --no-tray --no-setup --dir /opt/mailtriage
    ```
 
-   `/opt/mailtriage` must exist and belong to the user that runs mailtriage; create it once as root, for example with `install -d -o USER /opt/mailtriage`. Without `--dir` the script installs into `~/.local/bin`. It prints the [`self install`](guide.md#mailtriage-self-install) result; exit 0 means done, 1 a failed download or check, 2 invalid options, an unsupported platform or a refused downgrade, 3 an unsafe or foreign directory (stderr says `mailtriage: unsafe_permissions: …`, for example when `/opt/mailtriage` does not belong to the user) or a failed install, 5 another install or update holds the directory's installation lock (try again later). The examples use `/opt/mailtriage/mailtriage`.
+   `/opt/mailtriage` must exist and belong to the user that runs mailtriage; create it once as root, for example with `install -d -o USER /opt/mailtriage`. Without `--dir` the script installs into `~/.local/bin`. It prints the [`self install`](../guide/install.md#mailtriage-self-install) result; exit 0 means done, 1 a failed download or check, 2 invalid options, an unsupported platform or a refused downgrade, 3 an unsafe or foreign directory (stderr says `mailtriage: unsafe_permissions: …`, for example when `/opt/mailtriage` does not belong to the user) or a failed install, 5 another install or update holds the directory's installation lock (try again later). The examples use `/opt/mailtriage/mailtriage`.
 2. Run setup without prompts, as the user that will run mailtriage:
 
    ```sh
@@ -22,20 +22,20 @@ Hermes, or any other agent, calls `mailtriage` as an ordinary process. It needs 
    - `--yes` turns prompts off. Each answer comes from its flag or its default.
    - `--himalaya-account NAME` is required: an account with IMAP in the Himalaya configuration. Add `--himalaya-install` to install a tested Himalaya for mailtriage when none is found or the one found is untested, `--himalaya-binary PATH` when `himalaya` is not on the agent's `PATH`, and `--himalaya-config PATH` when the file is not in Himalaya's default location. Setup stores the Himalaya binary, a private one included, and the config file as absolute paths.
    - The key, preferably from a key store or a key command, so no process needs it in its environment:
-     - `--key-store keychain`, `secret-service` or `pass` with `--key-stored`: a person has already stored the key with that store's command (see [Key stores](guide.md#key-stores)). Setup records the read command and checks that it prints a key.
+     - `--key-store keychain`, `secret-service` or `pass` with `--key-stored`: a person has already stored the key with that store's command (see [Key stores](../guide/setup.md#key-stores)). Setup records the read command and checks that it prints a key.
      - `--key-command 'COMMAND'`: a shell command that prints the key. Setup runs it once to check it.
      - `--key-store env`, with `--key-env NAME` when the variable is not `OPENROUTER_API_KEY`: mailtriage reads the key from the variable in its own environment.
-   - `--service install` also installs `watch` as a launchd agent or systemd user unit (see [Background service](guide.md#background-service)). The default is `skip`. Setup installs no service when `doctor` reports a not-ready `state` item.
-   - Optional: `--account`, `--identity`, `--timezone`, `--brief`, `--mailbox` (repeat for several folders), `--filing off|dry-run`, `--interval-seconds`, `--limit`, `--updates auto|notify|off` (what `watch` does about new releases; see [Updates](guide.md#updates)).
+   - `--service install` also installs `watch` as a launchd agent or systemd user unit (see [Background service](../guide/service.md)). The default is `skip`. Setup installs no service when `doctor` reports a not-ready `state` item.
+   - Optional: `--account`, `--identity`, `--timezone`, `--brief`, `--mailbox` (repeat for several folders), `--filing off|dry-run`, `--interval-seconds`, `--limit`, `--updates auto|notify|off` (what `watch` does about new releases; see [Updates](../guide/updates.md)).
    - To change an existing config, add `--update`. A classifier flag such as `--model` keeps where the key comes from; only a key flag (`--key-store`, `--key-command`, `--key-env`, `--key-stored`) changes it. Key flags with `--provider fake` exit 2.
-   - To write the configuration by hand instead, follow [Manual setup](guide.md#manual-setup). Use absolute paths in `engine.binary` and `engine.config`: the agent's `PATH` may not contain Himalaya, and `~` is not expanded.
+   - To write the configuration by hand instead, follow [Manual setup](../guide/manual-setup.md). Use absolute paths in `engine.binary` and `engine.config`: the agent's `PATH` may not contain Himalaya, and `~` is not expanded.
 
-   Setup prints one result object on stdout (see [Output](guide.md#output)) and exits 0, even when `doctor` items are not ready. Read `setup.doctor.ready` and each item's `fix`. A command in a `fix` or on stderr passes `--config` when one run from setup's working directory and environment without it would find another config or none. On failure, the message starts with `step N (name): ` and names the flag or command that fixes it:
+   Setup prints one result object on stdout (see [Output](../guide/setup.md#output)) and exits 0, even when `doctor` items are not ready. Read `setup.doctor.ready` and each item's `fix`. A command in a `fix` or on stderr passes `--config` when one run from setup's working directory and environment without it would find another config or none. On failure, the message starts with `step N (name): ` and names the flag or command that fixes it:
 
    | Code | Cause | What to do |
    | --- | --- | --- |
    | 2 | A required flag is missing, a value is invalid, key flags conflict or are given with `--provider fake`, a key tool needs a terminal, or the private Himalaya cannot be installed because pimalaya has no build for this platform. | Add or correct the flag named in the message, then run setup again. Do not repeat the same call. For the platform, report the message to the user: a person installs a tested Himalaya, then setup runs with `--himalaya-binary`. |
-   | 3 | Himalaya is missing or not a tested version and `--himalaya-install` was not given (see [Himalaya versions](guide.md#himalaya-versions)), installing the private Himalaya failed on a supported platform, `himalaya account check` failed, the folders could not be listed, a key tool or key command failed, or `launchctl`/`systemctl` failed. | Report the message to the user. It names the command that shows the cause; fixing it needs a person (credentials, Himalaya, the key store). |
+   | 3 | Himalaya is missing or not a tested version and `--himalaya-install` was not given (see [Himalaya versions](../guide/himalaya.md)), installing the private Himalaya failed on a supported platform, `himalaya account check` failed, the folders could not be listed, a key tool or key command failed, or `launchctl`/`systemctl` failed. | Report the message to the user. It names the command that shows the cause; fixing it needs a person (credentials, Himalaya, the key store). |
    | 5 | The config already exists, the account is bound to another mailbox (`step 3 (account): account NAME is bound to its previous mailbox …`; nothing was written), or a service file exists that mailtriage did not write. | For the config, add `--update` if the user wants it changed. For a bound account, keep its identity, Himalaya account and IMAP server, or ask the user before setting the mailbox up under a new name with `--account NEW`. For a service file, report the path to the user. |
 
 3. Give the user that runs mailtriage read and write access to `state_dir` and to the directory that holds `mailtriage.json`. mailtriage creates `mailtriage.lock` there and rewrites the file for `filing enable`, `filing disable` and `categories apply`. That user also needs read access to the Himalaya configuration and whatever its password command reads.
@@ -73,7 +73,7 @@ Setup writes `~/.config/mailtriage/mailtriage.json` for the user that runs it. E
 /opt/mailtriage/mailtriage service status --account work --json
 ```
 
-The result is `{"schema_version":1,"service":{...}}` (fields in [Service commands](guide.md#service-commands)). Check:
+The result is `{"schema_version":1,"service":{...}}` (fields in [Service commands](../guide/service.md#service-commands)). Check:
 
 - `running: true` when the background service is installed.
 - `last_pass`, the account's latest `sync` or `watch` pass, read from the state database. It works without any service.
@@ -84,11 +84,11 @@ The result is `{"schema_version":1,"service":{...}}` (fields in [Service command
   - `version`: the mailtriage version that ran that pass (`null` for passes recorded before schema 7). After an update it shows the new version once the switched service has finished its first pass, not as soon as it switches.
   - `reason`: the error's machine-readable reason, or `null`. With exit 5, `config_changed` means the configuration changed during the pass (`watch` skips it and continues), `account_busy` that another worker held the account lock (this ends `watch`, and the service manager restarts it), and `binding_conflict` that the account is bound to another mailbox, which needs the user. `reason` is `null` for a pass recorded before schema 8 or by an older release, so it never names an earlier pass's error; treat exit 5 without a reason as an error. A busy pass still refreshes `finished_at`, so an `account_busy` reason that persists across several intervals means another mailtriage worker holds the account (for example a stuck manual `sync`); report it to the user.
 
-`service status --json` without `--account` checks every account at once: `{"schema_version":1,"config":"…","services":[…]}`, one object per account, sorted by name (fields in [Status of every account](guide.md#status-of-every-account)). Read `config_matches` before acting on a service: `false` means it runs another config (`service_config` names it), and `null` means its config cannot be told. When `service start` or `service stop` exits 5 with reason `service_config_mismatch`, report the config named in the message to the user instead of passing it yourself.
+`service status --json` without `--account` checks every account at once: `{"schema_version":1,"config":"…","services":[…]}`, one object per account, sorted by name (fields in [Status of every account](../guide/service.md#status-of-every-account)). Read `config_matches` before acting on a service: `false` means it runs another config (`service_config` names it), and `null` means its config cannot be told. When `service start` or `service stop` exits 5 with reason `service_config_mismatch`, report the config named in the message to the user instead of passing it yourself.
 
 ### Updates
 
-`setup` writes `updates: auto`, so the background service installs every stable release within about a day and switches to it between passes (see [Updates](guide.md#updates)). On a host where provisioning owns the binary, pass `--updates off` (no network calls) or `--updates notify` (report only) to `setup`.
+`setup` writes `updates: auto`, so the background service installs every stable release within about a day and switches to it between passes (see [Updates](../guide/updates.md)). On a host where provisioning owns the binary, pass `--updates off` (no network calls) or `--updates notify` (report only) to `setup`.
 
 - `mailtriage update --check --json` asks GitHub now and reports `available` and whether the binary may be replaced (`install.replaceable`, `install.reason`, `install.fix`). It exits 0 either way, and 3 when GitHub cannot be reached.
 - `service status --json` carries `service.update`: `installed` for the binary the service runs, `latest`, `available`, `last_error` and `replaceable`, plus `tray` when a `mailtriage-tray` sits next to that binary. It reads the cache and makes no network call.
@@ -96,7 +96,7 @@ The result is `{"schema_version":1,"service":{...}}` (fields in [Service command
 
 ### The tray app
 
-Agents never need the tray app. Every action is one documented command; the guide's [Tray](guide.md#tray) section lists them, so an agent runs the `mailtriage` commands directly.
+Agents never need the tray app. Every action is one documented command; the guide's [Tray](../guide/tray.md) section lists them, so an agent runs the `mailtriage` commands directly.
 
 ## Reading mail
 
@@ -172,7 +172,7 @@ Change categories only when the user asks. Export, edit, check, then apply with 
 
 ## Filing into folders
 
-When an account has filing on (see [Filing into folders](guide.md#filing-into-folders)), mailtriage also moves mail into category folders and flags mail that needs action. Read `filing status` before you act on filing. It reports the mode, which folders are usable, paused categories, blocked, quarantined and ambiguous messages, unresolved arrivals and the last pass, from local state, without contacting the mailbox. `filing plan` previews what the next pass would create, move and flag, and changes nothing. Its `total` counts the actions of the next pass only, at most the account's `filing.max_actions_per_pass`; it is not the size of the backlog.
+When an account has filing on (see [Filing into folders](../guide/filing.md)), mailtriage also moves mail into category folders and flags mail that needs action. Read `filing status` before you act on filing. It reports the mode, which folders are usable, paused categories, blocked, quarantined and ambiguous messages, unresolved arrivals and the last pass, from local state, without contacting the mailbox. `filing plan` previews what the next pass would create, move and flag, and changes nothing. Its `total` counts the actions of the next pass only, at most the account's `filing.max_actions_per_pass`; it is not the size of the backlog.
 
 ```sh
 /opt/mailtriage/mailtriage filing status --account work --json

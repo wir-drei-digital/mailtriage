@@ -8,11 +8,11 @@
 
 **Tech Stack:** Rust 2021 (stable 1.92), clap 4, serde/serde_json, reqwest 0.12 blocking with rustls (already a dependency), fs2 locks, chrono, uuid. New crates: `semver` 1, `flate2` 1.1 (pure-Rust backend), `tar` 0.4 (no default features). Tests use a hand-written loopback HTTP server on `std::net`.
 
-**Spec:** `docs/superpowers/specs/2026-10-06-auto-update-design.md`. Read it before every task. Where this plan and the spec disagree, the spec wins, except for the rulings under "Decisions this plan adds". The tray spec (`docs/superpowers/specs/2026-10-06-tray-design.md`) extends this updater; nothing of the tray is implemented here.
+**Spec:** `design/specs/2026-10-06-auto-update-design.md`. Read it before every task. Where this plan and the spec disagree, the spec wins, except for the rulings under "Decisions this plan adds". The tray spec (`design/specs/2026-10-06-tray-design.md`) extends this updater; nothing of the tray is implemented here.
 
 ## Parallel development
 
-This plan follows `docs/superpowers/plans/2026-10-06-parallel-development.md`:
+This plan follows `design/plans/2026-10-06-parallel-development.md`:
 
 - Branch `feature/auto-update` in the worktree `.worktrees/auto-update`, created from the shared `main` commit, which already has the machine-readable error `reason` (`ErrorKind`, `err_kind`, `CliError.reason`) and refile's plan but not refile's code.
 - **Phase A** (Tasks 1 to 8) needs nothing from refile. The SDD run executes Phase A, then stops and reports.
@@ -70,7 +70,7 @@ Rulings on points the spec leaves open. Each says what it costs if wrong.
 - JSON keeps `schema_version: 1` and the error envelope `{"schema_version":1,"error":{"code","message"[,"reason"]}}`. Events are `{"schema_version":1,"update":{"event":…}}`.
 - Tests never touch the real `HOME`, cache, service directories or `~/.cargo/bin`, never run the real `launchctl` or `systemctl`, and never reach GitHub: `HOME` and `XDG_CACHE_HOME` point into temporary directories, the binary under test is copied into a temporary directory and run from there, and a loopback server stands in for GitHub.
 - The OpenRouter key is never written into any file, fixture or doc recipe.
-- Edits to shared files (`src/cli.rs`, `src/service.rs`, `src/system_service.rs`, `src/store.rs`, `docs/guide.md`, `docs/hermes.md`, `README.md`, `.github/workflows/*`, `Cargo.toml`) stay small and additive; docs get new sections rather than rewrites.
+- Edits to shared files (`src/cli.rs`, `src/service.rs`, `src/system_service.rs`, `src/store.rs`, `docs/guide.md`, `docs/agents/index.md`, `README.md`, `.github/workflows/*`, `Cargo.toml`) stay small and additive; docs get new sections rather than rewrites.
 - The classification generation hash and the binding identity golden values must not change (`updates` enters neither).
 - Existing tests keep passing unchanged, with these permitted edits:
   - `tests/config_v2.rs`: the schema written is 3 (`legacy_himalaya_config_loads_as_engine_and_saves_as_v3`) and the rejected versions are `[0, 4]` (Task 1);
@@ -129,7 +129,7 @@ Inputs the spec implies but its own test list would not exercise, most likely to
 | `tests/update_watch.rs` (new) | 6 | The update step in `watch` |
 | `tests/update_status.rs` (new) | 7, 9 | `service status`, `doctor`, `last_pass.version` |
 | `tests/setup.rs`, `tests/config_v2.rs`, `tests/heartbeat.rs`, `tests/filing_store.rs` | 1, 7, 9 | Additions and the permitted edits |
-| `docs/guide.md`, `docs/hermes.md`, `docs/service-api.md`, `docs/releases.md`, `docs/verification.md`, `README.md` | 1, 4–9 | Each task documents what it adds |
+| `docs/guide.md`, `docs/agents/index.md`, `docs/development/service-api.md`, `docs/development/releases.md`, `docs/development/verification.md`, `README.md` | 1, 4–9 | Each task documents what it adds |
 
 ---
 
@@ -146,7 +146,7 @@ Inputs the spec implies but its own test list would not exercise, most likely to
   - `src/setup.rs` (`SetupArgs`, `run` steps 1 and 8 and the result, `load_target`, new `write_config` and `config_lock`)
   - `src/cli.rs` (`SetupArg.updates`, `SetupArg::to_args`)
   - `tests/config_v2.rs` (permitted edit), `tests/setup.rs` (new tests)
-  - `docs/guide.md`, `docs/hermes.md`, `docs/service-api.md`
+  - `docs/guide.md`, `docs/agents/index.md`, `docs/development/service-api.md`
 
 **Interfaces:**
 - Consumes: `service::{err, err_kind, ErrorKind::{ConfigBusy, ConfigChanged}}` (on `main`).
@@ -1188,7 +1188,7 @@ with:
 the account is bound to another mailbox (its identity, Himalaya account or IMAP server would change); a service file exists that mailtriage did not write; another command is editing the config (`config_busy`), or it changed since setup read it (`config_changed`). |
 ```
 
-In `docs/hermes.md`, replace:
+In `docs/agents/index.md`, replace:
 
 ```markdown
    - Optional: `--account`, `--identity`, `--timezone`, `--brief`, `--mailbox` (repeat for several folders), `--filing off|dry-run`, `--interval-seconds`, `--limit`.
@@ -1200,7 +1200,7 @@ with:
    - Optional: `--account`, `--identity`, `--timezone`, `--brief`, `--mailbox` (repeat for several folders), `--filing off|dry-run`, `--interval-seconds`, `--limit`, `--updates auto|notify|off` (what `watch` does about new releases; see [Updates](guide.md#updates)).
 ```
 
-In `docs/service-api.md`, replace:
+In `docs/development/service-api.md`, replace:
 
 ```markdown
   "filing": "dry_run",
@@ -1215,7 +1215,7 @@ with:
   "doctor": {"ready": false, "items": [
 ```
 
-In `docs/service-api.md`, replace:
+In `docs/development/service-api.md`, replace:
 
 ```markdown
 - `filing`: `off`, `dry_run` or `live`.
@@ -1231,7 +1231,7 @@ with:
 - `doctor.items[].check`
 ```
 
-In `docs/service-api.md`, replace:
+In `docs/development/service-api.md`, replace:
 
 ```markdown
 manager failure, unwritable config; 5 config exists without `--update`, a
@@ -1253,7 +1253,7 @@ Run: `cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings &&
 Expected: all pass.
 
 ```bash
-git add src/domain.rs src/config.rs src/service.rs src/setup.rs src/cli.rs tests/update_config.rs tests/config_v2.rs tests/setup.rs docs/guide.md docs/hermes.md docs/service-api.md
+git add src/domain.rs src/config.rs src/service.rs src/setup.rs src/cli.rs tests/update_config.rs tests/config_v2.rs tests/setup.rs docs/guide.md docs/agents/index.md docs/development/service-api.md
 git commit -m "Add the updates setting and config schema 3
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
@@ -1852,7 +1852,7 @@ Create `src/update/mod.rs`:
 
 ```rust
 //! Automatic updates from GitHub Releases (spec:
-//! docs/superpowers/specs/2026-10-06-auto-update-design.md): release
+//! design/specs/2026-10-06-auto-update-design.md): release
 //! information, installing a release, restarting `watch` onto a replaced
 //! binary, and reporting what is installed.
 pub mod cache;
@@ -5093,7 +5093,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 **Files:**
 - Create: `src/update/service_files.rs`, `src/update/command.rs`, `tests/update_command.rs`
-- Modify: `src/system_service.rs` (`Context::unit_path`, new `unit_dir`, `is_marked` crate-visible), `src/update/mod.rs`, `src/cli.rs` (`Command::Update`, `UpdateArg`, `execute`), `tests/update_support/mod.rs` (append), `docs/guide.md`, `docs/service-api.md`
+- Modify: `src/system_service.rs` (`Context::unit_path`, new `unit_dir`, `is_marked` crate-visible), `src/update/mod.rs`, `src/cli.rs` (`Command::Update`, `UpdateArg`, `execute`), `tests/update_support/mod.rs` (append), `docs/guide.md`, `docs/development/service-api.md`
 
 **Interfaces:**
 - Consumes: Tasks 2 and 3 (`check::refresh`, `Reservation::BestEffort`, `platform::{installation_path, probe, blocker, Blocker}`, `install::{lock, update_lock_wait, install, Job, Outcome, Hooks, EnvHooks}`), `service::err`.
@@ -6384,7 +6384,7 @@ Run `mailtriage service install` again after you move the binary.
 Without the cache directory (no `HOME`, and on Linux no absolute `XDG_CACHE_HOME`), `update` exits 3 and `watch` skips its update work.
 ````
 
-In `docs/service-api.md`, add a section after `## \`service\` results`:
+In `docs/development/service-api.md`, add a section after `## \`service\` results`:
 
 ```markdown
 ## `update`
@@ -6407,7 +6407,7 @@ Run: `cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings &&
 Expected: all pass; the help lists `--check` and `--json`. Do not run `update` itself against the real GitHub from the development binary.
 
 ```bash
-git add src/system_service.rs src/update src/cli.rs tests/update_support/mod.rs tests/update_command.rs docs/guide.md docs/service-api.md
+git add src/system_service.rs src/update src/cli.rs tests/update_support/mod.rs tests/update_command.rs docs/guide.md docs/development/service-api.md
 git commit -m "Add mailtriage update
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
@@ -8094,7 +8094,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 **Files:**
 - Create: `src/update/report.rs`, `tests/update_status.rs`
-- Modify: `src/update/mod.rs`, `src/system_service.rs` (`status_account`), `src/cli.rs` (`Command::Doctor`), `src/setup.rs` (`run` step 9 call, `doctor_step`), `tests/setup.rs` (new test), `tests/cli.rs` and `tests/filing_cli.rs` (`run` helpers, permitted edit), `docs/guide.md`, `docs/hermes.md`, `docs/service-api.md`
+- Modify: `src/update/mod.rs`, `src/system_service.rs` (`status_account`), `src/cli.rs` (`Command::Doctor`), `src/setup.rs` (`run` step 9 call, `doctor_step`), `tests/setup.rs` (new test), `tests/cli.rs` and `tests/filing_cli.rs` (`run` helpers, permitted edit), `docs/guide.md`, `docs/agents/index.md`, `docs/development/service-api.md`
 
 **Interfaces:**
 - Consumes: `service_files::executable`, `system_service::{is_marked, Manager, Context::unit_path}`, `platform::{installation_path, probe, blocker, Blocker}`, `Cache::for_user`, `version::is_newer`.
@@ -8725,7 +8725,7 @@ Insert this subsection in the `## Updates` section directly before `### How a ru
 `mailtriage service status --account NAME` and `mailtriage doctor --account NAME` include an `update` block for the binary the account's service runs (see [Service commands](#service-commands)); `doctor` adds `ready` and `fix`. Both read the cache and make no network call. `mailtriage update --check --json` asks GitHub now.
 ```
 
-In `docs/hermes.md`, add a subsection after `### Health checks` (before `## Reading mail`):
+In `docs/agents/index.md`, add a subsection after `### Health checks` (before `## Reading mail`):
 
 ```markdown
 ### Updates
@@ -8737,7 +8737,7 @@ In `docs/hermes.md`, add a subsection after `### Health checks` (before `## Read
 - `mailtriage update --json` installs the newest release. Exit 5 means another update is running: try again later. Exit 3 names the cause; report it to the user. Do not restart the service afterwards; it switches by itself.
 ```
 
-In `docs/service-api.md`, replace:
+In `docs/development/service-api.md`, replace:
 
 ```markdown
   loaded, running, pid, last_exit_status, unit_path, log_paths, last_pass}`.
@@ -8762,7 +8762,7 @@ Run: `cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings &&
 Expected: all pass.
 
 ```bash
-git add src/update src/system_service.rs src/cli.rs src/setup.rs tests/update_status.rs tests/setup.rs tests/cli.rs tests/filing_cli.rs docs/guide.md docs/hermes.md docs/service-api.md
+git add src/update src/system_service.rs src/cli.rs src/setup.rs tests/update_status.rs tests/setup.rs tests/cli.rs tests/filing_cli.rs docs/guide.md docs/agents/index.md docs/development/service-api.md
 git commit -m "Show update state in service status, doctor and setup
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
@@ -8774,7 +8774,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 **Files:**
 - Create: `.github/scripts/is_highest_release.py`
-- Modify: `.github/workflows/release.yml` (the `publish` job), `docs/releases.md`, `docs/guide.md` (`## Install`, end of `## Updates`), `docs/verification.md`, `README.md`
+- Modify: `.github/workflows/release.yml` (the `publish` job), `docs/development/releases.md`, `docs/guide.md` (`## Install`, end of `## Updates`), `docs/development/verification.md`, `README.md`
 
 **Interfaces:**
 - Consumes: the commands and outputs of Tasks 1 to 7, and `last_pass.version` from Task 9 (same branch; documented here once for the rollout).
@@ -8916,7 +8916,7 @@ with:
 Run: `ruby -ryaml -e 'YAML.load_file(ARGV[0]); puts "valid"' .github/workflows/release.yml` (or `actionlint .github/workflows/release.yml` where installed)
 Expected: `valid`. The release being published is still a draft when the list is read, so `--exclude-drafts` leaves it out.
 
-- [ ] **Step 3: `docs/releases.md`**
+- [ ] **Step 3: `docs/development/releases.md`**
 
 Insert this section before `## Publish a version`:
 
@@ -8941,7 +8941,7 @@ tag:
   [Rolling back by hand](guide.md#rolling-back-by-hand)).
 ```
 
-In `docs/releases.md`, replace:
+In `docs/development/releases.md`, replace:
 
 ```markdown
 Tags such as `v0.2.0-rc.1` become prereleases and do not replace Latest.
@@ -8960,7 +8960,7 @@ several tags at once, a waiting publish can be cancelled by a newer one; rerun
 it as in [Retry a failed release](#retry-a-failed-release).
 ```
 
-In `docs/releases.md`, replace:
+In `docs/development/releases.md`, replace:
 
 ```markdown
 Download artifacts and releases through authenticated GitHub access while the
@@ -9046,7 +9046,7 @@ There is no rollback command; a bad release is normally fixed by a newer one. To
 This works only when the newer release did not migrate the state database. An older binary refuses a newer database (`database schema is newer than this binary`); then roll forward to a fixed release instead.
 ````
 
-- [ ] **Step 5: `README.md` and `docs/verification.md`**
+- [ ] **Step 5: `README.md` and `docs/development/verification.md`**
 
 In `README.md`, add one line after the "From source" code block, before `## Get started`:
 
@@ -9054,7 +9054,7 @@ In `README.md`, add one line after the "From source" code block, before `## Get 
 mailtriage keeps itself up to date: the background service installs new releases by itself, and `mailtriage update` installs one now. That needs a binary you own, such as `install -m 0755 mailtriage ~/.local/bin/mailtriage` instead of `sudo install` ([Updates](docs/guide.md#updates)).
 ```
 
-Append to `docs/verification.md`:
+Append to `docs/development/verification.md`:
 
 ```markdown
 ## Automatic updates on a real machine (human check)
@@ -9085,7 +9085,7 @@ Run: `cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings &&
 Expected: no `BROKEN` line.
 
 ```bash
-git add .github/scripts/is_highest_release.py .github/workflows/release.yml docs/releases.md docs/guide.md docs/verification.md README.md
+git add .github/scripts/is_highest_release.py .github/workflows/release.yml docs/development/releases.md docs/guide.md docs/development/verification.md README.md
 git commit -m "Publish one release at a time and mark Latest only for the highest
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
@@ -9100,7 +9100,7 @@ The SDD run stops after Task 8 and reports. The controller merges `feature/refil
 ### Task 9: The version that ran each pass (schema v7)
 
 **Files:**
-- Modify: `src/store.rs` (`MIGRATIONS`, new `LATEST`, the guard in `Store::open`, `record_heartbeat`, `heartbeat`, new `mod schema_7`), `tests/heartbeat.rs`, `tests/filing_store.rs` (pins), `tests/update_status.rs` (new test), `docs/guide.md`, `docs/hermes.md`, `docs/service-api.md`
+- Modify: `src/store.rs` (`MIGRATIONS`, new `LATEST`, the guard in `Store::open`, `record_heartbeat`, `heartbeat`, new `mod schema_7`), `tests/heartbeat.rs`, `tests/filing_store.rs` (pins), `tests/update_status.rs` (new test), `docs/guide.md`, `docs/agents/index.md`, `docs/development/service-api.md`
 
 **Interfaces:**
 - Consumes: refile's complete v6 migration (the sixth entry of `MIGRATIONS`) and its newer-schema guard at 6; Task 7's `service status`.
@@ -9358,7 +9358,7 @@ with:
 `exit_code` (0, 4 for partial, or the error's exit code), `mode` (`off`, `dry_run` or `live`) and `version`, the mailtriage version that ran it (`null` for passes recorded before schema 7). `null` before the first pass. |
 ```
 
-In `docs/hermes.md`, replace:
+In `docs/agents/index.md`, replace:
 
 ```markdown
   - `mode`: the filing mode of that pass (`off`, `dry_run` or `live`).
@@ -9371,7 +9371,7 @@ with:
   - `version`: the mailtriage version that ran that pass. After an update it shows the new version once the service has switched.
 ```
 
-Append to `docs/service-api.md`:
+Append to `docs/development/service-api.md`:
 
 ```markdown
 ## Heartbeat version (schema v7)
@@ -9391,7 +9391,7 @@ Run: `cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings &&
 Expected: all pass.
 
 ```bash
-git add src/store.rs tests/heartbeat.rs tests/filing_store.rs tests/update_status.rs docs/guide.md docs/hermes.md docs/service-api.md
+git add src/store.rs tests/heartbeat.rs tests/filing_store.rs tests/update_status.rs docs/guide.md docs/agents/index.md docs/development/service-api.md
 git commit -m "Record the version that ran each pass (schema v7)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
@@ -9401,5 +9401,5 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ## Human gate
 
-The automated tests never reach GitHub, never run a real release binary and never run `launchctl` or `systemctl`. Before relying on automatic updates, a person runs "Automatic updates on a real machine" from `docs/verification.md` (Task 8) once two consecutive stable releases with the updater exist: on macOS arm64 (the real `bsdtar` archive, Gatekeeper, launchd keeping the PID across the switch) and on Linux (systemd, `/proc/self/exe` after the rename). Until then, publish `vX.Y.Z-rc.N` tags to try builds; prereleases are never installed automatically.
+The automated tests never reach GitHub, never run a real release binary and never run `launchctl` or `systemctl`. Before relying on automatic updates, a person runs "Automatic updates on a real machine" from `docs/development/verification.md` (Task 8) once two consecutive stable releases with the updater exist: on macOS arm64 (the real `bsdtar` archive, Gatekeeper, launchd keeping the PID across the switch) and on Linux (systemd, `/proc/self/exe` after the rename). Until then, publish `vX.Y.Z-rc.N` tags to try builds; prereleases are never installed automatically.
 

@@ -250,6 +250,13 @@ fn flags_alone_write_a_ready_config() {
     assert_eq!(mode(f.config_path().with_file_name("state")), 0o700);
     assert!(!stdout(&out).contains("sk-or-fixture"));
     assert!(!stderr(&out).contains("sk-or-fixture"));
+    assert!(
+        stderr(&out).contains(
+            "Go live only after the provider check (https://wir-drei-digital.github.io/mailtriage/guide/provider-check): `mailtriage filing enable --account work --mode live`."
+        ),
+        "{}",
+        stderr(&out)
+    );
     // No IMAP changes, no wizard.
     for forbidden in [
         "\"configure\"",

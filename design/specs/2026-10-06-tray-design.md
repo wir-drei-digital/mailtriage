@@ -772,7 +772,7 @@ fake `launchctl`:
 - the cache holds separate `installs` entries for the CLI and the tray after
   CLI-only success, full success, tray failure and skip.
 
-**By hand** (added to `docs/verification.md`):
+**By hand** (added to `docs/development/verification.md`):
 
 - macOS menu bar in light and dark mode, Ubuntu GNOME with the AppIndicator extension,
   and KDE: native start, the menu still working after hours idle, and start at login

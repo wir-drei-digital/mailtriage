@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 2021 (stable 1.92 locally), rusqlite 0.37 with bundled SQLite 3.50 (so `ALTER TABLE … DROP COLUMN` works in test downgrades), serde_json, clap 4. No new crate dependencies.
 
-**Spec:** `docs/superpowers/specs/2026-10-06-filing-refile-design.md`. Read it before every task. Where this plan and the spec disagree, the spec wins, except for the rulings under "Decisions this plan adds". The parallel-development rules in `docs/superpowers/plans/2026-10-06-parallel-development.md` bind this plan.
+**Spec:** `design/specs/2026-10-06-filing-refile-design.md`. Read it before every task. Where this plan and the spec disagree, the spec wins, except for the rulings under "Decisions this plan adds". The parallel-development rules in `design/plans/2026-10-06-parallel-development.md` bind this plan.
 
 **Phases:** Refile is merged first and its schema is v6, so all seven tasks are **Phase A**: each is implementable on `feature/refile` from the shared `main` commit alone. There is no Phase B.
 
@@ -51,7 +51,7 @@ Rulings on points the spec leaves open. Each says what it costs if wrong.
 - After every task all three pass: `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`. CI runs them on Linux (amd64, arm64) and macOS.
 - No new dependencies; `Cargo.toml` and `Cargo.lock` stay unchanged.
 - Schema v6 exactly (migration 6), entirely in this plan. The newer-schema guard moves from 5 to 6. Never renumber.
-- Keep shared files easy to merge: new code goes into `src/filing/refile/`; edits to `src/cli.rs`, `src/service.rs`, `src/store.rs`, `docs/guide.md`, `docs/hermes.md` stay small and additive; docs get new sections, not rewrites.
+- Keep shared files easy to merge: new code goes into `src/filing/refile/`; edits to `src/cli.rs`, `src/service.rs`, `src/store.rs`, `docs/guide.md`, `docs/agents/index.md` stay small and additive; docs get new sections, not rewrites.
 - Existing tests stay unchanged except the permitted pins: `tests/filing_store.rs` lines 44–45 and 963 (`5` → `6`), line 365 (`user_version` `6` → `7`, the newer-schema guard value), `tests/heartbeat.rs` line 46 (`5` → `6`).
 - No new field on `FolderRecord`, `NewIntent`, `Action`, `PlanMessage`, `PlanInput` or `FolderView`.
 - The classification generation hash must not change (golden test `generation_hash_is_unchanged_by_filing_and_folder_fields`: `6dfd7bf30e6bf1c0b27ee97af991ecf21dc5ac0400044c2f3adbda7f79d37514`).
@@ -99,7 +99,7 @@ Inputs the spec implies but its test list does not exercise, most likely to bite
 | `tests/refile_preview.rs` (new) | 5 | The preview, status and hint |
 | `tests/refile_command.rs` (new) | 6 | Apply and the CLI |
 | `tests/refile_retired.rs` (new) | 7 | Retention, draining, freezing |
-| `docs/service-api.md`, `docs/hermes.md` | 6 | API and agent usage |
+| `docs/development/service-api.md`, `docs/agents/index.md` | 6 | API and agent usage |
 | `docs/guide.md`, the spec | 7 | User guide section, spec status |
 
 ---
@@ -1642,7 +1642,7 @@ Create `src/filing/refile/mod.rs`:
 
 ```rust
 //! Refiling filed mail after category changes (refile spec,
-//! `docs/superpowers/specs/2026-10-06-filing-refile-design.md`).
+//! `design/specs/2026-10-06-filing-refile-design.md`).
 pub mod rules;
 
 use super::observe::FolderMap;
@@ -3857,7 +3857,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Modify: `src/cli.rs` (`FilingCommand::Refile`, `RefileArg`, dispatch, import)
 - Modify: `tests/refile_support/mod.rs` (`apply` helper)
 - Create: `tests/refile_command.rs`
-- Modify: `docs/service-api.md` (new section), `docs/hermes.md` (new subsection)
+- Modify: `docs/development/service-api.md` (new section), `docs/agents/index.md` (new subsection)
 
 **Interfaces:**
 - Consumes (Task 5): `RefileOptions`, `command::{preview, report, selected_folder}` (private to the module), `Service::filing_refile`; `FilingWrite::{PlacementFrom, Event}`; `Store::commit_filing`.
@@ -4273,7 +4273,7 @@ In `fn filing`, add after the `FilingCommand::Backfill(arg) => { … }` arm:
 
 - [ ] **Step 5: Agent and API docs**
 
-Append to `docs/service-api.md`:
+Append to `docs/development/service-api.md`:
 
 ````markdown
 ## `filing refile` (schema v6)
@@ -4315,7 +4315,7 @@ Schema v6 (migration 6): `placements.refile_once`, `placements.filed_home_folder
 Also: `filing status` gains `refile_marked` and `refile_candidates`; `categories apply` gains `hint` (null with filing `off`); `filing plan` refile moves carry `"reason":"refile"`; events `refile_marked`, `refile_cleared {reason}`, `refile_cancelled {intent_id, reason}`, and `moved` with `"reason":"refile"`.
 ````
 
-Append to the end of the "## Filing into folders" section of `docs/hermes.md` (after its last paragraph, before the next `##` heading if any):
+Append to the end of the "## Filing into folders" section of `docs/agents/index.md` (after its last paragraph, before the next `##` heading if any):
 
 ````markdown
 ### Refiling after category changes
@@ -4346,7 +4346,7 @@ Expected: all PASS.
 Run: `cargo fmt && cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked`, then `cargo build && ./target/debug/mailtriage filing refile --help` (prints the five flags).
 
 ```bash
-git add src/filing/refile/command.rs src/service.rs src/cli.rs tests/refile_support/mod.rs tests/refile_command.rs docs/service-api.md docs/hermes.md
+git add src/filing/refile/command.rs src/service.rs src/cli.rs tests/refile_support/mod.rs tests/refile_command.rs docs/development/service-api.md docs/agents/index.md
 git commit -m "Add filing refile --apply and the CLI command
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
@@ -4364,7 +4364,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Modify: `src/store.rs` (`capture_rescan_set` resnapshots a drain)
 - Modify: `src/filing/observe.rs` (`resolve_folders` scope, `retire`)
 - Modify: `src/filing/done.rs` (`settled`)
-- Modify: `docs/guide.md` (new subsection), `docs/superpowers/specs/2026-10-06-filing-refile-design.md` (status line)
+- Modify: `docs/guide.md` (new subsection), `design/specs/2026-10-06-filing-refile-design.md` (status line)
 
 **Interfaces:**
 - Consumes (Tasks 3, 5, 6): `rules::{input, placement_skip, RefileInput}`, `Store::frozen_folders`, `Store::discovery_epoch`; test support `apply`, `preview`, `scoped`, `remove_category`.
@@ -4934,7 +4934,7 @@ In `done.rs`, in `settled`, after the `if folders.iter().any(|r| r.pause_reason.
 
 - [ ] **Step 6: The guide and the spec status**
 
-In `docs/superpowers/specs/2026-10-06-filing-refile-design.md` change the `Status:` line to `Status: Implemented (plan: docs/superpowers/plans/2026-10-06-filing-refile.md). Design approved in conversation; written spec revised after three Codex review rounds.`
+In `design/specs/2026-10-06-filing-refile-design.md` change the `Status:` line to `Status: Implemented (plan: design/plans/2026-10-06-filing-refile.md). Design approved in conversation; written spec revised after three Codex review rounds.`
 
 Insert a new subsection in `docs/guide.md` directly before `### Provider check`:
 
@@ -4999,7 +4999,7 @@ Expected: all PASS; `renamed_category_retires_its_old_folder_and_stops_watching_
 Run: `cargo fmt && cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked`, then `cargo build && ./target/debug/mailtriage filing refile --help >/dev/null && echo ok`.
 
 ```bash
-git add src/filing/refile/mod.rs src/filing/refile/rules.rs src/filing/refile/retired.rs src/filing/store.rs src/store.rs src/filing/observe.rs src/filing/done.rs tests/refile_retired.rs docs/guide.md docs/superpowers/specs/2026-10-06-filing-refile-design.md
+git add src/filing/refile/mod.rs src/filing/refile/rules.rs src/filing/refile/retired.rs src/filing/store.rs src/store.rs src/filing/observe.rs src/filing/done.rs tests/refile_retired.rs docs/guide.md design/specs/2026-10-06-filing-refile-design.md
 git commit -m "Keep retired folders watched while refile needs them, then drain and freeze
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"

@@ -8,7 +8,9 @@
 # changes nothing). `roles` is copied from the newest listed version: read
 # the new version's `--mailbox` resolver and correct it by hand when it
 # changed. The version must be a stable release higher than every listed
-# one.
+# one. Afterwards, update the places in README.md and in the guide pages
+# docs/guide/himalaya.md, setup.md, manual-setup.md and configuration.md
+# that name the tested versions or the newest one.
 #
 # Environment: GH_TOKEN or GITHUB_TOKEN is sent to the GitHub API when set.
 # For tests, HIMALAYA_VERSIONS_FILE replaces the data file and

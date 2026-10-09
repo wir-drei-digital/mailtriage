@@ -1,7 +1,7 @@
 # Domain core and service/store specification review
 
-2026-09-23. This pass checked the implementation against `docs/design.md` and
-`docs/implementation-plan.md`, with emphasis on account isolation, durable UID
+2026-09-23. This pass checked the implementation against `design/history/design.md` and
+`design/history/implementation-plan.md`, with emphasis on account isolation, durable UID
 progress, stale results, manual overlays, category edits, and Attention.
 
 ## Verified findings and resolution
@@ -54,4 +54,4 @@ progress, stale results, manual overlays, category edits, and Attention.
   in `tests/storage.rs`.
 - This was an offline review. Real OpenRouter behavior, IMAP Seen/epoch
   behavior, and the headless Hermes deployment remain the live gates listed in
-  `docs/implementation-plan.md`.
+  `design/history/implementation-plan.md`.
