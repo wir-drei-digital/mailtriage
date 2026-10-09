@@ -24,7 +24,7 @@ open, in any mail client, phone included.
 | --- | --- |
 | Queue location | The **source folder (INBOX) is the queue**. A message whose effective decision is `action_required` is held there instead of being filed. A separate queue folder is the alternative in [Option B](#option-b-a-separate-queue-folder). |
 | Entry | New mail with a current classification (or an override) and `action_required = true` is **held**: no move. |
-| Flag | With the queue on, only high urgency gets the `\Flagged` attempt; the inbox itself shows what needs action. |
+| Flag | A held message gets the `\Flagged` attempt only for high urgency; the inbox itself shows what needs action. Mail the queue does not hold (old, backfilled or filed mail) is flagged as without the queue. A reply exit consumes the message's flag attempt, so answered mail is not flagged after it leaves, even once the queue is off. |
 | Everything else | Unchanged: moved once to its category folder. |
 | Reply signal | The IMAP `\Answered` flag on the held message. Mail clients set it when the user replies from that client. |
 | Exit | A held message observed with `\Answered` is moved to its category folder at once, **unread**, and enters the read approval list. |
@@ -177,10 +177,10 @@ The other invariants are untouched.
 | --- | --- |
 | Config | `FilingConfig.reply_queue`; `config::written_schema` (3, or 4 with the queue); `SCHEMA_VERSION` 4 is the newest readable. |
 | CLI | `filing enable --reply-queue on\|off`; `Service::filing_enable_with`. |
-| Planner | `PlanInput.reply_queue`, `PlanMessage.done`, `holds`, `reply_done`, `MoveDecision::{Held, ReplyExit}`, `Plan.{reply_exits, awaiting_reply}`; the flag rule drops "action required" with the queue on. |
+| Planner | `PlanInput.reply_queue`, `PlanMessage.done`, `holds`, `reply_done`, `MoveDecision::{Held, ReplyExit}`, `Plan.{reply_exits, awaiting_reply}`; the flag rule drops "action required" for held messages. |
 | Flags | `filing/reply.rs` (`refresh_flags`), called by `refile::plan_pass` before the planner; reuses `Store::hydrate`. |
 | Engine | `MailEngine::add_seen` (Himalaya, fake with `FakeOp::Seen`, offline). |
-| Apply | Reply-exit batches; a reply exit's claim (`MoveClaim::ReplyExit`) also inserts its read approval row. |
+| Apply | Reply-exit batches; a reply exit's claim (`MoveClaim::ReplyExit`) also inserts its read approval row and sets `flag_attempted_at`. |
 | Read | `filing::reply::apply_reads`, after `apply` in `plan_and_apply`; `filing::reply::recover_reads` in `recover`, for attempts whose outcome was lost. |
 | CLI | `filing replies [--approve [--id ID]...]`; `Service::filing_replies`. |
 | State | Holding is recomputed every pass from placement, effective decision, flags and review state. SQLite v9 adds `read_approvals(account, message_id, requested_at, approved_at, applied_at)`; a new table, so processes of the previous release are unaffected, but a binary before v9 refuses the database. SQLite v10 adds the nullable `read_approvals.attempt_folder` and `attempt_epoch`. |
@@ -219,9 +219,10 @@ job that reads `mailtriage list --json`) before the job is switched off.
 
 ## Testing
 
-- Planner unit tests (planner.rs): hold, answered exit, done exit, flag only
-  high, only new, current or override, unpinned, decision change files
-  without `\Seen`, inbox category stays.
+- Planner unit tests (planner.rs): hold, answered exit, done exit, flag held
+  mail only for high urgency and other mail as before, only new, current
+  or override, unpinned, decision change files without `\Seen`, inbox
+  category stays.
 - tests/reply_queue.rs (fake engine, real passes): answered mail is filed
   unread and read only after approval, while unanswered mail waits quietly;
   approval of single ids and refusal of unknown ones; done files unread for
@@ -229,7 +230,9 @@ job that reads `mailtriage list --json`) before the job is switched off.
   `reply_exit` with no writes; a lost move response converges with one move;
   a failed read write is retried on the next pass; a `\Seen` session in
   another epoch pauses the folder; a lost `\Seen` outcome is a suspected
-  race after an epoch change and converges without one.
+  race after an epoch change and converges without one; backfilled mail
+  that needs action files and is flagged as before; answered mail is not
+  flagged after its exit, even with the queue turned off.
 - tests/engine_contract.rs: the exact `add_seen` text.
 - tests/config_v2.rs: the queue alone makes a config schema 4.
 - Dovecot e2e (flat and prefix), step 6: held unread and unflagged in INBOX,
@@ -253,7 +256,7 @@ The following docs need updates:
 
 ## Decided questions
 
-1. `\Flagged`: only high urgency is flagged with the queue on.
+1. `\Flagged`: with the queue on, only high urgency flags a held message.
 2. Payment: a paid invoice leaves the queue with `done`.
 3. Existing mail: only new mail is held.
 4. Hermes: mailtriage replaces the Hermes job for `michael@`.

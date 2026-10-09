@@ -397,6 +397,11 @@ fn a_reply_exit_claim_enters_the_read_approval_list_in_its_transaction() {
         (id.as_str(), NOW)
     );
     assert!(!s.intent(intent).unwrap().unwrap().consumes_refile);
+    let p = s.placement("work", &id).unwrap().unwrap();
+    assert!(
+        p.flag_attempted_at.is_some(),
+        "the exit consumes the flag attempt"
+    );
 }
 
 #[test]

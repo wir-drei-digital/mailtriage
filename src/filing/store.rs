@@ -1203,7 +1203,8 @@ impl Store {
     /// `claim_move` with the target snapshot as `(epoch, UIDNEXT)`. A refile
     /// claim records that the intent consumes the refile mark (refile spec);
     /// a reply exit enters the read approval list once, a repeated claim
-    /// keeping the first request (reply queue spec).
+    /// keeping the first request, and consumes the message's flag attempt
+    /// (reply queue spec).
     pub fn claim_move_with(
         &mut self,
         account: &str,
@@ -1252,6 +1253,12 @@ impl Store {
                 "INSERT OR IGNORE INTO read_approvals(account,message_id,requested_at) VALUES(?1,?2,?3)",
                 params![account, message_id, now],
             )?;
+            // Answered mail needs no flag once filed, with the queue on or off.
+            tx.execute(
+                "UPDATE placements SET flag_attempted_at=COALESCE(flag_attempted_at,?3) WHERE account=?1 AND message_id=?2",
+                params![account, message_id, now],
+            )?;
+            bump(&tx)?;
         }
         tx.commit()?;
         Ok(Some(id))

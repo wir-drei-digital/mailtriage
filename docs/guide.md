@@ -1254,7 +1254,7 @@ mailtriage adds the server's personal namespace prefix (for example `INBOX.`) to
 
 A message is moved automatically at most once, only out of a source folder, and only when its classification is current or you corrected its category. A current classification was made under the current categories, provider and policy, from complete input. Review mode does not hold filing back.
 
-`\Flagged` is added once, when the effective decision is `action_required` or `high` urgency, and only to new mail, backfilled mail or mail that mailtriage filed. A message that already carries `\Flagged` counts as flagged, so removing the flag in a mail client is respected. Set `filing.flag` to `false` to add no flags. With the [reply queue](#reply-queue) on, only `high` urgency is flagged.
+`\Flagged` is added once, when the effective decision is `action_required` or `high` urgency, and only to new mail, backfilled mail or mail that mailtriage filed. A message that already carries `\Flagged` counts as flagged, so removing the flag in a mail client is respected. Set `filing.flag` to `false` to add no flags. With the [reply queue](#reply-queue) on, a message it holds is flagged only for `high` urgency, and mail it filed after your reply is not flagged, even once the queue is off; other mail is flagged as without the queue.
 
 ### Reply queue
 

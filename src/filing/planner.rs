@@ -285,11 +285,12 @@ fn flag_action(
         return FlagDecision::Nothing;
     }
     let e = &m.effective;
-    // With the reply queue on, the source folder already shows what needs
-    // action; only high urgency is flagged.
-    let action = !input.reply_queue
-        && e.action_required == Some(true)
-        && (e.action_from_override || e.current);
+    // A held message's source folder already shows that it needs action;
+    // only high urgency flags it. Mail the queue does not hold is flagged
+    // as without it.
+    let action = e.action_required == Some(true)
+        && (e.action_from_override || e.current)
+        && !holds(input, m);
     let urgent = e.urgency == Some(Urgency::High) && (e.urgency_from_override || e.current);
     if !(action || urgent) {
         return FlagDecision::Nothing;
@@ -578,11 +579,32 @@ mod tests {
     }
 
     #[test]
-    fn the_reply_queue_flags_only_high_urgency() {
+    fn the_reply_queue_flags_held_mail_only_for_high_urgency() {
         let mut urgent = needs_reply("urgent", "transactions");
         urgent.effective.urgency = Some(Urgency::High);
         let p = plan(&queued(vec![needs_reply("ask", "transactions"), urgent]));
         assert_eq!(flags(&p), vec!["urgent".to_string()]);
+    }
+
+    #[test]
+    fn the_reply_queue_flags_mail_it_does_not_hold_as_before() {
+        let mut backfill = needs_reply("backfill", "transactions");
+        backfill.internal_date = Some(t(7));
+        backfill.eligible_once = true;
+        let mut filed = needs_reply("filed", "transactions");
+        filed.home = Some(Locator {
+            folder: "Transactions".into(),
+            epoch: 3,
+            uid: 4,
+        });
+        filed.filed_at = Some("2026-10-04T10:00:00+00:00".into());
+        let held = needs_reply("held", "transactions");
+        let messages = vec![backfill, filed, held];
+        let p = plan(&queued(messages.clone()));
+        assert_eq!(flags(&p), vec!["backfill".to_string(), "filed".into()]);
+        assert_eq!(p.awaiting_reply, vec!["held".to_string()]);
+        let p = plan(&input(messages));
+        assert_eq!(flags(&p).len(), 3, "without the queue all three");
     }
 
     #[test]

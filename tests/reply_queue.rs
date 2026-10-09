@@ -5,6 +5,7 @@ use common::{mail, Harness};
 use mailtriage::{
     domain::FilingMode::{self, DryRun, Live},
     engine::fake::{FakeOp, Fault},
+    service::Backfill,
 };
 
 fn queued(mode: FilingMode) -> Harness {
@@ -356,4 +357,45 @@ fn a_lost_seen_outcome_in_the_same_epoch_converges() {
     assert_eq!(seen_writes(&h), 1, "the write had landed");
     let replies = h.service().filing_replies("work", false, &[]).unwrap();
     assert_eq!(replies["items"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn backfilled_mail_that_needs_action_files_and_is_flagged_as_before() {
+    let h = queued(Live);
+    h.sync();
+    h.fake.deliver_at(
+        "INBOX",
+        &mail("old", "Invoice", "Payment due next month"),
+        "2026-01-01T00:00:00+00:00",
+    );
+    h.sync();
+    let mut s = h.service();
+    assert_eq!(
+        s.filing_backfill("work", Backfill::All, true).unwrap()["applied"],
+        1
+    );
+    let out = h.sync();
+    assert_eq!(out["filing"]["flagged"], 1, "{out}");
+    assert_eq!(place(&h, "old").0, "Transactions");
+    assert!(has(&flags(&h, "old"), "\\Flagged"));
+    assert!(out["filing"].get("awaiting_reply").is_none(), "{out}");
+}
+
+#[test]
+fn answered_mail_is_not_flagged_after_it_leaves_the_queue() {
+    let h = queued(Live);
+    file_in_order(&h, &["i"]);
+    assert_eq!(place(&h, "i").0, "Transactions");
+    h.sync();
+    h.edit(|c| c.accounts.get_mut("work").unwrap().filing.reply_queue = false);
+    h.sync();
+    h.sync();
+    assert_eq!(flags(&h, "i"), vec!["\\Answered".to_string()]);
+    let flag_calls = h
+        .fake
+        .calls()
+        .iter()
+        .filter(|c| c.starts_with("flag "))
+        .count();
+    assert_eq!(flag_calls, 0);
 }
