@@ -1,4 +1,4 @@
-# Reference
+# Errors and local data
 
 Look things up here: how mailtriage reports results and errors, what ties an account to its mailbox, how to back up your state, and what has and has not been verified.
 
@@ -47,7 +47,7 @@ An opaque OAuth token helper can change its underlying account without changing 
 
 The SQLite database and normalized message text under `state_dir` are authoritative private data. Raw messages and attachments are not stored.
 
-To back it up, stop the worker before you copy the directory, including any SQLite WAL files; for the background service, run `service uninstall` first and `service install` afterwards. Keep a JSON export as well.
+To back it up, stop the worker before copying the directory, including any SQLite WAL files. For an installed background service, use `service stop --account NAME`, copy the state directory, then use `service start --account NAME`. Keep a JSON export for inspection as well.
 
 Losing the database loses your corrections and Done state; operational state is restored from the database copy, not from the export.
 

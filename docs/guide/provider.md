@@ -1,84 +1,56 @@
-# Provider
+# API keys and models
 
-mailtriage asks a provider to make its decisions. For your real mail that is OpenRouter; for trying mailtriage out, there is an offline stand-in.
-
-The `provider` block names the service that answers the three questions for every message. There are two kinds:
-
-| `kind` | What it is | Key |
-| --- | --- | --- |
-| `openrouter` | OpenRouter's Decisions API. `model` is any Decisions model ID; setup writes `typesafe/jev-latest`. | Needed; see [The OpenRouter key](#the-openrouter-key). |
-| `fake` | Fixed keyword rules for offline tests ([Try it offline](./introduction.md#try-it-offline)). It makes no network request. | None |
-
-`typesafe/jev-latest` is an alias that OpenRouter moves to the newest Jev model. Your config does not change when it moves, so no mail is queued for classification again.
-
-Mail classified after the move gets the newer model, including open mail whose classification is older than `freshness_hours`. Each classification records the model the response named, as `classification.model` in `list` and `read`.
-
-To stay on one model, name it, such as `typesafe/jev-1.13`; changing `model` queues open mail for classification again.
-
-::: warning Important
-mailtriage does not check a model ID with OpenRouter, and `doctor` makes no provider request, so a mistyped model goes unnoticed until mail is classified. If OpenRouter refuses the model, every classification fails with `classification provider failed; check doctor and retry`, and each message is tried up to `policy.max_attempts` times. Once you correct `model`, all open mail is queued for classification again, failed messages included, and their attempt count starts over.
-:::
-
-Only Decisions-style services fit: they answer each question with a choice, a confidence and a probability per label. See [Adding a provider](../development/providers.md#adding-a-provider).
+mailtriage uses OpenRouter's Decisions API to classify real mail. The default model is `typesafe/jev-latest`. The `fake` provider is for offline testing and needs no key.
 
 ## The OpenRouter key
 
-mailtriage needs your OpenRouter key only to classify. It gets the key in one of two ways:
+The easiest way to configure your key is [guided setup](./setup.md#key-stores). Choose a key store available on your machine: macOS Keychain, Secret Service or `pass`.
 
-- If `provider.api_key_command` is set, it runs that command. This is the only source then; `api_key_env` is ignored even if the variable is set.
-- Otherwise it reads the environment variable named in `provider.api_key_env` from its own process environment.
+mailtriage saves a command that reads the key. The key itself stays in the store. To change the store later, for example on macOS:
 
-mailtriage does not read a `.env` file or any other key file. Never put the key in `mailtriage.json`. `mailtriage setup` sets up either source; see [Key stores](./setup.md#key-stores).
+```sh
+mailtriage setup --update --account work --key-store keychain
+```
 
-The commands that classify need the key: `sync`, `watch`, `classify` and `reclassify`. They resolve it once, and only when a message is due for classification, before they take it. A pass with nothing to classify never runs the key command and needs no key.
+For a custom store, use `--key-command 'COMMAND'`, where the command prints the key. It must work without asking for terminal input. See [key command rules](../reference/provider.md#key-command-rules).
 
-Without the key they still run but classify nothing: no message is taken, so no retry attempt is used and the mail stays queued. The result gains `"classification": {"skipped": true, "reason": "..."}`, where `reason` is one of the fixed key errors below, and is partial (exit 4). `sync` still scans the folders and, with filing on, runs the filing steps.
+When `provider.api_key_command` is set, it is the only key source. Otherwise mailtriage reads the variable named by `provider.api_key_env`. It does not read `.env` files.
 
-Once the key works, the next pass classifies the queued mail; changing `api_key_command` queues nothing again. `doctor` reports whether the key is present (`provider.key_present`) and why not (`provider.key_error`).
+## Environment variable
 
-`list`, `read`, `correct`, `done`, `reopen`, `export`, `categories` and `filing` commands do not use the key.
-
-### Key command rules
-
-- `api_key_command` is a list of program and arguments. It runs directly, without a shell. For pipes or variables, use `["/bin/sh", "-c", "COMMAND"]`, which is what `setup --key-command` stores.
-- Its stdin is closed and its stderr is discarded.
-- It has 10 seconds and at most 4 KB (4096 bytes) of output.
-- It must exit 0. The key is the first line of its output, with surrounding whitespace removed.
-- It runs at most once per command, and only when a message is due for classification, so an idle `watch` raises no key prompt. `watch` runs it again for each pass that has mail to classify, so a rotated key is used from the next pass on.
-- `doctor` runs it to check it.
-- The key never appears in output, logs or errors. Errors are fixed messages:
-
-| Message | Cause |
-| --- | --- |
-| `API key command failed (exit N)` | The command exited with code N, or with `exit signal` when a signal ended it. |
-| `API key command timed out` | It ran longer than 10 seconds. |
-| `API key command printed no key` | Its first line was empty, or it printed more than 4 KB. |
-| `API key command could not start` | The program was not found or could not be run. |
-
-The key command runs with the same trust as Himalaya's `password.cmd`: it comes from your own config, which mailtriage writes with mode 0600. Anyone who can edit that file can run commands as you, so keep it writable only by you.
-
-A store that is locked, such as a GPG agent without a cached passphrase or a keyring after logout, makes the command fail. `doctor` then shows `key_error`.
-
-### Environment variable
-
-`api_key_env` holds the name of the variable, for example `OPENROUTER_API_KEY`. mailtriage reads the key from its own process environment when it sends a request.
-
-::: warning Important
-A supervised `watch`, including the [background service](./service.md), does not see variables from your login shell. Prefer a key command there.
-:::
-
-In an interactive shell, run the lines below; at `read`, paste the key and press Enter (nothing is echoed):
+For a temporary session in bash or zsh:
 
 ```sh
 read -rs OPENROUTER_API_KEY
 export OPENROUTER_API_KEY
-mailtriage doctor --account work --json
 ```
 
-The variable lasts until the shell exits. To fill it from the macOS Keychain in every new shell, add this line to `~/.zshrc` (a key command does the same without a variable):
+At the first line, paste the key and press Enter; it is not echoed. Your config must use `api_key_env: "OPENROUTER_API_KEY"` without an `api_key_command`.
+
+The variable lasts only for that shell. The background service does not inherit it, so use a key store for unattended operation.
+
+## Check the key
 
 ```sh
-export OPENROUTER_API_KEY="$(security find-generic-password -s mailtriage -a openrouter -w)"
+mailtriage doctor --account work
 ```
 
-Agents: the process that runs mailtriage must have the variable in its environment, because mailtriage inherits it from its parent; see the [Agent guide](../agents/index.md).
+Look for `provider.key_present: true`. If it is false, `provider.key_error` explains why. A locked key store is one possible cause.
+
+Without a key, classification pauses and mail stays queued. Later passes resume when the key works. Listing, reading, correcting and marking mail done still work. `doctor` checks that a key is present; it does not test a request to OpenRouter.
+
+## Change the model
+
+```sh
+mailtriage setup --update --account work --model typesafe/jev-latest
+```
+
+Use a Decisions model ID. Ordinary chat-model APIs do not provide the decision probabilities mailtriage needs.
+
+The `latest` alias follows OpenRouter's newer Jev models. To keep one specific model, use its fixed ID. Changing the model queues open mail for classification again and keeps the existing key source.
+
+A mistyped model ID is detected only when classification runs. See the [provider reference](../reference/provider.md) for model behavior, key errors and retry details.
+
+## Detailed reference
+
+- <span id="key-command-rules"></span>[Key command rules](../reference/provider.md#key-command-rules)

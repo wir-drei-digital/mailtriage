@@ -80,6 +80,9 @@ mailtriage doctor --account work --json
 
 Run it in the same environment as the command you are checking. `doctor` exits 0 whether or not the account is ready, so read the fields:
 
+Look for `ready: true`, `transport.configured: true` and `provider.key_present: true`. If a check fails, read `provider.key_error` or `transport.error`.
+
+::: details All doctor fields
 | Field | Value when ready | Meaning |
 | --- | --- | --- |
 | `ready` | `true` | The provider configuration is valid, the key is present, and the Himalaya check passed. |
@@ -96,6 +99,8 @@ Run it in the same environment as the command you are checking. `doctor` exits 0
 | `live_checks_performed` | `false` | Always `false`. |
 | `update.ready` | `true` | `update` is the block [`service status`](./service.md#service-commands) shows, plus `ready`: `false` only when `updates` is `auto` and the binary may not be replaced, and then `fix` says what to do. The top-level `ready` ignores it. |
 
+:::
+
 `doctor` runs the key command to check it, so on macOS the first run may show a Keychain access dialog. It makes no provider request.
 
 It logs in to the IMAP server only when filing is on, to add a `filing` block with the server's capabilities, folders and problems. The first `sync` is therefore the first full test of the IMAP login and the API key.
@@ -109,7 +114,7 @@ It logs in to the IMAP server only when filing is on, to add a `filing` block wi
    mailtriage sync --account work --limit 20 --json
    ```
 
-   Exit code 0 with `scan_errors: 0` and `failed: 0` means the login, the fetch and the provider request worked. Exit code 4 means the pass was partial.
+   Exit code 0 with `scan_errors: 0` and `failed: 0` means the pass completed. Check that `classified` is greater than zero to confirm it exercised the provider. Exit code 4 means the pass was partial.
 
    A `classification` object with `skipped: true` means the key is unavailable; its `reason` says why, and `doctor` shows the same `key_error`.
 

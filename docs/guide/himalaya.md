@@ -1,6 +1,6 @@
 # Himalaya versions
 
-mailtriage reaches your mailbox through Himalaya, so the Himalaya it runs has to be one we have tested. This page says which versions work, how Himalaya resolves folder names, and how to give mailtriage its own copy.
+Himalaya connects mailtriage to your IMAP mailbox. Setup offers to install a tested copy for you; you usually do not need to manage it yourself.
 
 mailtriage runs Himalaya for every mailbox operation and accepts only the versions it is tested with: **2.1.0** and **2.2.1**. The list, with the SHA-256 of each version's release archives, is compiled into mailtriage from `src/engine/himalaya-versions.json`; a newer mailtriage release can add versions.
 
@@ -10,6 +10,9 @@ mailtriage runs Himalaya for every mailbox operation and accepts only the versio
 
 ## Folder names Himalaya resolves
 
+Do not use a Himalaya mailbox alias that redirects a watched or category folder to another mailbox. mailtriage will not read that folder; with filing enabled, it also stops filing writes until you fix the alias.
+
+::: details How aliases and mailbox roles are checked
 mailtriage gives `--mailbox` only to `message read`, which fetches a message's text, and Himalaya resolves that name before it opens a mailbox:
 
 1. through the merged alias map: the global `mailbox.alias` table, overridden key by key by the account's `accounts.NAME.mailbox.alias`. Keys compare case-insensitively, and `mailbox.aliases` is the same table;
@@ -21,6 +24,8 @@ A watched folder or category folder whose result is another mailbox (with `INBOX
 With filing on, the pass also reports `alias_conflict:FOLDER`, stops scanning the folder and makes no filing writes. Two alias keys that differ only in case and name different mailboxes count as a conflict too.
 
 When the Himalaya configuration cannot be parsed, mailtriage reads no folder at all, and `doctor` reports why in `transport.error`.
+
+:::
 
 ## A private Himalaya
 

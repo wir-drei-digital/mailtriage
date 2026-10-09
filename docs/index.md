@@ -3,90 +3,70 @@ layout: home
 
 hero:
   name: mailtriage
-  text: An inbox that sorts itself.
-  tagline: mailtriage reads your new mail, decides which of your categories each message belongs to, and files it into that category's folder. Mail that needs you gets a flag, so you see at a glance what to answer first, in any mail client.
+  text: Find the mail that needs you.
+  tagline: Classify incoming email, review what needs attention, and optionally file it into folders in your usual mail client.
   image:
     src: /mascot.webp
     alt: The mailtriage mascot, an orange envelope looking through a magnifying glass
   actions:
     - theme: brand
       text: Get started
-      link: /guide/introduction
+      link: /guide/install
     - theme: alt
-      text: GitHub
-      link: https://github.com/wir-drei-digital/mailtriage
+      text: How it works
+      link: /guide/introduction
 
 features:
-  - title: One folder per category
-    details: You define the categories, mailtriage creates the folders and moves new mail into them. It works in every mail client, your phone included.
-    link: /guide/filing
-    linkText: Filing into folders
-  - title: Three decisions per message
-    details: A category from your own list, an urgency (low, medium or high) and whether you need to act. You see the few messages that matter first.
+  - title: Review what matters
+    details: Each message gets a category, an urgency and a decision about whether you need to act. Correct a decision or mark a message done.
     link: /guide/daily-use
     linkText: Daily use
-  - title: A reply queue
-    details: Mail that needs an answer can wait in your inbox until you reply. Then it moves to its folder and is marked read once you approve it.
-    link: /guide/filing#reply-queue
-    linkText: Reply queue
-  - title: Runs on your machine
-    details: Your mail stays on your mail server. Decisions live in a local database, so listing and reading your mail work offline.
-    link: /guide/introduction#what-mailtriage-does-and-changes
-    linkText: What it changes
-  - title: Works in the background
-    details: A launchd or systemd service checks for new mail, every minute by default. A tray app shows whether each account is running and lets you edit categories.
-    link: /guide/service
-    linkText: Background service
-  - title: Made for agents too
-    details: Every command can print JSON and has documented exit codes, so an agent can triage your mail as well as you can.
-    link: /agents/
-    linkText: Agent guide
+  - title: Check mail in the background
+    details: A service checks for new mail. The tray app shows account status and lets you edit categories.
+    link: /guide/tray
+    linkText: Use the tray app
+  - title: Preview filing first
+    details: See which messages would move into category folders before enabling changes in your mailbox.
+    link: /guide/filing
+    linkText: File mail into folders
 ---
 
-## How it works
+<span id="install"></span>
+<span id="what-you-need"></span>
 
-1. **It reads your new mail.** mailtriage fetches new messages over IMAP through the [Himalaya](https://github.com/pimalaya/himalaya) CLI, once with `mailtriage sync` or continuously in the background.
-2. **A model decides.** For each message, an AI model (Jev by default, through OpenRouter's Decisions API) picks the category, the urgency and whether you need to act.
-3. **You see what matters.** `mailtriage list` shows the mail that needs your attention. If a decision is wrong, you correct it, and a message you've handled you mark as done.
-4. **Your mailbox can follow.** Turn on filing and mail moves into your category folders. Start with a dry run: it shows the planned moves and changes nothing.
+## Get started
 
-For example, a colleague asks for your feedback by Friday. That gets your work category, high urgency and "you need to act". The weekly newsletter gets its own category, low urgency and nothing to do.
-
-## What it never does
-
-- It never sends, deletes or expunges mail.
-- It never marks mail unread. Only the optional reply queue marks mail read, and only mail you approved.
-- By default it doesn't write to your mailbox at all. Filing stays off until you turn it on.
-
-## What you need
-
-- macOS or Linux.
-- An IMAP account. Filing into folders needs a server with the MOVE extension.
-- An [OpenRouter](https://openrouter.ai) API key.
-- [Himalaya](https://github.com/pimalaya/himalaya) 2.1.0 or 2.2.1. If you don't have it, `mailtriage setup` offers to install one just for mailtriage.
-
-## Install
-
-On macOS arm64 or Linux (amd64 or arm64):
+You need macOS on Apple silicon or Linux on amd64 or arm64, an IMAP mailbox, and an OpenRouter API key.
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/wir-drei-digital/mailtriage/main/install.sh | sh
 ```
 
-The script installs mailtriage into `~/.local/bin` and then offers `mailtriage setup`, which asks one question at a time.
+The installer offers to run setup, which connects your mailbox and key. Setup starts with a filing preview that makes no mailbox changes.
 
-**[Get started](/guide/introduction)**: the guide explains what mailtriage changes in your mailbox and walks you through setup.
+[Installation options](./guide/install.md) · [Setup walkthrough](./guide/setup.md) · [Troubleshooting](./guide/troubleshooting.md)
 
-## What stays and what leaves
+## How it works
 
-Your mail stays on your mail server, and mailtriage runs on your machine. What leaves it is what the classifier needs to decide: each message's sender, recipients, subject, date and text, with your address, time zone, the brief about you, and your categories (IDs, names and descriptions).
+mailtriage reads mail through Himalaya, asks an AI model through OpenRouter to classify it, and saves message text and decisions in a local database. You can then review messages in a terminal or let an agent work with them.
 
-With the `openrouter` provider, that goes to OpenRouter's Decisions API. The `fake` provider, for trying mailtriage offline, sends nothing.
+<span id="what-stays-and-what-leaves"></span>
 
-## Who makes mailtriage
+**Message content is sent to OpenRouter for classification.** The app runs locally, but the default classifier is an external service. See [where your data goes](./guide/introduction.md#where-your-data-goes).
 
-mailtriage is created and maintained by [wirdrei.digital](https://wirdrei.digital). We build it in the open on [GitHub](https://github.com/wir-drei-digital/mailtriage), where you can report a problem or suggest a change.
+<span id="what-it-never-does"></span>
 
----
+mailtriage never sends or deletes mail. Optional live filing moves mail and adds flags. Live filing still needs [provider verification](./guide/provider-check.md); no listed provider has a recorded go yet.
 
-This site follows `main`, so it can describe a feature that is newer than the latest release.
+## Find the right documentation
+
+- [User guide](./guide/introduction.md): understand mailtriage, set it up and use it day to day.
+- [Technical reference](./reference/index.md): exact flags, configuration fields and command behavior.
+- [Agent guide](./agents/index.md): integrate mailtriage into an agent's workflow.
+- [Development](./development/index.md): work on the code, test it and publish releases.
+
+<span id="who-makes-mailtriage"></span>
+
+Created by [wirdrei.digital](https://wirdrei.digital). Report issues and contribute on [GitHub](https://github.com/wir-drei-digital/mailtriage).
+
+This site follows `main`, so it may describe features newer than the latest release.

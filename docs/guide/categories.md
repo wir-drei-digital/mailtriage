@@ -1,49 +1,68 @@
-# Categories
+# Change your categories
 
-Your categories are the list mailtriage chooses from for every message. When your mail changes, change the list: export it, edit the file, check it, and apply it.
+Categories tell mailtriage how to sort your mail. A clear description matters more than a clever name: explain what belongs there, such as “Invoices, receipts, orders and account activity.”
 
-```sh
-mailtriage categories export --account work --json > categories.json
-mailtriage categories validate --file categories.json --account work --json
-mailtriage categories apply --account work --file categories.json --json
-mailtriage reclassify --account work --dry-run --json
-mailtriage reclassify --account work --since 2026-09-01 --json
-```
+The easiest way to edit them is the [tray categories window](./tray.md#the-categories-window): choose **Edit categories…**, make your changes, review the summary and apply.
 
-A category file holds a JSON array of categories or an object with a `categories` array; `categories export` writes the object form.
+## Edit from the terminal
 
-The [category fields](./configuration.md#a-complete-configuration) are the same as in `mailtriage.json`: a unique `id`, a non-empty `name` and `description`, optional `examples` and `folder`, and exactly one category with `catch_all: true`.
-
-`categories validate --file FILE` checks the file alone. With `--account NAME` it checks the file against that account's configuration, including the folder rules when the account's filing is on. Neither form writes anything.
-
-`categories apply` writes the categories into `mailtriage.json`. What happens next depends on what you changed. Say you only want a clearer name for a category: a rename (a change to `name` only) keeps the ID and does not reclassify.
-
-A change to a category's `id`, `description`, `examples` or `catch_all`, or an added or removed category, advances `taxonomy_revision` and queues all open messages for classification. Done messages stay done; a reopened message is classified under the current categories.
-
-Removing a category that a manual correction uses fails with `category has manual corrections; remap or clear them before removal` (exit code 2); correct those messages to another category or clear the correction first. Keep IDs when you edit category files by hand.
-
-`reclassify` queues the matching stored messages for classification and processes up to `--limit` of them (1 to 500, default 100); later passes process the rest.
-
-`--since YYYY-MM-DD` selects messages first observed on or after that local date. `--dry-run` reports `matched` and `will_process` and changes nothing.
-
-## Checking a change before you apply it
-
-A category file can go stale while you edit it, for example when another window or an agent applies a change meanwhile. The digest from the export makes `apply` refuse instead of overwriting that change:
+Export the current categories:
 
 ```sh
 mailtriage categories export --account work --json > categories.json
-# edit categories.json
-mailtriage categories validate --file categories.json --account work --json
-mailtriage categories apply --account work --file categories.json --expect-digest "$(jq -r .digest categories.json)" --json
 ```
 
-- `categories export` and `categories validate --account` report `digest`: `v1:` and a SHA-256 of the account's categories and whether its filing is on. It changes whenever something changes how `apply` would write the categories. The key order of a file and `"folder": null` versus no `folder` do not change it; the category order does.
-- `categories apply --expect-digest DIGEST` writes nothing and exits 5 with `categories changed since export; export again` (reason `categories_changed`) when the account's categories changed since the export (another window or agent applied a change), or filing was turned on or off. Export again and redo the edit.
-- `categories validate --file FILE --account NAME` also reports `changes`, computed after the same folder rules `apply` uses:
-  - `added` lists category IDs;
-  - `removed` lists `{"id","folder"}`;
-  - `renamed` and `folders_changed` list `{"id","from","to"}`;
-  - `edited` lists categories whose description, examples or default flag changed;
-  - `reclassifies` is `true` exactly when `apply` would sort all open mail again (it advances `taxonomy_revision`, which uses your OpenRouter key).
+Edit `categories.json` in your text editor. Keep each existing `id`, even when renaming a category. Every category needs a unique ID, a name and a description. Exactly one must have `catch_all: true` for mail that fits nowhere else.
 
-  Folder names in `changes` are for display.
+Then check and apply:
+
+```sh
+mailtriage categories validate --file categories.json --account work
+mailtriage categories apply --account work --file categories.json
+```
+
+Validation changes nothing. With `--account`, it also checks folder rules and reports what applying the file would change. The file can contain a JSON array or an object with a `categories` array.
+
+## What happens to existing mail
+
+| Change | Result |
+| --- | --- |
+| Rename only (`name`) | Keeps the ID and folder. Does not classify mail again. |
+| Add or remove a category; change its ID, description, examples or default status | Queues open mail for classification again. This uses your OpenRouter key. |
+| Change a folder | New filing uses that folder. Already-filed mail stays until you [refile it](./filing.md#refiling-after-category-changes). |
+
+Done messages stay done. Your manual corrections survive reclassification. You cannot remove a category used by a manual correction until you change or clear those corrections.
+
+Category `examples` are stored but are not sent to the classifier. Put the guidance the model needs in `description`. The [field reference](../reference/configuration.md#a-complete-configuration) covers all fields and folder rules.
+
+## Classify stored mail again
+
+To preview a manual reclassification:
+
+```sh
+mailtriage reclassify --account work --dry-run
+```
+
+To reclassify messages first observed on or after a local date:
+
+```sh
+mailtriage reclassify --account work --since 2026-09-01
+```
+
+This queues matching messages and processes up to `--limit` now (default 100, range 1 to 500). Later passes process the rest. The date refers to when mailtriage first saw a message, not the date printed on the email.
+
+## Avoid overwriting another edit {#checking-a-change-before-you-apply-it}
+
+If another window or agent may edit categories while you work, apply with the `digest` from your export. With `jq` installed:
+
+```sh
+mailtriage categories apply --account work --file categories.json --expect-digest "$(jq -r .digest categories.json)"
+```
+
+If the categories or filing-enabled state changed since export, this writes nothing and exits 5 with `categories_changed`. Export again and redo the edit.
+
+::: details Digest and validation output
+The digest starts with `v1:` and contains a SHA-256 of the categories and whether filing is enabled. Category order affects it; JSON key order and omitted versus null `folder` do not.
+
+Validation with `--account` reports `changes`: `added` IDs; `removed` entries with `id` and `folder`; `renamed` and `folders_changed` entries with `id`, `from` and `to`; and `edited` categories whose description, examples or default status changed. `reclassifies: true` means applying advances `taxonomy_revision` and queues open mail again. Folder names in this result are for display.
+:::

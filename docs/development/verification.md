@@ -1,4 +1,8 @@
-# Build and verification receipt
+# Verification and test checklists
+
+Use the checklists below to verify a release on real mail providers and desktop systems. Empty result cells mean no outcome has been recorded. The historical build receipt records checks from 2026-09-23; it is not a current test-run report.
+
+::: details Historical build receipt from 2026-09-23
 
 2026-09-23. Implemented with three GPT-6 Sol agents and coordinator integration,
 following the [implementation plan](https://github.com/wir-drei-digital/mailtriage/blob/main/design/history/implementation-plan.md). Independent review
@@ -36,6 +40,8 @@ Local executable: `dist/mailtriage` (ignored build artifact). SHA-256:
 
 No private mailbox was read, no API key was used, and no remote repository or
 release was published. No Valea application code was changed.
+
+:::
 
 ## Live gates
 
@@ -91,7 +97,7 @@ MT_E2E_HIMALAYA="$(command -v himalaya)" bash tests/e2e/run.sh prefix 31144
 
 ## Live provider check
 
-The live provider check before `live` filing on a real mailbox is in the guide: [Provider check](../guide/provider-check.md).
+Before live filing on a real mailbox, complete the [mail provider checklist](./mail-provider-check.md). The [compatibility summary](../guide/provider-check.md) shows the recorded outcomes.
 
 ## Guided setup on a real machine (human check)
 
@@ -194,6 +200,8 @@ Setup: build both binaries as a release does (`cargo build --release --locked -p
 
 The automated review renders every window screen in light and dark mode (`cargo test --locked -p mailtriage-tray --test screens -- --ignored`, files in `target/tray-screens/`) and prints the menus for every state. The table records the outcome per screen against the spec's UI principles.
 
+::: details Recorded design review from 2026-10-07
+
 | Screen | Plain words | Calm layout | Look (light/dark, 8 px, 14/18 pt) | Feedback | Empty and first-run states | Keyboard and accessibility | Date |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 01-loading | pass: "Loading…" | pass: list left, form right, Apply bottom right with Revert beside it | fixed: disabled Apply was a dimmed blue (text 1.6:1 light, 3.7:1 dark) that still looked clickable; it is now gray like every disabled button | pass: spinner and "Loading…" in the form and the footer; selector, Reload, Add, Revert and Apply disabled with a tooltip | n/a | pass: every control labeled | 2026-10-07 |
@@ -214,6 +222,8 @@ The automated review renders every window screen in light and dark mode (`cargo 
 | 16-not-found | pass: "mailtriage not found (looked in …)" (the spec's text; the guide says what to do) | pass | pass: error color as 05 | fixed: Add and Apply said "Wait until loading finishes" for a load that never comes; they now say "The categories could not be loaded; the message at the bottom says why" (window and model tests) | pass: the message names where the tray looked | pass: exits 3 (window test) | 2026-10-07 |
 | Menus (`menus.txt`, 8 states) | pass: "Running · checked HH:MM", "Stopped", "Problem since HH:MM", "Open log", "Status unknown", "Runs another config" with "Runs PATH"; no exit codes or JSON. Fixed: commands in menu lines showed the spec's Markdown backticks; they are plain text now ("run mailtriage service install --account NAME") | pass: summary, notices, accounts with a submenu each, then Refresh now, Start at login, Quit. Fixed: with nothing running for this config, an account whose service runs another config made the summary read "Stopped" while its submenu said "Running"; it now reads "daniel runs another config" (the icon stays off) | native drawing: human check | pass: "Starting…", "Stopping…", "Installing…" replace the service item while it runs | pass: "No check yet", "Not installed" with "Install service" | native menu: human check | 2026-10-07 |
 | Menu bar (real) | menu bar: human check | menu bar: human check | menu bar: human check | menu bar: human check | menu bar: human check | menu bar: human check | 2026-10-07 |
+
+:::
 
 ## Automatic updates on a real machine (human check)
 

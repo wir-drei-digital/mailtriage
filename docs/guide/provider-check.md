@@ -1,93 +1,31 @@
-# Provider check
+# Mail provider compatibility
 
-Filing in `live` moves real mail, so you want to know first that your mail provider behaves the way mailtriage expects. This page records that check, provider by provider.
+Live filing needs more than an IMAP connection: moving messages, flags and folder roles must behave as mailtriage expects on your provider.
 
-Before you use `live` on a real mailbox, the live provider check in the [filing design](https://github.com/wir-drei-digital/mailtriage/blob/main/design/specs/2026-10-04-imap-category-filing-design.md#live-provider-check) must have recorded a go for your provider (Gmail / Google Workspace, Microsoft 365 / Outlook.com, iCloud, Fastmail / Dovecot) in the [Outcome](#outcome) table below. A no-go will be listed here.
-
-::: warning Important
-No provider has been checked yet. Until yours has a recorded go, use `dry_run`, which never writes.
-:::
-
-The Dovecot end-to-end job covers the protocol contract, not provider behavior. So before you set `filing.mode` to `live` on a real mailbox, run this check for that provider with a throwaway test account configured in Himalaya ([Set up Himalaya](./manual-setup.md#_1-set-up-himalaya); procedure in the [filing design](https://github.com/wir-drei-digital/mailtriage/blob/main/design/specs/2026-10-04-imap-category-filing-design.md#live-provider-check)).
-
-No credentials, message bodies or real addresses go on this page: record redacted output, or where the evidence is kept. `Result` is `pass`, `fail` or `differs` (with a note).
-
-## Gmail / Google Workspace
-
-| Check | Result | Evidence | Date |
-| --- | --- | --- | --- |
-| `imap raw` output for pipelined `CAPABILITY`/`NAMESPACE` | | | |
-| `imap raw` output for `SELECT` + `UID MOVE` (UIDVALIDITY, COPYUID) | | | |
-| `imap raw` output for `SELECT` + `UID STORE` | | | |
-| `imap raw` output for `LIST "" "*" RETURN (SPECIAL-USE)` | | | |
-| `imap list --all --json` and `imap list --json` shapes, delimiter, attributes returned, and the representation of a non-ASCII folder name | | | |
-| The alias table location in the Himalaya TOML | | | |
-| Create and subscribe for an ASCII and a non-ASCII name | | | |
-| INTERNALDATE, size and Message-ID before and after a move | | | |
-| `\Flagged` in the provider's web and mobile clients | | | |
-| `\Seen` unchanged by fetch, move and store | | | |
-| Reply queue: `\Answered` set by the web and mobile clients on reply; answered mail moved unread; `\Seen` added by `a2 UID STORE` only after `filing replies --approve` | | | |
-| Gmail: label semantics of MOVE from INBOX, archive, and a message carrying two category labels | | | |
-| Login rate: one `watch` with seven watched folders at a 60-second interval for 30 minutes without throttling; if throttled, whether pipelined STATUS via `imap raw` resolves it | | | |
-
-## Microsoft 365 / Outlook.com
-
-| Check | Result | Evidence | Date |
-| --- | --- | --- | --- |
-| `imap raw` output for pipelined `CAPABILITY`/`NAMESPACE` | | | |
-| `imap raw` output for `SELECT` + `UID MOVE` (UIDVALIDITY, COPYUID) | | | |
-| `imap raw` output for `SELECT` + `UID STORE` | | | |
-| `imap raw` output for `LIST "" "*" RETURN (SPECIAL-USE)` | | | |
-| `imap list --all --json` and `imap list --json` shapes, delimiter, attributes returned, and the representation of a non-ASCII folder name | | | |
-| The alias table location in the Himalaya TOML | | | |
-| Create and subscribe for an ASCII and a non-ASCII name | | | |
-| INTERNALDATE, size and Message-ID before and after a move | | | |
-| `\Flagged` in the provider's web and mobile clients | | | |
-| `\Seen` unchanged by fetch, move and store | | | |
-| Reply queue: `\Answered` set by the web and mobile clients on reply; answered mail moved unread; `\Seen` added by `a2 UID STORE` only after `filing replies --approve` | | | |
-| Login rate: one `watch` with seven watched folders at a 60-second interval for 30 minutes without throttling; if throttled, whether pipelined STATUS via `imap raw` resolves it | | | |
-
-## iCloud
-
-| Check | Result | Evidence | Date |
-| --- | --- | --- | --- |
-| `imap raw` output for pipelined `CAPABILITY`/`NAMESPACE` | | | |
-| `imap raw` output for `SELECT` + `UID MOVE` (UIDVALIDITY, COPYUID) | | | |
-| `imap raw` output for `SELECT` + `UID STORE` | | | |
-| `imap raw` output for `LIST "" "*" RETURN (SPECIAL-USE)` | | | |
-| `imap list --all --json` and `imap list --json` shapes, delimiter, attributes returned, and the representation of a non-ASCII folder name | | | |
-| The alias table location in the Himalaya TOML | | | |
-| Create and subscribe for an ASCII and a non-ASCII name | | | |
-| INTERNALDATE, size and Message-ID before and after a move | | | |
-| `\Flagged` in the provider's web and mobile clients | | | |
-| `\Seen` unchanged by fetch, move and store | | | |
-| Reply queue: `\Answered` set by the web and mobile clients on reply; answered mail moved unread; `\Seen` added by `a2 UID STORE` only after `filing replies --approve` | | | |
-| Login rate: one `watch` with seven watched folders at a 60-second interval for 30 minutes without throttling; if throttled, whether pipelined STATUS via `imap raw` resolves it | | | |
-
-## Fastmail or a Dovecot host
-
-| Check | Result | Evidence | Date |
-| --- | --- | --- | --- |
-| `imap raw` output for pipelined `CAPABILITY`/`NAMESPACE` | | | |
-| `imap raw` output for `SELECT` + `UID MOVE` (UIDVALIDITY, COPYUID) | | | |
-| `imap raw` output for `SELECT` + `UID STORE` | | | |
-| `imap raw` output for `LIST "" "*" RETURN (SPECIAL-USE)` | | | |
-| `imap list --all --json` and `imap list --json` shapes, delimiter, attributes returned, and the representation of a non-ASCII folder name | | | |
-| The alias table location in the Himalaya TOML | | | |
-| Create and subscribe for an ASCII and a non-ASCII name | | | |
-| INTERNALDATE, size and Message-ID before and after a move | | | |
-| `\Flagged` in the provider's web and mobile clients | | | |
-| `\Seen` unchanged by fetch, move and store | | | |
-| Reply queue: `\Answered` set by the web and mobile clients on reply; answered mail moved unread; `\Seen` added by `a2 UID STORE` only after `filing replies --approve` | | | |
-| Login rate: one `watch` with seven watched folders at a 60-second interval for 30 minutes without throttling; if throttled, whether pipelined STATUS via `imap raw` resolves it | | | |
+**No listed provider has a recorded live-filing go yet. Keep filing in `dry_run` until yours has passed.** Dry-run mode previews changes without writing to your mailbox.
 
 ## Outcome
 
-| Provider | Outcome (go / go with noted differences / no-go) | Notes | Date |
-| --- | --- | --- | --- |
-| Gmail / Google Workspace | not checked | | |
-| Microsoft 365 / Outlook.com | not checked | | |
-| iCloud | not checked | | |
-| Fastmail or a Dovecot host | not checked | | |
+| Provider | Live filing status |
+| --- | --- |
+| Gmail / Google Workspace | Not checked |
+| Microsoft 365 / Outlook.com | Not checked |
+| iCloud | Not checked |
+| Fastmail or a Dovecot host | Not checked |
 
-A no-go blocks enabling `live` for that provider until it is resolved, and it is listed at the top of this page.
+The automated Dovecot tests check the protocol implementation. They do not establish that Gmail, Microsoft 365, iCloud or Fastmail behave the same way.
+
+## Verify a provider
+
+Use a throwaway test account and follow the [mail provider test checklist](../development/mail-provider-check.md). It covers moves, read state, flags, folders, reply detection and login throttling.
+
+Record the result and redacted evidence in that checklist. Do not include credentials, message bodies or real addresses. A failed check blocks live filing until resolved.
+
+Return to [filing setup](./filing.md#rollout) after your provider has a recorded go.
+
+## Detailed reference
+
+- <span id="gmail-google-workspace"></span>[Gmail / Google Workspace](../development/mail-provider-check.md#gmail-google-workspace)
+- <span id="microsoft-365-outlook-com"></span>[Microsoft 365 / Outlook.com](../development/mail-provider-check.md#microsoft-365-outlook-com)
+- <span id="icloud"></span>[iCloud](../development/mail-provider-check.md#icloud)
+- <span id="fastmail-or-a-dovecot-host"></span>[Fastmail or a Dovecot host](../development/mail-provider-check.md#fastmail-or-a-dovecot-host)

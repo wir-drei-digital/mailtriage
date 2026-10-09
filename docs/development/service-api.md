@@ -1,9 +1,8 @@
 # Service API for CLI implementation
 
-Use `mailtriage::service::{Service,ListOptions}` from the binary (src/cli.rs can
-be declared in main.rs). All service methods return `anyhow::Result<Value>`.
-Construct once per command: `Service::open(&Path) -> Result<Self>`. State path
-and relative Himalaya config path resolve against app config file's parent.
+The CLI uses `mailtriage::service::{Service, ListOptions}` to read and change local mailtriage state. Construct a `Service` once per command with `Service::open(&Path)`. Its methods return `anyhow::Result<Value>`.
+
+State and relative Himalaya configuration paths resolve from the directory containing the app configuration. For CLI options and JSON fields without Rust internals, use the [technical reference](../reference/index.md).
 
 ```rust
 pub struct ListOptions {
@@ -55,10 +54,6 @@ Partial sync returns successful Value with `partial:true`; CLI exits4 after
 printing. Never print raw debug chain from provider/transport errors (possible
 secrets).
 
-Develop CLI against these signatures. Do not edit lib.rs/service.rs/store.rs;
-coordinator provides them. Own src/main.rs src/cli.rs README.md examples/,
-docs/agents/index.md, .github/workflows/ci.yml and tests/cli.rs. Offline tests run explicit
-fake provider using temporary config. release.yml optional with artifacts.
 
 ## Config resolution
 

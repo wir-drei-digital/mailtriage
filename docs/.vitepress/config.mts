@@ -7,7 +7,7 @@ const base = '/mailtriage/'
 export default defineConfig({
   title: 'mailtriage',
   description:
-    'Local email classification and attention queries for humans and agents',
+    'Set up mailtriage, review your email and manage optional filing',
   base,
   cleanUrls: true,
   head: [['link', { rel: 'icon', type: 'image/png', href: `${base}favicon.png` }]],
@@ -15,6 +15,7 @@ export default defineConfig({
     logo: { src: '/logo.png', alt: '' },
     nav: [
       { text: 'Guide', link: '/guide/introduction', activeMatch: '^/guide/' },
+      { text: 'Reference', link: '/reference/', activeMatch: '^/reference/' },
       { text: 'Agents', link: '/agents/', activeMatch: '^/agents/' },
       {
         text: 'Development',
@@ -28,30 +29,63 @@ export default defineConfig({
     sidebar: {
       '/guide/': [
         {
-          text: 'Guide',
+          text: 'Get started',
           items: [
-            { text: 'Introduction', link: '/guide/introduction' },
+            { text: 'What is mailtriage?', link: '/guide/introduction' },
             { text: 'Install', link: '/guide/install' },
-            { text: 'Guided setup', link: '/guide/setup' },
-            { text: 'Manual setup', link: '/guide/manual-setup' },
-            { text: 'Configuration', link: '/guide/configuration' },
-            { text: 'Provider', link: '/guide/provider' },
-            { text: 'Background service', link: '/guide/service' },
-            { text: 'Updates', link: '/guide/updates' },
-            { text: 'Himalaya', link: '/guide/himalaya' },
+            { text: 'Set up your mailbox', link: '/guide/setup' },
+          ],
+        },
+        {
+          text: 'Use mailtriage',
+          items: [
             { text: 'Daily use', link: '/guide/daily-use' },
-            { text: 'Categories', link: '/guide/categories' },
-            { text: 'Filing', link: '/guide/filing' },
-            { text: 'Provider check', link: '/guide/provider-check' },
-            { text: 'Tray', link: '/guide/tray' },
-            { text: 'Reference', link: '/guide/reference' },
+            { text: 'Change categories', link: '/guide/categories' },
+            { text: 'Use the tray app', link: '/guide/tray' },
+            { text: 'Run in the background', link: '/guide/service' },
+            { text: 'File mail into folders', link: '/guide/filing' },
+            { text: 'Updates', link: '/guide/updates' },
+          ],
+        },
+        {
+          text: 'Help and settings',
+          items: [
+            { text: 'Troubleshooting', link: '/guide/troubleshooting' },
+            { text: 'Configuration', link: '/guide/configuration' },
+            { text: 'API keys and models', link: '/guide/provider' },
+            { text: 'Mail provider compatibility', link: '/guide/provider-check' },
+            { text: 'Himalaya versions', link: '/guide/himalaya' },
+            { text: 'Manual setup', link: '/guide/manual-setup' },
+            { text: 'Errors and local data', link: '/guide/reference' },
+            { text: 'Technical reference', link: '/reference/' },
+          ],
+        },
+      ],
+      '/reference/': [
+        {
+          text: 'Technical reference',
+          items: [
+            { text: 'Overview', link: '/reference/' },
+            { text: 'Installation', link: '/reference/install' },
+            { text: 'Setup', link: '/reference/setup' },
+            { text: 'Configuration', link: '/reference/configuration' },
+            { text: 'Provider and keys', link: '/reference/provider' },
+            { text: 'Sync and queries', link: '/reference/daily-use' },
+            { text: 'Background service', link: '/reference/service' },
+            { text: 'Filing', link: '/reference/filing' },
+            { text: 'Tray', link: '/reference/tray' },
+            { text: 'Updates', link: '/reference/updates' },
+            { text: 'Errors and local data', link: '/guide/reference' },
           ],
         },
       ],
       '/agents/': [
         {
           text: 'Agents',
-          items: [{ text: 'Agent guide', link: '/agents/' }],
+          items: [
+            { text: 'Agent guide', link: '/agents/' },
+            { text: 'Command reference', link: '/agents/reference' },
+          ],
         },
       ],
       '/development/': [
@@ -63,6 +97,7 @@ export default defineConfig({
             { text: 'Providers', link: '/development/providers' },
             { text: 'Releases', link: '/development/releases' },
             { text: 'Verification', link: '/development/verification' },
+            { text: 'Mail provider tests', link: '/development/mail-provider-check' },
           ],
         },
       ],

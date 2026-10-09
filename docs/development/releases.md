@@ -1,6 +1,6 @@
 # Releases
 
-Repository: https://github.com/wir-drei-digital/mailtriage
+Releases are built and published from [wir-drei-digital/mailtriage](https://github.com/wir-drei-digital/mailtriage). Start with [Publish a version](#publish-a-version), and read the deployment rules before tagging a stable release.
 
 Every branch push and pull request runs the shared build workflow on Linux
 amd64, Linux arm64 and macOS arm64. Each job checks formatting, runs clippy and
@@ -55,8 +55,7 @@ resolver in Himalaya's source for role changes: the script copies `roles` from
 the previous version.
 
 Also update the places in `README.md` and the guide pages
-(`docs/guide/himalaya.md`, `setup.md`, `manual-setup.md` and
-`configuration.md`) that name the tested versions or the newest one. Push these
+(`docs/guide/` and `docs/reference/`) that name the tested versions or the newest one. Push these
 edits to the pull request's branch, never to `main` directly. The tests derive
 the tested versions from the data file, so a valid new entry needs no test
 change.
@@ -81,8 +80,7 @@ version's `roles`. Then:
    `roles` and the tests that pin them (`src/engine/versions.rs`,
    `src/engine/targets.rs`) if it changed.
 2. Update the places in `README.md` and the guide pages
-   (`docs/guide/himalaya.md`, `setup.md`, `manual-setup.md` and
-   `configuration.md`) that name the tested versions or the newest one.
+   (`docs/guide/` and `docs/reference/`) that name the tested versions or the newest one.
 3. Push the branch and open a pull request; never push to `main` directly.
    The pull request runs CI and `e2e.yml`, which runs the suite for every
    listed version.

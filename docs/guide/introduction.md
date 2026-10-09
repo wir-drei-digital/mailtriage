@@ -1,44 +1,51 @@
-# Introduction
+# What is mailtriage
 
-This guide gets mailtriage working on your own mail. You install it, set it up for your mailbox, and decide how far it goes: from only recording its decisions to filing your mail into folders.
+mailtriage helps you find the email that needs your attention. It runs on your computer, checks your mailbox, and uses an AI model to give each message a category, an urgency, and an answer to “Do I need to act?”
+
+For example, a customer's question might need a reply today. A receipt belongs in Transactions but needs no action. You can review those decisions in a terminal, correct them, and mark messages done.
 
 ## What mailtriage does and changes
 
-In a busy inbox only some mail needs you, but you have to open it all to find out which. `mailtriage` is a command-line tool that classifies email, so you can look at the few messages that matter first.
+mailtriage reads your mailbox through [Himalaya](./himalaya.md), a command-line email tool. It saves message text and decisions locally, so you can list and read messages even when you are offline.
 
-For each message it records three decisions: a category from your own list, an urgency (`low`, `medium` or `high`), and whether you need to act. A colleague's question that waits for your answer might get your work category, `high` urgency and "action needed"; a newsletter might get its own category and nothing to do.
+You choose how much it changes in your mailbox:
 
-It reads mail over IMAP through the [Himalaya](https://github.com/pimalaya/himalaya) CLI and gets the decisions from OpenRouter's Decisions API with a Decisions model (Jev by default). It stores messages and results in a local SQLite database. Listing and reading work from that database without network access.
+| Mode | What happens |
+| --- | --- |
+| Classification only (`off`) | Records decisions locally. Makes no mailbox changes. |
+| Preview filing (`dry_run`) | Also shows which folders, moves and flags it would use. Makes no mailbox changes. This is what setup chooses for a new account. |
+| Live filing (`live`) | Creates category folders, moves eligible mail and flags messages that need attention. You must enable this yourself. |
 
-Your mail stays on your mail server, and mailtriage runs on your machine. What leaves it is what the classifier needs: each message's sender, recipients, subject, date and text, with your address, time zone and brief, and the IDs, names and descriptions of your categories.
+mailtriage never sends or deletes mail. It preserves read state, except when you explicitly approve marking mail read through the optional [reply queue](./filing.md#reply-queue).
 
-With the `openrouter` provider, that goes to OpenRouter's Decisions API, along with the time of the request and notes on how complete the text is. [Configuration](./configuration.md#a-complete-configuration) has the details. The `fake` provider below sends nothing.
+Live filing needs a verified mail provider. **None of the listed providers has a recorded go yet**; use dry-run mode for now. See [mail provider compatibility](./provider-check.md).
 
-mailtriage never sends, deletes or expunges mail and never removes the read state (`\Seen`). Anything else it changes in your mailbox depends on what you turn on:
+## Where your data goes
 
-- **By default**: nothing. mailtriage does not write to the mailbox at all.
-- **[Filing into folders](./filing.md)**: when an account enables it, mailtriage also creates category folders, moves mail into them and adds `\Flagged`.
-- **The optional [reply queue](./filing.md#reply-queue)**: only this adds `\Seen`, to answered or done mail you approved.
+With the default OpenRouter provider, mailtriage sends message headers and body text to OpenRouter's Decisions API for classification. It also sends your address, time zone, brief and category definitions. The [configuration reference](../reference/configuration.md#a-complete-configuration) describes the fields and text limits.
 
-`done` and `reopen` change only the local review state. Every command works on one configured account, named with `--account`.
+Your mailbox remains on your mail server. The local database holds message text, decisions and your corrections. The offline `fake` provider sends nothing, but uses simple keyword rules rather than an AI model.
+
+## Get started
+
+1. [Install mailtriage](./install.md).
+2. [Run setup](./setup.md) to connect your mailbox and OpenRouter key.
+3. [Review your mail](./daily-use.md) and adjust your categories.
+
+The examples use an account named `work`. Replace it with the name you choose during setup.
 
 ## Try it offline
 
-You can watch mailtriage classify a sample message before you point it at real mail. The built-in `fake` provider classifies with fixed keyword rules and makes no network request.
-
-::: warning Important
-Run the example in a scratch directory and delete the directory afterwards. The first command against an account records that account's identity in the state directory, so the example account cannot be reused for real mail.
-:::
-
-Unset `MAILTRIAGE_CONFIG` first; it comes before `./mailtriage.json` in the [config resolution order](./configuration.md#where-mailtriage-finds-the-config).
+If you have a copy of the repository, you can classify a sample message without connecting a mailbox:
 
 ```sh
-mkdir mailtriage-demo && cd mailtriage-demo
-mailtriage init --json
-mailtriage classify --account work --input /path/to/mailtriage/examples/reply-request.eml --format rfc822 --json
-mailtriage list --account work --view attention --json
+mkdir mailtriage-demo
+cd mailtriage-demo
+mailtriage init --config ./mailtriage.json
+mailtriage classify --config ./mailtriage.json --account work --input /path/to/mailtriage/examples/reply-request.eml --format rfc822
+mailtriage list --config ./mailtriage.json --account work
 ```
 
-`init` writes `mailtriage.json` in the current directory, with the `fake` provider, one account named `work` and state in `.state/`. It refuses to overwrite an existing file (exit code 2). The later commands find that file because they run in the same directory.
+Replace the sample path with the path to your checkout. `init` creates a demo account using the `fake` provider and stores its data in `.state/`.
 
-`classify` reads one message, classifies it and stores the result without a mailbox location. It accepts an RFC 822 file (`--format rfc822`), the JSON shape in `examples/message.json` (`--format json`), or stdin (`--input -`). Classifying the same message again returns `outcome: cached`.
+Keep this demo directory separate from your real setup, and delete it when finished. Once used, the demo account is bound to its sample identity and cannot be reused for a different mailbox.
