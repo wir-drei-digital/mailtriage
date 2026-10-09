@@ -399,3 +399,30 @@ fn answered_mail_is_not_flagged_after_it_leaves_the_queue() {
         .count();
     assert_eq!(flag_calls, 0);
 }
+
+#[test]
+fn a_uid_that_shows_other_mail_is_reported_and_not_read() {
+    let h = queued(Live);
+    file_in_order(&h, &["i"]);
+    h.service().filing_replies("work", true, &[]).unwrap();
+    let (folder, uid) = place(&h, "i");
+    // The stored size no longer matches what the UID shows.
+    let other = mailtriage::domain::SourceEnvelope {
+        uid,
+        size: Some(1),
+        ..Default::default()
+    };
+    h.service()
+        .store
+        .hydrate("work", &id_of(&h, "i"), &other)
+        .unwrap();
+    let out = h.sync();
+    assert!(
+        has_problem(&out, &format!("read_mismatch:{folder}")),
+        "{out}"
+    );
+    assert_eq!(seen_writes(&h), 0);
+    assert!(!has(&flags(&h, "i"), "\\Seen"));
+    let replies = h.service().filing_replies("work", false, &[]).unwrap();
+    assert_eq!(replies["approved_pending"], 1, "the row waits");
+}

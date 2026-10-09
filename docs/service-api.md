@@ -588,8 +588,10 @@ epoch. Additive, so a process of the previous release keeps inserting rows.
 - The sync `filing` object (and the stored last pass) gains
   `awaiting_reply`, `reply_exits`, `replies_checked` and `reads_applied`,
   each only when not 0; problems `reply_check_failed:<folder>`,
-  `read_failed:<folder>` and `read_incomplete:<folder>`, and
-  `epoch_race:<folder>` for a `\Seen` race.
+  `read_failed:<folder>`, `read_incomplete:<folder>` and
+  `read_mismatch:<folder>` (a UID that shows another Message-ID or size;
+  no error count, the row waits), and `epoch_race:<folder>` for a `\Seen`
+  race.
 - `filing replies [--approve [--id ID]...]` (`Service::filing_replies`):
   `{"schema_version":1,"account":"work","waiting":W,"approved_pending":A,"approved":[ids],"items":[{"id","subject","from","folder","answered","requested_at","approved_at"}]}`.
   An `--id` that is not waiting is exit code 2 and approves nothing.

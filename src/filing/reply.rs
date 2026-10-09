@@ -7,23 +7,21 @@
 //! `add_seen` session is recorded on its rows (folder and epoch) before it
 //! runs, so an epoch race, detected or suspected, pauses the folder as a
 //! flag race does.
-use super::apply::{commit, event, paused, race_problem, write_failed};
+use super::apply::{commit, event, matches_meta, paused, race_problem, write_failed};
 use super::observe::FolderMap;
 use super::planner::{self, PlanInput, PlanMessage};
-use super::{
-    is_config_changed, rfc_message_id, FilingSummary, FilingWrite, LocationState, PassContext,
-};
+use super::{is_config_changed, FilingSummary, FilingWrite, LocationState, PassContext};
 use crate::domain::FilingMode;
 use crate::store::{now, Store};
 use anyhow::Result;
-use serde_json::{json, Value};
+use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// UIDs per `envelopes` call.
 const BATCH: usize = 100;
 
-/// An approved message in its home: UID, message id, stored Message-ID.
-type ReadMember = (u64, String, Option<String>);
+/// An approved message in its home: UID, message id.
+type ReadMember = (u64, String);
 
 /// Reads the flags of every held, not yet answered message again and stores
 /// the ones that changed, in the store and in `input`. A folder whose
@@ -114,8 +112,9 @@ fn refresh_batch(
 /// unknown, blocked, being moved, in a paused folder or another epoch, or
 /// while an earlier session's outcome waits for `recover_reads`; it is
 /// retried on a later pass. Each UID is checked to still name the
-/// message (its Message-ID) right before the write; a message that already
-/// carries `\Seen` needs no write.
+/// message (its stored Message-ID and size, as batch verification checks)
+/// right before the write; a message that already carries `\Seen` needs no
+/// write.
 pub fn apply_reads(
     store: &mut Store,
     ctx: &PassContext,
@@ -151,16 +150,10 @@ pub fn apply_reads(
         {
             continue;
         }
-        let rfc = store.record(ctx.account, &row.message_id)?.and_then(|r| {
-            r.envelope
-                .get("message_id")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        });
         groups
             .entry((folder.clone(), epoch))
             .or_default()
-            .push((uid, row.message_id, rfc));
+            .push((uid, row.message_id));
     }
     for ((folder, epoch), members) in groups {
         for chunk in members.chunks(BATCH) {
@@ -172,10 +165,12 @@ pub fn apply_reads(
     Ok(())
 }
 
-/// One verified `add_seen` session for approved messages in `folder`. The
-/// session's folder and epoch are recorded on the rows it writes before it
-/// runs and cleared once its outcome is known; a lost outcome keeps them
-/// for `recover_reads`.
+/// One verified `add_seen` session for approved messages in `folder`. A UID
+/// that shows another Message-ID or size is not written and reported as
+/// `read_mismatch:<folder>` (once per folder and pass). The session's
+/// folder and epoch are recorded on the rows it writes before it runs and
+/// cleared once its outcome is known; a lost outcome keeps them for
+/// `recover_reads`.
 fn read_batch(
     store: &mut Store,
     ctx: &PassContext,
@@ -184,18 +179,22 @@ fn read_batch(
     summary: &mut FilingSummary,
 ) -> Result<()> {
     (ctx.verify_binding)()?;
-    let uids: Vec<u64> = members.iter().map(|(uid, _, _)| *uid).collect();
+    let uids: Vec<u64> = members.iter().map(|(uid, _)| *uid).collect();
     let envelopes = ctx.engine.envelopes(folder, &uids)?;
     if ctx.engine.snapshot(folder)?.uid_validity != epoch {
         return Ok(());
     }
     let at = now();
     let mut write = Vec::new();
-    for (uid, id, rfc) in members {
+    for (uid, id) in members {
         let Some(env) = envelopes.iter().find(|e| e.uid == *uid) else {
             continue;
         };
-        if rfc.is_some() && rfc_message_id(env) != *rfc {
+        if !matches_meta(store, ctx.account, id, env)? {
+            let code = format!("read_mismatch:{folder}");
+            if !summary.problems.contains(&code) {
+                summary.problems.push(code);
+            }
             continue;
         }
         if env.flags.iter().any(|f| f.eq_ignore_ascii_case("\\Seen")) {

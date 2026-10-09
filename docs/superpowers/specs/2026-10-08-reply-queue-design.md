@@ -89,8 +89,10 @@ reading every config that does not. Turn it on with
    every approved message that is not read yet, in its current home: known,
    unblocked, not being moved, its folder unpaused and in its discovery
    epoch. Right before the write it reads the UIDs' envelopes and keeps only
-   those whose Message-ID still matches; a message that already carries
-   `\Seen` is recorded without a write. The write is
+   those that still show the stored Message-ID and size, as batch
+   verification does (`apply::matches_meta`); any other is not written and
+   the pass reports `read_mismatch:<folder>`. A message that already
+   carries `\Seen` is recorded without a write. The write is
    `MailEngine::add_seen`: `a1 SELECT folder; a2 UID STORE uids
    +FLAGS.SILENT (\Seen)`. Before it, the rows record the session's folder
    and epoch (`attempt_folder`, `attempt_epoch`); a known outcome clears
