@@ -28,18 +28,22 @@ type ReadMember = (u64, String);
 /// Reads the flags of every held, not yet answered message again and stores
 /// the ones that changed, in the store and in `input`. A folder whose
 /// UIDVALIDITY changed meanwhile is skipped: its UIDs may name other mail.
+/// So is a folder a client-side alias resolves elsewhere, and every folder
+/// while the engine configuration is unreadable: neither is read.
 pub fn refresh_flags(
     store: &mut Store,
     ctx: &PassContext,
+    map: &FolderMap,
     input: &mut PlanInput,
     summary: &mut FilingSummary,
 ) -> Result<()> {
-    if !input.reply_queue || input.mode == FilingMode::Off {
+    if !input.reply_queue || input.mode == FilingMode::Off || map.reads_blocked {
         return Ok(());
     }
     let mut groups: BTreeMap<(String, u64), Vec<(u64, usize)>> = BTreeMap::new();
     for (i, m) in input.messages.iter().enumerate() {
-        if let Some(home) = waiting_home(input, m) {
+        let home = waiting_home(input, m);
+        if let Some(home) = home.filter(|h| !map.alias_conflicts.contains(&h.folder)) {
             groups
                 .entry((home.folder.clone(), home.epoch))
                 .or_default()

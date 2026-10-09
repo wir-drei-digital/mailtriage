@@ -466,3 +466,26 @@ fn reopened_mail_is_held_again_instead_of_retrying_its_exit() {
         "a reply still releases it"
     );
 }
+
+#[test]
+fn held_mail_in_a_folder_an_alias_leads_elsewhere_is_not_read() {
+    let h = queued(Live);
+    h.sync();
+    h.fake
+        .deliver("INBOX", &mail("i", "Invoice", "Payment due next month"));
+    let out = h.sync();
+    assert_eq!(out["filing"]["awaiting_reply"], 1, "{out}");
+    answer(&h, "i");
+    h.fake.set_alias_conflicts(&["INBOX"]);
+    let before = h.fake.calls().len();
+    let out = h.sync();
+    let read_inbox = h.fake.calls()[before..]
+        .iter()
+        .any(|c| c.starts_with("envelopes INBOX"));
+    assert!(!read_inbox, "{out}");
+    assert!(out["filing"].get("replies_checked").is_none(), "{out}");
+    h.fake.set_alias_conflicts(&[]);
+    let out = h.sync();
+    assert_eq!(out["filing"]["replies_checked"], 1, "{out}");
+    assert_eq!(out["filing"]["reply_exits"], 1, "{out}");
+}

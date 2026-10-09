@@ -23,7 +23,7 @@ pub fn plan_pass(
     summary: &mut FilingSummary,
 ) -> Result<Plan> {
     let mut input = inputs::plan_input(store, ctx, map, preview)?;
-    reply::refresh_flags(store, ctx, &mut input, summary)?;
+    reply::refresh_flags(store, ctx, map, &mut input, summary)?;
     let gone = rules::gone(store, ctx.account, &map.listed)?;
     let mut refile = rules::input(store, ctx.account, ctx.cfg, &gone)?;
     upkeep::run(store, ctx, map, &input, &mut refile)?;

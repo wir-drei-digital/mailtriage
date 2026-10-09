@@ -69,8 +69,10 @@ reading every config that does not. Turn it on with
    the flags of every held, not yet answered message again (one `envelopes`
    call per source folder and epoch, 100 UIDs each) and stores the ones that
    changed. Flags are otherwise stored only at discovery and hydration. A
-   folder whose UIDVALIDITY changed meanwhile is skipped. A failure counts
-   as `reply_check_failed:<folder>`.
+   folder whose UIDVALIDITY changed meanwhile is skipped, and so is a folder
+   with an alias conflict (`FolderMap.alias_conflicts`) or every folder
+   while the engine configuration cannot be read (`reads_blocked`): neither
+   is read. A failure counts as `reply_check_failed:<folder>`.
 2. **Plan.** In `move_action`, a message in a source folder, unpinned and
    without an explicit request, is held when `planner::holds` is true: the
    queue is on, the message is new (unfiled, internal date at or after
