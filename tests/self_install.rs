@@ -9,7 +9,7 @@ mod install_support;
 mod update_support;
 use common::{write_tool, LAUNCHCTL, SYSTEMCTL};
 use fs2::FileExt;
-use install_support::{fake_himalaya, fake_tray, write_exe};
+use install_support::{fake_himalaya, fake_tray, output, spawn, write_exe};
 use mailtriage::{system_service::Manager, update::service_files};
 use serde_json::{json, Value};
 use std::{
@@ -101,7 +101,7 @@ impl Fixture {
         for (key, value) in env {
             command.env(key, value);
         }
-        let mut child = command.spawn().unwrap();
+        let mut child = spawn(&mut command);
         let _ = child.stdin.take().unwrap().write_all(stdin.as_bytes());
         let out = child.wait_with_output().unwrap();
         let value = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
@@ -139,18 +139,18 @@ fn mode(path: &Path) -> u32 {
 fn a_fresh_install_creates_the_directory_0755_whatever_the_umask() {
     let f = Fixture::new();
     let dir = f.root.join("new/bin");
-    let out = Command::new("/bin/sh")
-        .args(["-c", "umask 002; exec \"$@\"", "sh"])
-        .arg(f.root.join("download/mailtriage"))
-        .args(["self", "install", "--json", "--no-setup", "--dir"])
-        .arg(&dir)
-        .env("HOME", f.root.join("home"))
-        .env("XDG_CACHE_HOME", f.root.join("xdg"))
-        .env("PATH", "/usr/bin:/bin")
-        .env_remove("MAILTRIAGE_TEST_TERMINAL")
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
+    let out = output(
+        Command::new("/bin/sh")
+            .args(["-c", "umask 002; exec \"$@\"", "sh"])
+            .arg(f.root.join("download/mailtriage"))
+            .args(["self", "install", "--json", "--no-setup", "--dir"])
+            .arg(&dir)
+            .env("HOME", f.root.join("home"))
+            .env("XDG_CACHE_HOME", f.root.join("xdg"))
+            .env("PATH", "/usr/bin:/bin")
+            .env_remove("MAILTRIAGE_TEST_TERMINAL")
+            .stdin(Stdio::null()),
+    );
     let v: Value = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
     assert_eq!(out.status.code(), Some(0), "{v} {}", stderr(&out));
     let s = &v["self_install"];

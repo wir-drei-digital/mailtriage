@@ -9,7 +9,7 @@ mod install_support;
 mod update_support;
 use common::{write_tool, LAUNCHCTL, SYSTEMCTL};
 use fs2::FileExt;
-use install_support::{fake_tray, write_exe};
+use install_support::{fake_tray, output, spawn, write_exe};
 use mailtriage::{
     system_service::{self, Manager, Unit},
     update::service_files,
@@ -135,7 +135,7 @@ impl Fixture {
         for (key, value) in env {
             command.env(key, value);
         }
-        let mut child = command.spawn().unwrap();
+        let mut child = spawn(&mut command);
         let _ = child.stdin.take().unwrap().write_all(stdin.as_bytes());
         let out = child.wait_with_output().unwrap();
         let value = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
@@ -280,22 +280,22 @@ fn without_home_nothing_is_removed() {
     let (out, v) = f.uninstall(&["--yes"], "", &[("HOME", "")]);
     unchanged(&out, &v);
     // HOME unset.
-    let out = Command::new(f.cli())
-        .args(["self", "uninstall", "--json", "--yes"])
-        .current_dir(&f.root)
-        .env_remove("HOME")
-        .env("XDG_CACHE_HOME", f.root.join("xdg"))
-        .env("XDG_DATA_HOME", f.root.join("data"))
-        .env(
-            "PATH",
-            format!("{}:/usr/bin:/bin", f.root.join("tools").display()),
-        )
-        .env_remove("XDG_CONFIG_HOME")
-        .env_remove("MAILTRIAGE_TEST_TERMINAL")
-        .env_remove("MAILTRIAGE_UPDATE_TEST_HOOK")
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
+    let out = output(
+        Command::new(f.cli())
+            .args(["self", "uninstall", "--json", "--yes"])
+            .current_dir(&f.root)
+            .env_remove("HOME")
+            .env("XDG_CACHE_HOME", f.root.join("xdg"))
+            .env("XDG_DATA_HOME", f.root.join("data"))
+            .env(
+                "PATH",
+                format!("{}:/usr/bin:/bin", f.root.join("tools").display()),
+            )
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("MAILTRIAGE_TEST_TERMINAL")
+            .env_remove("MAILTRIAGE_UPDATE_TEST_HOOK")
+            .stdin(Stdio::null()),
+    );
     let v = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
     unchanged(&out, &v);
 }
