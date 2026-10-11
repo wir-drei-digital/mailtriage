@@ -16,8 +16,8 @@ Setup asks one question at a time. Press Enter to accept the value shown in brac
 | Account name | A short name such as `work`. You will use this with `--account`. |
 | Your details | Check your email address and time zone. Add a brief such as “I manage customer projects. Customer questions and invoices usually need my attention.” |
 | Folders to watch | `INBOX`. You can add more later. |
-| Classifier | OpenRouter and the default Jev model. Use `fake` only for offline testing. |
-| API key | A key store offered on your machine. See below. |
+| Classifier | OpenRouter and the default Jev model. On an Apple Silicon Mac, [local Kev](./local-kev.md) keeps your mail on your Mac and needs no key. Use `fake` only for offline testing. |
+| API key | Use a key store for OpenRouter or a Kev server on another machine. Local Kev needs no key. See below. |
 | Filing | Keep `dry_run`. It previews moves without changing your mailbox. |
 | Background service | Accept if you want mailtriage to check for new mail automatically. |
 
@@ -27,9 +27,9 @@ Setup never enables live filing. Automatic updates are on by default; [change th
 
 ## Key stores
 
-Use macOS Keychain on macOS, or Secret Service or `pass` on Linux. The store's own tool asks for your OpenRouter key. mailtriage saves only the command that reads it, never the key itself.
+Use macOS Keychain on macOS, or Secret Service or `pass` on Linux. The store's own tool asks for your OpenRouter or remote Kev key. mailtriage saves only the command that reads it, never the key itself.
 
-A key store also works for the background service. A variable exported in your terminal does **not** reach that service. See [API keys and models](./provider.md) for other options.
+A key store also works for the background service. A variable exported in your terminal does **not** reach that service. See [Classifier and models](./provider.md) for other options.
 
 ## Check the result
 
@@ -41,7 +41,7 @@ To check again, replacing `work` with your account name:
 mailtriage doctor --account work
 ```
 
-Look for `ready: true` and `transport.configured: true`. `doctor` checks the configuration and key availability; it does not test a model request. The first classification tests that connection.
+Look for `ready: true` and `transport.configured: true`. `doctor` checks the configuration and key availability. For Kev it checks the server's model list without starting local Kev; for OpenRouter the first classification tests the connection.
 
 If you accepted the background service, check it and view the mail it has processed:
 

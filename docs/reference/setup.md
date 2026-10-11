@@ -16,7 +16,7 @@ What setup does and never does:
 - **State**: a new config keeps its state in `state/` next to the config file (`~/.config/mailtriage/state`).
 - **IMAP settings**: setup never writes them; Himalaya's own wizard does that.
 - **Your mailbox**: setup makes no change on the IMAP server.
-- **Your OpenRouter key**: setup never asks for, prints or stores it. The key store's own tool asks for it; setup only checks that the read command prints a key.
+- **Your classifier key**: setup never asks for, prints or stores it. The key store's own tool asks for it; setup only checks that the read command prints a key.
 - **Filing**: setup never turns on `live` filing.
 
 ## The ten steps
@@ -27,7 +27,7 @@ What setup does and never does:
 | 2. Himalaya | Finds the Himalaya binary, its config file and the account, and runs `himalaya account check`. Can install a tested Himalaya for mailtriage, and create an account with `himalaya configure`. | `--himalaya-binary`, `--himalaya-install`, `--himalaya-config`, `--himalaya-account` |
 | 3. Account | The account name in mailtriage, your address, time zone and a one-line brief. | `--account`, `--identity`, `--timezone`, `--brief` |
 | 4. Folders | Lists the server's folders; you choose which to watch. | `--mailbox` |
-| 5. Classifier | OpenRouter or the offline `fake` provider, the model, and where the key lives. | `--provider`, `--model`, `--key-store`, `--key-command`, `--key-env`, `--key-stored` |
+| 5. Classifier | OpenRouter, local Kev, a Kev server you run, or the offline `fake` provider; the model; where the key lives. Installs local Kev. | `--provider`, `--kev-url`, `--model`, `--key-store`, `--key-command`, `--key-env`, `--key-stored`, `--yes` |
 | 6. Categories | Six default categories for a new account. | none |
 | 7. Filing | `dry_run` or `off`. | `--filing` |
 | 8. Write | Validates and writes the config, including `updates`. | `--updates` |
@@ -70,12 +70,16 @@ What setup does and never does:
 
 **Step 5, classifier.**
 
-- `--provider openrouter` (default) or `--provider fake` (offline keyword rules, no key).
-- `--model`: any non-empty Decisions model ID. The default is `typesafe/jev-latest` for a new classifier and the current model when you update one; see [Provider](./provider.md).
+- `--provider openrouter` (default), `--provider kev`, or `--provider fake` (offline keyword rules, no key). The menu offers OpenRouter, "Local Kev on this Mac" (only on Apple Silicon), "Kev server you run" and the offline demo.
+- `--provider kev` alone selects local Kev. Elsewhere it exits 2 with `step 5 (classifier): local Kev needs an Apple Silicon Mac; run your own Kev server and pass --kev-url`.
+- `--kev-url URL` selects a server you run and implies `--provider kev`; with another `--provider` it exits 2. The URL follows [the URL rule](./provider.md#the-url-rule). Setup asks `GET /v1/models` and needs `kev-latest` or your `--model` in the list. For a server off this machine, it first runs the key steps under key store account `kev`. A 401 or 403 when a configured environment key is unavailable during setup can pass with a note.
+- Local Kev needs at least 15 GB free; lower space exits 3, while less than 32 GB of memory warns. Setup asks `Local Kev downloads about 9 GB to DIR and uses about 12 GB of memory while it classifies. Continue?` Without prompts, `--yes` answers this; otherwise exit 2. It needs `git` and `uv` on `PATH`, and can offer `brew install uv` when Homebrew is available. It clones `kev-1.0`, runs `uv sync --frozen --extra serve`, starts Kev to download weights (up to 30 minutes), classifies a sample, confirms shutdown, then writes `installed.json`. Failures exit 3 with `step 5 (Kev): ` and leave the config unchanged. Repeating setup reuses completed steps. See [Run the classifier on your Mac](../guide/local-kev.md).
+- Keeping local Kev during `setup --update` installs it if missing, so `mailtriage setup --update` is the ordinary fix `doctor` names.
+- `--model`: a non-empty model ID. A new OpenRouter config uses `typesafe/jev-latest`; a new Kev config uses `kev-latest`. An update keeps the current model unless you change it; see [Provider](./provider.md).
 - The key: see [Key stores](#key-stores).
-- On an existing config without classifier flags, setup asks "Keep the current classifier?" (default yes). Without prompts it keeps the classifier. The classifier flags are `--provider`, `--model`, `--key-store`, `--key-command`, `--key-env` and `--key-stored`.
-- Only a key flag (`--key-store`, `--key-command`, `--key-env`, `--key-stored`) changes where an OpenRouter key comes from. `--model` or `--provider openrouter` alone keep `api_key_command` and `api_key_env` as they are and skip the key question. If you answer no to "Keep the current classifier?", the key store menu offers the current store as its default.
-- Key flags with `--provider fake` exit 2: the offline classifier needs no key.
+- On an existing config without classifier flags, setup asks "Keep the current classifier?" (default yes). Without prompts it keeps the classifier. The classifier flags are `--provider`, `--kev-url`, `--model`, `--key-store`, `--key-command`, `--key-env` and `--key-stored`.
+- Only a key flag (`--key-store`, `--key-command`, `--key-env`, `--key-stored`) changes where a keyed provider's key comes from. `--model` alone keeps a Kev config's local or own-server mode and endpoint; a key-only update also keeps an own server's endpoint. `--model` or `--provider openrouter` alone keep the existing OpenRouter key source and skip the key question. If you answer no to "Keep the current classifier?", the key store menu offers the current store as its default.
+- Key flags with `--provider fake`, local Kev or a Kev server on this machine exit 2: they need no key.
 - All accounts in a config share one provider, so there is one key per config.
 
 **Step 6, categories.** A new account gets six categories: Correspondence, Transactions, Updates, Newsletters, Promotions and Other (the catch-all). Each has `folder` set to its own name.
@@ -97,7 +101,7 @@ Setup validates the whole config and writes it atomically with mode 0600, under 
 
 After `config_busy` or `config_changed`, run it again.
 
-**Step 9, check.** Setup runs `doctor` for the account. It prints each item (`provider`, `key`, `mail`, `filing` when filing is on, and `update` when `updates` is `auto` but the binary may not be replaced) as `ok`, or as `not ready` with the one command that fixes it.
+**Step 9, check.** Setup runs `doctor` for the account. It prints each item (`provider`, `key`, `kev` for Kev, `mail`, `filing` when filing is on, and `update` when `updates` is `auto` but the binary may not be replaced) as `ok`, or as `not ready` with the one command that fixes it.
 
 The `update` item does not make `doctor.ready` false, as in `doctor` itself. If `doctor` itself fails, for example because the state database cannot be opened, setup reports a single not-ready `state` item instead.
 
@@ -119,7 +123,7 @@ Every `mailtriage` command setup prints passes `--config` when a command run in 
 
 The key never goes into `mailtriage.json`. Setup records either a command that prints the key (`provider.api_key_command`) or the name of an environment variable (`provider.api_key_env`). On macOS, for example, the key stays in your Keychain, and the config holds only the command that reads it from there.
 
-The menu lists the stores available on this machine, in this order. The first one is the default, also without prompts. When you change an existing OpenRouter classifier with prompts, the menu's default is the store the key comes from now (`command` for a command of your own, `env` for a variable).
+The menu lists the stores available on this machine, in this order. The first one is the default, also without prompts. When you change an existing keyed classifier with prompts, the menu's default is the store the key comes from now (`command` for a command of your own, `env` for a variable). The commands below show OpenRouter's account name; a Kev server off this machine uses `kev` in its place.
 
 | `--key-store` | Offered | Store command (the tool asks for the key) | Read command, saved as `api_key_command` |
 | --- | --- | --- | --- |
@@ -207,8 +211,9 @@ Progress and the check summary go to stderr. stdout carries one result object, o
 | `config` | The absolute path of the config written. |
 | `account`, `mailboxes` | The account name and its watched folders. |
 | `provider`, `model` | The classifier. |
-| `key_source` | `command`, `env`, or `null` for `fake`. |
-| `key_store` | The `--key-store` value chosen in this run; `null` when no store was chosen: the classifier or its key source was kept, or it is `fake`. |
+| `kev` | Only for `kev`. Local Kev: `{mode: "managed", dir, action, tag, checkpoint}`, where `action` is `installed` or `current`. Your own server: `{mode: "server", endpoint, checked}`; `checked` is `false` when the server wanted a configured key unavailable to setup. |
+| `key_source` | `command`, `env`, or `null` for `fake` and local or loopback Kev. |
+| `key_store` | The `--key-store` value chosen in this run; `null` when no store was chosen: the classifier or its key source was kept, or it needs no key. |
 | `filing` | `off`, `dry_run` or `live`. |
 | `updates` | The config's `updates` after this run: `auto`, `notify` or `off`. |
 | `doctor` | `ready`, and `items`: each `{check, ready}`, plus `error` and `fix` when not ready. |
@@ -219,8 +224,8 @@ Progress and the check summary go to stderr. stdout carries one result object, o
 | Code | Cases |
 | --- | --- |
 | 0 | Setup finished. `doctor` items that are not ready are listed in the result. |
-| 2 | Invalid input; a required flag missing without prompts; an invalid account name; conflicting key flags, or key flags with `--provider fake`; a key tool not on `PATH`; a tool store without a terminal; setup aborted; the service on an unsupported platform; the private Himalaya on a platform for which pimalaya has no build mailtriage can use. |
-| 3 | Himalaya missing or not a tested version with IMAP, and the private Himalaya declined or, without prompts, `--himalaya-install` not given; the private Himalaya could not be installed (except on a platform pimalaya has no build for, exit 2); `account check` failed; the folders could not be listed; a key tool or key command failed; the config could not be written; `launchctl` or `systemctl` failed. |
+| 2 | Invalid input; a required flag missing without prompts; an invalid account name; conflicting key flags, or key flags with `--provider fake`, local Kev or a loopback Kev server; `--provider kev` without `--kev-url` off Apple Silicon; `--kev-url` with another provider or against the URL rule; local Kev download not agreed to; a key tool not on `PATH`; a tool store without a terminal; setup aborted; the service on an unsupported platform; the private Himalaya on a platform for which pimalaya has no build mailtriage can use. |
+| 3 | Himalaya missing or not a tested version with IMAP, and the private Himalaya declined or, without prompts, `--himalaya-install` not given; the private Himalaya could not be installed (except on a platform pimalaya has no build for, exit 2); `account check` failed; the folders could not be listed; a key tool or key command failed; a local Kev install step failed (free space, tools, clone, sync, first start or sample classification); your Kev server did not answer or does not serve the model; the config could not be written; `launchctl` or `systemctl` failed. |
 | 5 | The config exists and `--update` was not given (without prompts); the account is bound to another mailbox (its identity, Himalaya account or IMAP server would change); a service file exists that mailtriage did not write; another command is editing the config (`config_busy`), or it changed since setup read it (`config_changed`). |
 
 Every error except the two abort messages (`setup aborted; nothing was changed`, `setup aborted: input ended`) starts with `step N (name): ` and names the flag or command that fixes it, for example `step 2 (Himalaya): --himalaya-account is required without prompts`.

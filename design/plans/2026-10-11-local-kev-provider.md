@@ -5029,7 +5029,7 @@ done
 $MT --config /tmp/kev-live/mailtriage.json classify --account kevlive --input examples/message.json --format json --json | jq .outcome
 ```
 
-Expected: every outcome is `classified` and the model is `kev-latest`. The first call waits while Kev loads (expect 10 to 30 seconds, `real` in the `time` output); the others take about a second. Check that the categories are plausible: `receipt.eml` should be `transactions`, `reply-request.eml` should need action, `urgent-fyi.eml` should not.
+Expected: every outcome is `classified` and the model is `kev-latest`. Record the measured first-load and per-message times; the planned 10 to 30 second load and roughly one-second classification are estimates pending this check. Check that the categories are plausible: `receipt.eml` should be `transactions`, `reply-request.eml` should need action, `urgent-fyi.eml` should not.
 
 - [ ] **Step 4: Sync a few real messages**
 
@@ -5045,26 +5045,37 @@ Expected: `classified` > 0, `failed` 0, no `classification.skipped`. Spot-check 
 ```sh
 $MT --config /tmp/kev-live/mailtriage.json doctor --account kevlive --json | jq .provider.kev
 lsof -nP -iTCP:8009 -sTCP:LISTEN
-ps -o pid,pgid,rss,command -ax | grep -E 'kev (run|\.serve)' | grep -v grep
+ps -o pid,pgid,rss,command -ax | grep -E 'mailtriage kev run|python -m kev[.]serve' | grep -v grep
 tail -n 20 ~/.local/share/mailtriage/kev/kev.log
 ```
 
-Expected: `doctor` shows `installed: true`, `running: true`, `ready: true`; Kev listens on `127.0.0.1:8009` only; the supervisor's PGID equals its PID; Kev's RSS is about 12 GB or less; the log shows `starting Kev: --run jaredpalmer/kev-4b@v1.0 on 127.0.0.1:8009` and no download. Turn Wi-Fi off, classify `examples/receipt.eml` again, and expect `classified` (Kev runs offline); turn Wi-Fi back on.
+Expected: `doctor` shows `installed: true`, `running: true`, `ready: true`; Kev listens on `127.0.0.1:8009` only; the supervisor's PGID equals its PID; record Kev's actual RSS. The log shows `starting Kev: --run jaredpalmer/kev-4b@v1.0 on 127.0.0.1:8009` without a download. Keep the scratch account's filing off. Turn Wi-Fi off, then classify a fresh input whose bytes differ from the earlier example:
+
+```sh
+cp examples/receipt.eml /tmp/kev-live/offline.eml
+printf '\nOffline probe %s\n' "$(date +%s)" >> /tmp/kev-live/offline.eml
+$MT --config /tmp/kev-live/mailtriage.json classify --account kevlive --input /tmp/kev-live/offline.eml --format rfc822 --json | jq .outcome
+```
+
+Expect `classified`, not `cached`, to establish that Kev answered while offline. Turn Wi-Fi back on. The new bytes give this input a fresh identity in the scratch state.
 
 - [ ] **Step 6: Idle stop and restart**
 
 Wait 16 minutes without classifying, then:
 
 ```sh
-lsof -nP -iTCP:8009 -sTCP:LISTEN; tail -n 3 ~/.local/share/mailtriage/kev/kev.log
-$MT --config /tmp/kev-live/mailtriage.json classify --account kevlive --input examples/urgent-fyi.eml --format rfc822 --json | jq .outcome
+lsof -nP -iTCP:8009 -sTCP:LISTEN
+tail -n 10 ~/.local/share/mailtriage/kev/kev.log
+cp examples/urgent-fyi.eml /tmp/kev-live/restart.eml
+printf '\nRestart probe %s\n' "$(date +%s)" >> /tmp/kev-live/restart.eml
+/usr/bin/time -p $MT --config /tmp/kev-live/mailtriage.json classify --account kevlive --input /tmp/kev-live/restart.eml --format rfc822 --json | jq .outcome
 ```
 
-Expected: nothing listens, the log ends with `stopping Kev after 900 seconds without a request` and `Kev exited (...)`; the classify after it starts Kev again and returns `classified`.
+Expected: before classification nothing listens, and recent log lines include `stopping Kev after 900 seconds without a request` and `Kev exited (...)`. The fresh input returns `classified`, not `cached`; a new `starting Kev: --run ...` line and elapsed time show that this command restarted Kev and ran inference. Keep filing off throughout.
 
 - [ ] **Step 7: Resume and clean up**
 
-Run the Step 2 command again with `--update --yes`: it prints `Local Kev is installed in ...` and reuses everything (no clone, no download). Remove the scratch config with `rm -rf /tmp/kev-live`. Keep `~/.local/share/mailtriage/kev` for later use, or delete it with `rm -rf ~/.local/share/mailtriage/kev`.
+Run the Step 2 command again with `--update --yes`: it prints `Local Kev is installed in ...` and reuses everything (no clone, no download). A current-install result does not stop a running supervisor. Remove the scratch config with `rm -rf /tmp/kev-live`. Keep `~/.local/share/mailtriage/kev` for later use. If you choose to remove it, first stop all mailtriage callers that share it, identify any live `kev run` or `kev mutate` helper and Kev/git/uv/brew descendants from current process details, and require confirmed shutdown with no writer remaining. Do not remove the folder while ownership is uncertain; follow [the verified removal and repair guidance](../../docs/guide/local-kev.md#repair-an-installation) and preserve evidence as needed.
 
 Record the results (download time, first-load time, per-message time, RSS, categories of the examples) in `docs/development/verification.md` under a new "Local Kev" heading, and commit that file with the message `Record the local Kev live check`.
 

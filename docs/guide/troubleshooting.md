@@ -25,6 +25,8 @@ The first passes scan existing mail in batches, so a large inbox can take time. 
 
 Check `provider.key_present` and `provider.key_error` in the `doctor` result. Common causes are a locked key store or a key set only in your terminal's environment.
 
+With Kev, the reason names a missing installation, an occupied port, a failed start or an unreachable server. See [How it starts and stops](./local-kev.md#how-it-starts-and-stops) for the fixes. Your mail stays queued, and no retry attempt is used.
+
 Use [a key store](./provider.md#the-openrouter-key) for the background service. Once the key works, later passes classify the queued mail without losing retry attempts from the skipped passes.
 
 If the key is present but every classification fails, check the model ID in `provider.model`. `doctor` does not validate that ID with OpenRouter.

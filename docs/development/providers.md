@@ -6,13 +6,21 @@ The classifier sits behind the `DecisionProvider` trait in `src/provider/mod.rs`
 
 General chat-model APIs do not fit: they give no calibrated probabilities, and the policy thresholds need them.
 
-1. Implement `DecisionProvider` in a new module under `src/provider/`: `validate` (its own config rules; the shared ones, a timeout of 1 to 300 seconds, a non-empty model and a key source when it needs a key, have passed), `key_account` (the key store account, or `None` when it needs no key), `label` (setup's menu entry), `new_config` (the provider block a new setup writes) and `decide` (a `Decision` for a `DecisionRequest`, with the whole response in `raw`).
-2. Add its kind to `KINDS` and `provider_for` in `src/provider/mod.rs`. Setup, `--provider`, `doctor`, the key steps and the service files follow from there.
+1. Implement `DecisionProvider` in a new module under `src/provider/`: `validate` (its own config rules; shared timeout and model checks have passed), `key_account(config)` (the key store account, or `None` when it needs no key, as for `fake` or a Kev server on this machine), `label`, `new_config`, optional `prepare` and `decide`. `prepare` checks whether the provider can answer before a job is taken; `Err(ProviderUnavailable)` skips classification like a missing key. `decide` returns a `Decision` for a `DecisionRequest`, with the whole response in `raw`. A System One service can reuse `provider/systemone.rs`: `request_body`, `send` (Bearer only with a key, with the provider name in errors) and `parse`.
+2. Add its kind to `KINDS` (today `openrouter`, `kev`, `fake`) and `provider_for` in `src/provider/mod.rs`. Setup, `--provider`, `doctor`, the key steps and the service files follow from there.
 3. Give it a fixture in `tests/provider_contract.rs`. The contract suite runs against every kind in `KINDS`.
 
 Every `Decision` passes one contract check before the policy thresholds apply, whichever provider made it: the model is named; each choice is an offered label; confidence and probabilities lie between 0 and 1; the probabilities cover exactly the offered labels and total 1 within 0.031; no label is more than 0.01 more probable than the chosen one; and `action_required` lies between 0 and 1.
 
 A failed check fails the classification like a failed request: the message is marked failed, and a later pass retries it.
+
+## Local Kev
+
+`src/kev/` runs Kev for a `kev` provider with `managed`: `Layout` and `Installed` (`installed.json`), `runtime` (`ensure_running`, `probe`, `stop`, `status` for `doctor`), `supervisor` (the hidden `mailtriage kev run`) and `install` (setup's managed install). `ensure_running` failures are `ProviderUnavailable`.
+
+Startup and installation share an installation guard. The hidden `mailtriage kev mutate` helper owns it while git, uv or brew changes the shared directory. Normal startup rereads the installed receipt after it gets the guard. `doctor` checks installation activity and ownership proof without starting Kev. Unconfirmed ownership blocks replacement until the operator verifies no live process remains and preserves the private directory as a backup.
+
+The new Kev fixtures need no Python, uv, network or model. A stand-in `uv` (`tests/kev_support`) logs its calls and, for `uv run`, executes the test binary's ignored `kev_standin_server` test. Control files can make it exit or answer late. Stand-in `git` and `brew` cover setup. `MAILTRIAGE_TEST_KEV` (debug builds only) describes `apple_silicon`, `free_gb`, `memory_gb`, `port`, `start_seconds` and `download_seconds`. Existing non-Kev setup fixtures still invoke Python.
 
 ## Contract evidence
 
@@ -27,6 +35,12 @@ The [Decisions API reference](https://openrouter.ai/docs/api/api-reference/alpha
 The adapter uses only this endpoint, three fixed typed questions, and Bearer authorization with the key from `api_key_command` or a named environment variable. It accepts any Decisions model ID; a new setup writes `typesafe/jev-latest`, an alias OpenRouter moves to the newest Jev model.
 
 A loopback HTTP fixture verifies the actual method, path, body, and response decoder. A synthetic authorized live request remains a release gate.
+
+### Kev
+
+Verified on 2026-10-11 against Kev's source at tag `kev-1.0` (`kev/serve.py`, `kev/api.py`) and its [README](https://github.com/jaredpalmer/kev/blob/kev-1.0/README.md). `POST /v1/systemone` takes `{state, model, questions}` with `choice` and `noul` questions. It answers with typed `answers` in the Decisions shape, echoes `model` and rounds probabilities to four decimals. `GET /v1/models` lists `{name, run, ...}` per served name (`kev-latest`, `jev-latest`), with `run` matching `--run`. `KEV_API_KEY` makes the server require `Authorization: Bearer <key>` on `/v1/*`. `python -m kev.serve --run --host --port` starts it; weights go to `HF_HOME`.
+
+Loopback HTTP fixtures in `tests/provider_contract.rs` check the pinned OpenRouter request body with `"model":"kev-latest"` at `/v1/systemone`, the decoder, and Bearer transmission at the shared transport boundary. A Kev loopback endpoint receives no key even if one is supplied. A real install and example-message classification on Apple Silicon remain a pending human release gate; no timing, accuracy or memory result from that gate is claimed here.
 
 ### Himalaya v2.1.0 IMAP
 

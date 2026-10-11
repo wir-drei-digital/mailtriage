@@ -7,7 +7,7 @@ Use the [user guide](../guide/introduction.md) to get started. These pages cover
 | [Installation](./install.md) | Script options, self install, uninstall and exit codes |
 | [Setup](./setup.md) | Every setup flag, key stores and unattended operation |
 | [Configuration](./configuration.md) | Complete JSON example, fields and validation rules |
-| [Provider](./provider.md) | Model selection, key lookup and key-command errors |
+| [Provider](./provider.md) | Classifiers (OpenRouter, Kev), model selection, key lookup and key-command errors |
 | [Sync and queries](./daily-use.md) | Scan limits, retries, filters, cursors and export |
 | [Background service](./service.md) | Service files, control commands, status fields and supervisors |
 | [Filing](./filing.md) | Folder rules, reply queue, recovery, refile and output fields |

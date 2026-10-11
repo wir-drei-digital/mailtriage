@@ -35,7 +35,7 @@ Relative paths are resolved from the directory containing `mailtriage.json`. Use
 | --- | --- |
 | Change folders, your brief or time zone | `mailtriage setup --update --account work` |
 | Add, rename or describe categories | The [tray categories window](./tray.md#the-categories-window) or [categories commands](./categories.md) |
-| Change the model or key source | [API keys and models](./provider.md) |
+| Change the classifier, model or key source | [Classifier and models](./provider.md) |
 | Preview or enable filing | [File mail into folders](./filing.md) |
 | Change automatic updates | [Updates](./updates.md#modes) |
 
@@ -49,7 +49,7 @@ Open messages are classified again after `policy.freshness_hours`, which default
 
 ## A complete configuration
 
-Use the [complete example and field reference](../reference/configuration.md#a-complete-configuration) when writing a file manually. It includes every field, valid value and default. Do not put passwords or API keys in the file; use the credential tools described in [manual setup](./manual-setup.md) and [API keys](./provider.md).
+Use the [complete example and field reference](../reference/configuration.md#a-complete-configuration) when writing a file manually. It includes every field, valid value and default. Do not put passwords or API keys in the file; use the credential tools described in [manual setup](./manual-setup.md) and [Classifier and models](./provider.md).
 
 After editing, run:
 

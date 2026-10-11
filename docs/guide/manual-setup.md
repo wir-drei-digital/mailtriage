@@ -85,23 +85,24 @@ Look for `ready: true`, `transport.configured: true` and `provider.key_present: 
 ::: details All doctor fields
 | Field | Value when ready | Meaning |
 | --- | --- | --- |
-| `ready` | `true` | The provider configuration is valid, the key is present, and the Himalaya check passed. |
+| `ready` | `true` | The provider configuration is valid, the key is present, the Himalaya check passed, and for `kev` the local installation is ready or your server serves the model. |
 | `provider.kind`, `provider.model` | your values | The configured provider. |
 | `provider.configuration_valid` | `true` | The provider block passes validation. |
-| `provider.key_source` | `command` or `env` | Where the key comes from: `api_key_command` when set, else `api_key_env`. `null` for `fake`. |
-| `provider.key_present` | `true` | The key command printed a key, or the variable named in `api_key_env` is set and not blank in this process. Always `true` for `fake`. |
-| `provider.key_error` | absent | Present only when the key is missing: one of the fixed messages in [Key command rules](./provider.md#key-command-rules), or `OpenRouter API key environment variable is missing`, or `OpenRouter API key environment variable is empty`. |
+| `provider.key_source` | `command` or `env` | Where the key comes from: `api_key_command` when set, else `api_key_env`. `null` for `fake` and local or loopback Kev. |
+| `provider.key_present` | `true` | The key command printed a key, or the variable named in `api_key_env` is set and not blank in this process. Always `true` when the provider needs no key. |
+| `provider.key_error` | absent | Present only when the key is missing: one of the fixed messages in [Key command rules](./provider.md#key-command-rules), or the missing or empty API key environment variable message naming OpenRouter or the Kev server. |
+| `provider.kev` | `ready: true` | Only for `kev`. Local Kev reports `installed`, `running`, `tag` and `checkpoint` when available. `running: false` is fine when it is ready to start on demand. Your own server reports `reachable`. A not-ready result has `error` and `fix`. See [Provider reference](../reference/provider.md#doctor-and-kev). |
 | `transport.configured` | `true` | The account has an `engine`. Without one, `transport.ready` is `true` as well. |
 | `transport.ready` | `true` | The Himalaya configuration file was read and `himalaya --version` reported a [tested version](./himalaya.md) with `+imap`. Otherwise `transport.error` is set. |
 | `transport.version` | `himalaya v2.2.1 ...` | The first line of `himalaya --version`. |
 | `transport.tested` | `true` | The version is one mailtriage is tested with. `false` makes the transport not ready, with `transport.error` `Himalaya X is not a tested version (tested: 2.1.0, 2.2.1)`. |
 | `transport.alias_conflicts` | `[]` | Source folders that Himalaya would resolve to another mailbox; mailtriage reads no mail from them. When the Himalaya configuration cannot be parsed, `transport.ready` is `false` and `transport.error` says why: no folder is read. |
-| `live_checks_performed` | `false` | Always `false`. |
+| `live_checks_performed` | `false` | `true` when `kev` is selected: `doctor` checks the server's models when the installation is present. A missing local installation can return before any HTTP request. |
 | `update.ready` | `true` | `update` is the block [`service status`](./service.md#service-commands) shows, plus `ready`: `false` only when `updates` is `auto` and the binary may not be replaced, and then `fix` says what to do. The top-level `ready` ignores it. |
 
 :::
 
-`doctor` runs the key command to check it, so on macOS the first run may show a Keychain access dialog. It makes no provider request.
+`doctor` runs the key command to check it, so on macOS the first run may show a Keychain access dialog. For Kev, it may request `GET /v1/models`; it never starts local Kev. For OpenRouter and `fake`, it makes no provider request.
 
 It logs in to the IMAP server only when filing is on, to add a `filing` block with the server's capabilities, folders and problems. The first `sync` is therefore the first full test of the IMAP login and the API key.
 
@@ -116,7 +117,7 @@ It logs in to the IMAP server only when filing is on, to add a `filing` block wi
 
    Exit code 0 with `scan_errors: 0` and `failed: 0` means the pass completed. Check that `classified` is greater than zero to confirm it exercised the provider. Exit code 4 means the pass was partial.
 
-   A `classification` object with `skipped: true` means the key is unavailable; its `reason` says why, and `doctor` shows the same `key_error`.
+   A `classification` object with `skipped: true` means the key or Kev server is unavailable. Its `reason` says why; `doctor` shows a `key_error` or a `provider.kev` fix.
 
    `scan_errors` counts folders that could not be scanned (see `coverage.scans[].error`), and `failed` counts messages whose fetch or classification failed (`list --view all` shows each message's `error`). Run the Himalaya check commands from step 1 to see an IMAP error.
 3. Look at the result:

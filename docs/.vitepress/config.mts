@@ -52,7 +52,8 @@ export default defineConfig({
           items: [
             { text: 'Troubleshooting', link: '/guide/troubleshooting' },
             { text: 'Configuration', link: '/guide/configuration' },
-            { text: 'API keys and models', link: '/guide/provider' },
+            { text: 'Classifier and models', link: '/guide/provider' },
+            { text: 'Run the classifier on your Mac', link: '/guide/local-kev' },
             { text: 'Mail provider compatibility', link: '/guide/provider-check' },
             { text: 'Himalaya versions', link: '/guide/himalaya' },
             { text: 'Manual setup', link: '/guide/manual-setup' },

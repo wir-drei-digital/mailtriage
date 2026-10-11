@@ -2,7 +2,7 @@
 
 The install script is the quickest way to get started. You need macOS on Apple silicon, or Linux on amd64 or arm64. Linux release binaries use glibc; see the [release requirements](../development/releases.md#publish-a-version).
 
-For real mail, have an IMAP account and an [OpenRouter API key](https://openrouter.ai) ready. Setup can install Himalaya, the tool mailtriage uses to read your mailbox.
+For real mail, have an IMAP account ready. OpenRouter needs an [API key](https://openrouter.ai); [local Kev](./local-kev.md) needs none. Setup can install Himalaya, the tool mailtriage uses to read your mailbox.
 
 ## The install script
 
@@ -61,7 +61,7 @@ For an install made with the script:
 mailtriage self uninstall
 ```
 
-It asks for confirmation, stops and removes this installation's services and tray login item, and removes its executables. Your configuration, local state, logs and private Himalaya stay on disk. Your mail is untouched.
+It asks for confirmation, stops and removes this installation's services and tray login item, and removes its executables. Your configuration, local state, logs, private Himalaya and [local Kev](./local-kev.md#remove-it) stay on disk. Your mail is untouched.
 
 For Homebrew, remove each account's service first:
 

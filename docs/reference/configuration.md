@@ -177,12 +177,13 @@ Provider (`provider`):
 
 | Field | What to set |
 | --- | --- |
-| `kind` | `"openrouter"` for real classification, `"fake"` for offline tests. No other value is accepted. See [Provider](./provider.md). |
-| `model` | For `openrouter`, any non-empty Decisions model ID, such as `typesafe/jev-latest` (what setup writes) or `typesafe/jev-1.13`. For `fake`, any non-empty text. |
-| `endpoint` | For `openrouter`, exactly `https://openrouter.ai/api/alpha/decisions`. An `http://127.0.0.1:PORT/api/alpha/decisions` address is also accepted, for local tests. Ignored for `fake`. |
-| `api_key_command` | Optional. A command that prints the API key, as a list of program and arguments, such as `["/usr/bin/security", "find-generic-password", "-s", "mailtriage", "-a", "openrouter", "-w"]`. The first element must be a non-empty program. When set, it is the only key source. See [Key command rules](./provider.md#key-command-rules). Ignored for `fake`. |
-| `api_key_env` | The name of the environment variable that holds the API key, such as `OPENROUTER_API_KEY`: uppercase letters `A` to `Z`, digits and `_` only. This is the variable's name, never the key. For `openrouter`, required unless `api_key_command` is set; it may then be empty or missing. Ignored for `fake`. |
+| `kind` | `"openrouter"` or `"kev"` for real classification, `"fake"` for offline tests. No other value is accepted. See [Provider](./provider.md). |
+| `model` | For `openrouter`, any non-empty Decisions model ID, such as `typesafe/jev-latest` (what setup writes) or `typesafe/jev-1.13`. For `kev`, `kev-latest` by default. For `fake`, any non-empty text. |
+| `endpoint` | For `openrouter`, exactly `https://openrouter.ai/api/alpha/decisions`. An `http://127.0.0.1:PORT/api/alpha/decisions` address is also accepted, for local tests. Ignored for `fake`. For `kev`, use a URL ending in `/v1/systemone`; see [the URL rule](./provider.md#the-url-rule). |
+| `api_key_command` | Optional. A command that prints the API key, as a list of program and arguments, such as `["/usr/bin/security", "find-generic-password", "-s", "mailtriage", "-a", "openrouter", "-w"]`. The first element must be a non-empty program. When set, it is the only key source. See [Key command rules](./provider.md#key-command-rules). Ignored for `fake` and for a Kev server on this machine. |
+| `api_key_env` | The name of the environment variable that holds the API key, such as `OPENROUTER_API_KEY`: uppercase letters `A` to `Z`, digits and `_` only. This is the variable's name, never the key. For `openrouter` and a Kev server off this machine, required unless `api_key_command` is set; it may then be empty or missing. Ignored for `fake` and for a Kev server on this machine. |
 | `timeout_seconds` | Time limit for each provider request, 1 to 300. |
+| `managed` | Only for `kev`, written by setup for [local Kev](./provider.md#local-kev): `{"checkpoint": "jaredpalmer/kev-4b@v1.0"}`. Leave it out for a server you run. |
 
 This is what goes to the classifier. For each message the provider receives the account's `identity`, `timezone` and `brief`, each category's `name` and `description`, and the message's sender, To and Cc addresses, subject, date and body text up to `policy.max_body_chars`.
 
