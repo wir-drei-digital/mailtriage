@@ -2039,6 +2039,14 @@ fn local_kev_is_installed_checked_and_written() {
     assert_eq!(s["kev"]["action"], "installed", "{s}");
     assert_eq!(s["kev"]["checkpoint"], "jaredpalmer/kev-4b@v1.0");
     assert_eq!(s["doctor"]["ready"], true, "{}", s["doctor"]);
+    assert!(
+        s["doctor"]["items"]
+            .as_array()
+            .unwrap()
+            .contains(&json!({"check":"kev","ready":true})),
+        "{}",
+        s["doctor"]
+    );
     assert_eq!(
         f.config()["provider"],
         json!({

@@ -148,6 +148,23 @@ fn stderr(out: &Output) -> String {
 }
 
 #[test]
+fn local_kev_is_kept_and_named() {
+    let f = Fixture::new();
+    let kev = f.root.join("data/mailtriage/kev");
+    fs::create_dir_all(&kev).unwrap();
+    fs::write(kev.join("installed.json"), "{}").unwrap();
+    let (out, v) = f.uninstall(&["--yes"], "", &[]);
+    assert_eq!(out.status.code(), Some(0), "{v} {}", stderr(&out));
+    assert!(v["self_uninstall"]["kept"]
+        .as_array()
+        .unwrap()
+        .contains(&json!(kev)));
+    assert!(kev.join("installed.json").exists());
+    let err = stderr(&out);
+    assert!(err.contains(&format!("Kept local Kev and its model in {}: other configs may use it. Delete it with rm -rf {} once none does.",kev.display(),kev.display())), "{err}");
+}
+
+#[test]
 fn only_this_installations_services_and_files_go() {
     let f = Fixture::new();
     let mine = f.service("work", &f.cli());

@@ -372,6 +372,14 @@ impl Service {
             )
         };
         let key_present = key_error.is_none();
+        // A managed status inspection never starts Kev; an own-server
+        // inspection asks its model endpoint with the resolved key.
+        let kev = (provider_cfg.kind == "kev" && provider_valid).then(|| {
+            let key =
+                provider::key_account(provider_cfg).and_then(|_| self.key.get(provider_cfg).ok());
+            crate::kev::runtime::status(provider_cfg, key.as_deref())
+        });
+        let kev_ready = kev.as_ref().is_none_or(|k| k["ready"] == true);
         let transport = match self.engine(&account) {
             Ok(None) => json!({"configured":false,"ready":true}),
             Ok(Some(engine)) => transport_report(engine.as_ref(), &account),
@@ -379,9 +387,12 @@ impl Service {
                 json!({"configured":true,"ready":false,"error":"Himalaya version/config check failed"})
             }
         };
-        let mut out = json!({"schema_version":1,"account":name,"ready":provider_valid&&key_present&&transport["ready"]==true,"provider":{"kind":self.config.provider.kind,"model":self.config.provider.model,"configuration_valid":provider_valid,"key_source":key_source,"key_present":key_present},"transport":transport,"review_mode":self.config.policy.review_mode,"state_dir":self.config.state_dir,"live_checks_performed":false,"coverage":self.coverage(name)?});
+        let mut out = json!({"schema_version":1,"account":name,"ready":provider_valid&&key_present&&kev_ready&&transport["ready"]==true,"provider":{"kind":self.config.provider.kind,"model":self.config.provider.model,"configuration_valid":provider_valid,"key_source":key_source,"key_present":key_present},"transport":transport,"review_mode":self.config.policy.review_mode,"state_dir":self.config.state_dir,"live_checks_performed":provider_cfg.kind=="kev","coverage":self.coverage(name)?});
         if let Some(e) = key_error {
             out["provider"]["key_error"] = json!(e);
+        }
+        if let Some(kev) = kev {
+            out["provider"]["kev"] = kev;
         }
         if let Some(filing) = self.doctor_filing(&account) {
             out["filing"] = filing;

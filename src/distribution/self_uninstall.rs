@@ -297,8 +297,8 @@ fn quit_tray(tray: &Path) -> Result<String, String> {
     }
 }
 
-/// What stays, said once: the lock file, the private Himalaya (other
-/// configs may use it) and the config directory. No mail was touched.
+/// What stays, said once: the lock file, private Himalaya, local Kev
+/// (other configs may use them), and the config directory.
 fn kept(dir: &Path, home: &Path, p: &mut Prompter) -> Vec<PathBuf> {
     let mut kept = vec![dir.join(install::LOCK_FILE)];
     if let Some(private) = himalaya::default_data_dir()
@@ -311,6 +311,17 @@ fn kept(dir: &Path, home: &Path, p: &mut Prompter) -> Vec<PathBuf> {
             shell_line(&[Path::new("rm"), Path::new("-rf"), &private])
         ));
         kept.push(private);
+    }
+    if let Some(kev) = crate::kev::Layout::for_user()
+        .map(|layout| layout.root().to_path_buf())
+        .filter(|path| path.exists())
+    {
+        p.say(&format!(
+            "Kept local Kev and its model in {}: other configs may use it. Delete it with {} once none does.",
+            kev.display(),
+            shell_line(&[Path::new("rm"), Path::new("-rf"), &kev])
+        ));
+        kept.push(kev);
     }
     let config = home.join(".config/mailtriage");
     p.say(&format!(

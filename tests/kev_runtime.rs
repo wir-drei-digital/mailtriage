@@ -5,7 +5,7 @@
 mod common;
 mod kev_support;
 use common::{mail, write_tool, Harness};
-use kev_support::{free_port, models_for, wait_until, Stub};
+use kev_support::{free_port, git_script, models_for, wait_until, Stub};
 use mailtriage::{
     config,
     domain::{FilingMode, ManagedKev, ProviderConfig},
@@ -74,6 +74,10 @@ impl Fixture {
     /// What a finished setup leaves: the checkout and `installed.json`.
     fn install(&self, checkpoint: &str) {
         fs::create_dir_all(self.layout.src()).unwrap();
+        fs::create_dir_all(self.layout.src().join(".venv")).unwrap();
+        fs::create_dir_all(self.layout.hf()).unwrap();
+        fs::write(self.layout.src().join(".standin-tag"), TAG).unwrap();
+        write_tool(&self.root.join("bin"), "git", &git_script(&self.control));
         Installed {
             tag: TAG.into(),
             checkpoint: checkpoint.into(),
@@ -126,6 +130,168 @@ impl Fixture {
         });
         provider
     }
+
+    fn doctor(&self, provider: &ProviderConfig) -> Value {
+        let path = self.root.join("doctor.json");
+        let mut c = config::default_config();
+        c.provider = provider.clone();
+        c.state_dir = self.root.join("doctor-state");
+        config::save(&path, &c).unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_mailtriage"))
+            .arg("--config")
+            .arg(&path)
+            .args(["doctor", "--account", "work", "--json"])
+            .env("HOME", self.root.join("home"))
+            .env("XDG_DATA_HOME", self.root.join("data"))
+            .env(
+                "PATH",
+                format!("{}:/usr/bin:/bin", self.root.join("bin").display()),
+            )
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap()
+    }
+}
+
+#[test]
+fn doctor_reports_local_kev_without_starting_it() {
+    let f = Fixture::new();
+    let provider = f.managed_config();
+    let v = f.doctor(&provider);
+    let kev = &v["provider"]["kev"];
+    assert_eq!(kev["mode"], "managed", "{v}");
+    assert_eq!(kev["installed"], false);
+    assert_eq!(kev["ready"], false);
+    assert_eq!(
+        kev["error"],
+        "local Kev is not installed; run mailtriage setup --update"
+    );
+    assert_eq!(kev["fix"], "run `mailtriage setup --update`");
+    assert_eq!(v["ready"], false);
+    assert_eq!(v["live_checks_performed"], true);
+    assert!(!f.layout.root().exists(), "doctor created Kev files");
+    f.install(CHECKPOINT);
+    let v = f.doctor(&provider);
+    let kev = &v["provider"]["kev"];
+    assert_eq!(kev["installed"], true, "{v}");
+    assert_eq!(kev["tag"], TAG);
+    assert_eq!(kev["checkpoint"], CHECKPOINT);
+    assert_eq!(kev["running"], false);
+    assert_eq!(kev["ready"], true);
+    assert_eq!(v["ready"], true);
+    assert!(
+        f.runs().is_empty(),
+        "doctor started Kev: {}",
+        f.read("uv.log")
+    );
+    runtime::ensure_running_with(&f.runtime()).unwrap();
+    assert_eq!(f.doctor(&provider)["provider"]["kev"]["running"], true);
+}
+
+#[test]
+fn doctor_reports_missing_artifacts_and_abandoned_ownership() {
+    let f = Fixture::new();
+    let provider = f.managed_config();
+    f.install(CHECKPOINT);
+    for missing in [
+        f.layout.src(),
+        f.layout.hf(),
+        f.layout.src().join(".venv"),
+        f.uv.clone(),
+    ] {
+        let parked = missing.with_extension("parked");
+        fs::rename(&missing, &parked).unwrap();
+        let kev = f.doctor(&provider)["provider"]["kev"].clone();
+        assert_eq!(kev["installed"], false, "{kev}");
+        assert_eq!(kev["ready"], false, "{kev}");
+        assert_eq!(kev["fix"], "run `mailtriage setup --update`", "{kev}");
+        fs::rename(&parked, &missing).unwrap();
+    }
+    fs::write(f.layout.src().join(".standin-tag"), "other-tag").unwrap();
+    assert_eq!(f.doctor(&provider)["provider"]["kev"]["installed"], false);
+    fs::write(f.layout.src().join(".standin-tag"), TAG).unwrap();
+    let mut changed = provider.clone();
+    changed.managed.as_mut().unwrap().checkpoint = "other/checkpoint@v1".into();
+    let kev = f.doctor(&changed)["provider"]["kev"].clone();
+    assert_eq!(kev["installed"], false);
+    assert_eq!(kev["installed_checkpoint"], CHECKPOINT);
+    fs::write(f.layout.ownership(), "corrupt").unwrap();
+    let kev = f.doctor(&provider)["provider"]["kev"].clone();
+    assert_eq!(kev["ready"], false, "{kev}");
+    assert!(
+        kev["error"].as_str().unwrap().contains("unconfirmed"),
+        "{kev}"
+    );
+    assert!(kev["fix"].as_str().unwrap().contains("verify"), "{kev}");
+    assert_eq!(fs::read_to_string(f.layout.ownership()).unwrap(), "corrupt");
+}
+
+#[test]
+fn doctor_reports_installation_busy_before_inspecting_server_lock() {
+    use fs2::FileExt;
+    let f = Fixture::new();
+    f.install(CHECKPOINT);
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(f.layout.installation_lock())
+        .unwrap();
+    lock.lock_exclusive().unwrap();
+    let kev = f.doctor(&f.managed_config())["provider"]["kev"].clone();
+    assert_eq!(kev["ready"], false, "{kev}");
+    assert!(
+        kev["error"].as_str().unwrap().contains("in progress"),
+        "{kev}"
+    );
+    assert_eq!(kev["running"], false, "{kev}");
+    assert!(!f.layout.lock().exists(), "doctor created a server lock");
+}
+
+#[test]
+fn doctor_reports_whether_your_kev_server_answers() {
+    let f = Fixture::new();
+    let server = |endpoint: String| {
+        let mut p = provider::provider_for("kev").unwrap().new_config();
+        p.managed = None;
+        p.endpoint = endpoint;
+        p
+    };
+    let good = Stub::start(models_for("any"), None);
+    let v = f.doctor(&server(good.endpoint()));
+    assert_eq!(
+        v["provider"]["kev"],
+        json!({"mode":"server","endpoint":good.endpoint(),"reachable":true,"ready":true})
+    );
+    let other = Stub::start(json!({"models":[{"name":"jev-latest"}]}), None);
+    let v = f.doctor(&server(other.endpoint()));
+    assert_eq!(v["provider"]["kev"]["reachable"], true);
+    assert_eq!(v["provider"]["kev"]["ready"], false);
+    assert_eq!(
+        v["provider"]["kev"]["error"],
+        "the Kev server does not serve kev-latest"
+    );
+    let port = free_port();
+    let v = f.doctor(&server(provider::kev::local_endpoint(port)));
+    let kev = &v["provider"]["kev"];
+    assert_eq!(kev["reachable"], false);
+    assert_eq!(kev["ready"], false);
+    assert_eq!(
+        kev["error"],
+        format!("the Kev server did not answer at http://127.0.0.1:{port}/v1/models")
+    );
+    assert_eq!(
+        kev["fix"],
+        "start your Kev server, or check provider.endpoint and its key"
+    );
+    assert_eq!(v["ready"], false);
 }
 
 impl Drop for Fixture {

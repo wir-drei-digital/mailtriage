@@ -1717,6 +1717,25 @@ fn doctor_step(
                 key["key_error"].as_str().map(str::to_owned),
                 key_fix,
             ));
+            if let Some(kev) = report["provider"].get("kev") {
+                let fix = if kev["error"] == crate::kev::runtime::NOT_INSTALLED
+                    || kev["error"]
+                        == "local Kev installation is incomplete or its source tag changed"
+                {
+                    format!(
+                        "run `{}`",
+                        mailtriage_line(shown, &["setup", "--update"], &["--account", name])
+                    )
+                } else {
+                    kev["fix"].as_str().unwrap_or_default().to_owned()
+                };
+                items.push(check_item(
+                    "kev",
+                    kev["ready"] == true,
+                    kev["error"].as_str().map(str::to_owned),
+                    fix,
+                ));
+            }
             let transport = &report["transport"];
             let (error, fix) = if transport["tested"] == false {
                 (

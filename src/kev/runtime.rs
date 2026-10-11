@@ -4,10 +4,13 @@
 use super::{control, installation, Installed, Layout, CHECK, IDLE, START_TIMEOUT, STOP_GRACE};
 use crate::{
     domain::ProviderConfig,
+    process,
     provider::{kev, ProviderUnavailable},
 };
 use fs2::FileExt;
+use serde_json::{json, Value};
 use std::{
+    ffi::OsStr,
     fs::{self, OpenOptions},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -291,6 +294,177 @@ pub fn shutdown_confirmed(layout: &Layout) -> std::io::Result<bool> {
         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(false),
         Err(e) => Err(e),
     }
+}
+
+/// Read-only ownership inspection for doctor. A missing lock alongside
+/// ownership evidence is uncertain; doctor never creates a control file.
+fn inspect_shutdown(layout: &Layout) -> std::io::Result<bool> {
+    match fs::metadata(layout.root()) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(e) => return Err(e),
+    }
+    let file = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(layout.lock())
+    {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return if layout.ownership().exists() {
+                Err(control::unconfirmed(layout))
+            } else {
+                Ok(true)
+            };
+        }
+        Err(e) => return Err(e),
+    };
+    match file.try_lock_exclusive() {
+        Ok(()) => {
+            control::confirm_terminated(layout, &file)?;
+            Ok(true)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+fn not_ready(out: &mut Value, error: impl Into<String>, fix: impl Into<String>) {
+    out["ready"] = json!(false);
+    out["error"] = json!(error.into());
+    out["fix"] = json!(fix.into());
+}
+
+/// Read-only Kev diagnostics for doctor; never starts or stops a process.
+pub fn status(config: &ProviderConfig, key: Option<&str>) -> Value {
+    let managed = config.managed.is_some();
+    let mut out =
+        json!({"mode": if managed { "managed" } else { "server" }, "endpoint": config.endpoint});
+    if managed {
+        out["installed"] = json!(false);
+        out["running"] = json!(false);
+        let rt = match Runtime::for_config(config) {
+            Ok(rt) => rt,
+            Err(e) => {
+                not_ready(&mut out, e.0, "run `mailtriage setup --update`");
+                return out;
+            }
+        };
+        out["dir"] = json!(rt.layout.root());
+        let repair_ownership = format!("stop all callers, then verify no live mailtriage kev run/mutate or git/uv/brew descendants remain; preserve {} as a backup before running `mailtriage setup --update --yes`", rt.layout.root().display());
+        match installation_in_progress(&rt.layout) {
+            Ok(true) => {
+                not_ready(
+                    &mut out,
+                    format!(
+                        "local Kev installation is in progress in {}",
+                        rt.layout.root().display()
+                    ),
+                    "wait for setup to finish, then run `mailtriage setup --update` again",
+                );
+                return out;
+            }
+            Err(e) => {
+                not_ready(
+                    &mut out,
+                    format!("local Kev installation state is uncertain: {e}"),
+                    repair_ownership,
+                );
+                return out;
+            }
+            Ok(false) => {}
+        }
+        let stopped = match inspect_shutdown(&rt.layout) {
+            Ok(stopped) => stopped,
+            Err(e) => {
+                not_ready(&mut out, e.to_string(), repair_ownership);
+                return out;
+            }
+        };
+        let installed = match Installed::read(&rt.layout) {
+            Some(i) if i.matches(&rt.checkpoint) => i,
+            other => {
+                if let Some(i) = other {
+                    out["installed_checkpoint"] = json!(i.checkpoint);
+                }
+                not_ready(&mut out, NOT_INSTALLED, "run `mailtriage setup --update`");
+                return out;
+            }
+        };
+        let source = rt.layout.src();
+        let tag_ok = process::find_on_path("git")
+            .and_then(|git| {
+                let args = [
+                    OsStr::new("-C"),
+                    source.as_os_str(),
+                    OsStr::new("describe"),
+                    OsStr::new("--tags"),
+                    OsStr::new("--exact-match"),
+                ];
+                process::run_bounded(&git, &args, Duration::from_secs(10), 4096)
+                    .ok()?
+                    .success()
+            })
+            .is_some_and(|tag| String::from_utf8_lossy(&tag).trim() == super::TAG);
+        if !source.is_dir()
+            || !source.join(".venv").is_dir()
+            || !rt.layout.hf().is_dir()
+            || !process::is_executable(&installed.uv)
+            || !tag_ok
+        {
+            not_ready(
+                &mut out,
+                "local Kev installation is incomplete or its source tag changed",
+                "run `mailtriage setup --update`",
+            );
+            return out;
+        }
+        out["installed"] = json!(true);
+        out["tag"] = json!(installed.tag);
+        out["checkpoint"] = json!(installed.checkpoint);
+        match probe(&rt) {
+            Probe::Ready if !stopped => {
+                out["running"] = json!(true);
+                out["ready"] = json!(true);
+            }
+            Probe::Nothing if stopped => out["ready"] = json!(true),
+            Probe::Nothing => not_ready(
+                &mut out,
+                "local Kev owns its lock but did not answer",
+                "check the live Kev process and its log, then run `mailtriage setup --update`",
+            ),
+            _ => not_ready(
+                &mut out,
+                rt.port_taken().0,
+                format!("stop the program on port {}", rt.port),
+            ),
+        }
+        return out;
+    }
+    let url = kev::models_url(&config.endpoint).unwrap_or_default();
+    match kev::list_models(&url, key, Duration::from_secs(10)) {
+        Ok(models) if models.iter().any(|m| m.name == config.model) => {
+            out["reachable"] = json!(true);
+            out["ready"] = json!(true);
+        }
+        Ok(_) => {
+            out["reachable"] = json!(true);
+            not_ready(
+                &mut out,
+                format!("the Kev server does not serve {}", config.model),
+                "check provider.model, or the model your Kev server runs",
+            );
+        }
+        Err(e) => {
+            out["reachable"] = json!(e != kev::ModelsError::Unreachable);
+            not_ready(
+                &mut out,
+                format!("{e} at {url}"),
+                "start your Kev server, or check provider.endpoint and its key",
+            );
+        }
+    }
+    out
 }
 
 /// Requests the current lock holder to stop through its control directory.
