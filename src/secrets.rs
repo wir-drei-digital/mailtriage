@@ -63,10 +63,11 @@ pub fn resolve_key(config: &ProviderConfig) -> Result<String> {
     if let Some(command) = &config.api_key_command {
         return run_key_command(command);
     }
+    let owner = crate::provider::key_owner(config);
     let key = std::env::var(&config.api_key_env)
-        .map_err(|_| anyhow!("OpenRouter API key environment variable is missing"))?;
+        .map_err(|_| anyhow!("{owner} API key environment variable is missing"))?;
     if key.trim().is_empty() {
-        bail!("OpenRouter API key environment variable is empty");
+        bail!("{owner} API key environment variable is empty");
     }
     Ok(key)
 }

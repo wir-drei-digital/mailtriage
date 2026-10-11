@@ -7,15 +7,20 @@
 //! Only Decisions-style services fit: each choice comes with a confidence and
 //! a probability per offered label. To add one:
 //!
-//! 1. implement `DecisionProvider` in a module next to `openrouter` and
+//! 1. implement `DecisionProvider` in a module next to `openrouter`, `kev` and
 //!    `fake`;
 //! 2. add its kind to `KINDS` (setup offers the kinds in that order) and to
 //!    `provider_for`;
 //! 3. give it a fixture in `tests/provider_contract.rs`, whose suite runs
 //!    against every kind in `KINDS`.
+//!
+//! `systemone` holds the request, client and answer parsing every System One
+//! service shares.
 pub mod fake;
+pub mod kev;
 pub mod openrouter;
 pub mod questions;
+pub mod systemone;
 
 pub use openrouter::DECISIONS_ENDPOINT;
 pub use questions::{Question, Questions};
@@ -95,13 +100,23 @@ pub trait DecisionProvider: Sync {
 }
 
 /// Registered kinds, in the order setup offers them.
-pub const KINDS: &[&str] = &["openrouter", "fake"];
+pub const KINDS: &[&str] = &["openrouter", "kev", "fake"];
 
 pub fn provider_for(kind: &str) -> Result<&'static dyn DecisionProvider> {
     match kind {
         "openrouter" => Ok(&openrouter::OpenRouter),
+        "kev" => Ok(&kev::Kev),
         "fake" => Ok(&fake::Fake),
         _ => bail!("unsupported provider kind"),
+    }
+}
+
+/// Whose key a config needs, for messages: "OpenRouter" or "Kev server".
+pub fn key_owner(config: &ProviderConfig) -> &'static str {
+    if config.kind == "kev" {
+        "Kev server"
+    } else {
+        "OpenRouter"
     }
 }
 
@@ -133,6 +148,9 @@ pub fn validate_configuration(config: &ProviderConfig) -> Result<()> {
                 }
             }
             None if config.api_key_env.is_empty() => {
+                if config.kind == "kev" {
+                    bail!("Kev server needs api_key_command or api_key_env")
+                }
                 bail!("OpenRouter provider needs api_key_command or api_key_env")
             }
             None => {}

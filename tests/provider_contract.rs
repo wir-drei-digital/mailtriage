@@ -29,6 +29,14 @@ const RESPONSE: &str = r#"{"model":"typesafe/jev-1.13-20260917","provider":"Type
 "urgency":{"type":"choice","choice":"high","confidence":0.9,"probabilities":{"low":0.02,"medium":0.08,"high":0.9}},
 "action_required":{"type":"noul","noul":0.96}}}"#;
 
+/// A Kev server's answer for the six default categories: `model` is the
+/// requested name, probabilities have four decimals, and there is no
+/// `provider` field (kev/serve.py `_body`).
+const KEV_RESPONSE: &str = r#"{"model":"kev-latest","answers":{
+"category":{"type":"choice","choice":"transactions","confidence":0.9612,"probabilities":{"correspondence":0.0081,"transactions":0.9677,"updates":0.0102,"newsletters":0.0043,"promotions":0.0035,"other":0.0062}},
+"urgency":{"type":"choice","choice":"high","confidence":0.8571,"probabilities":{"low":0.0204,"medium":0.0844,"high":0.8952}},
+"action_required":{"type":"noul","noul":0.9431}},"usage":{"input_tokens":412,"output_tokens":31},"latency_ms":721.4}"#;
+
 fn pinned_account() -> AccountConfig {
     let mut account = config::default_config().accounts["work"].clone();
     account.identity = "work@example.invalid".into();
@@ -165,6 +173,26 @@ fn openrouter(url: &str) -> ProviderConfig {
     config
 }
 
+/// A Kev server you run at the loopback endpoint `endpoint` made for
+/// OpenRouter: the same listener, the Kev path.
+fn kev(decisions_url: &str) -> ProviderConfig {
+    let mut config = provider::provider_for("kev").unwrap().new_config();
+    config.managed = None;
+    config.endpoint = decisions_url.replace("/api/alpha/decisions", "/v1/systemone");
+    config
+}
+
+fn kev_error(response: Vec<u8>) -> String {
+    let (url, server) = endpoint(response);
+    let error = provider::provider_for("kev")
+        .unwrap()
+        .decide(&kev(&url), &request(), None)
+        .unwrap_err()
+        .to_string();
+    server.join().unwrap();
+    error
+}
+
 /// The provider config to test `kind` with, the key to pass, the model the
 /// `Decision` must name, and the endpoint to join afterwards (if any). A
 /// new kind in `KINDS` needs an arm here.
@@ -191,6 +219,10 @@ fn fixture(
                 "typesafe/jev-1.13-20260917",
                 Some(server),
             )
+        }
+        "kev" => {
+            let (url, server) = endpoint(http("200 OK", "", KEV_RESPONSE.as_bytes()));
+            (kev(&url), None, "kev-latest", Some(server))
         }
         other => panic!("no contract fixture for provider kind {other}; add one"),
     }
@@ -442,7 +474,7 @@ fn a_missing_openrouter_answer_is_none() {
 
 #[test]
 fn the_registry_knows_exactly_its_kinds() {
-    assert_eq!(provider::KINDS, ["openrouter", "fake"]);
+    assert_eq!(provider::KINDS, ["openrouter", "kev", "fake"]);
     for &kind in provider::KINDS {
         let adapter = provider::provider_for(kind).unwrap();
         let config = adapter.new_config();
@@ -477,6 +509,17 @@ fn the_registry_knows_exactly_its_kinds() {
     );
     let fake = provider::provider_for("fake").unwrap();
     assert_eq!(fake.key_account(&fake.new_config()), None);
+    let kev = provider::provider_for("kev").unwrap();
+    let managed = kev.new_config();
+    assert_eq!(managed.model, "kev-latest");
+    assert_eq!(managed.endpoint, "http://127.0.0.1:8009/v1/systemone");
+    assert_eq!(managed.timeout_seconds, 60);
+    assert_eq!(
+        managed.managed.as_ref().map(|m| m.checkpoint.as_str()),
+        Some("jaredpalmer/kev-4b@v1.0")
+    );
+    assert_eq!(kev.key_account(&managed), None);
+    assert_eq!(kev.label(), "Kev server you run (enter its URL)");
 }
 
 /// Kev spec, config: `managed` is written only when set, so every existing
@@ -549,5 +592,288 @@ fn openrouter_accepts_any_nonempty_model_on_the_pinned_endpoint() {
                 .to_string(),
             "provider endpoint must be the OpenRouter Decisions endpoint"
         );
+    }
+}
+
+/// Kev spec, adapter: Kev gets OpenRouter's body with its own model, at
+/// its own path; even a directly supplied key stays off loopback.
+#[test]
+fn the_kev_request_is_the_openrouter_body_with_its_model() {
+    let expected = PINNED_BODY.replacen(
+        r#""model":"typesafe/jev-latest""#,
+        r#""model":"kev-latest""#,
+        1,
+    );
+    for key in [None, Some("fixture-key")] {
+        let (url, server) = endpoint(http("200 OK", "", KEV_RESPONSE.as_bytes()));
+        let decision = provider::provider_for("kev")
+            .unwrap()
+            .decide(&kev(&url), &request(), key)
+            .unwrap();
+        let received = server.join().unwrap();
+        assert!(received.head.starts_with("POST /v1/systemone HTTP/1.1\r\n"));
+        let head = received.head.to_ascii_lowercase();
+        assert!(!head.contains("\r\nauthorization:"), "{head}");
+        assert_eq!(String::from_utf8(received.body).unwrap(), expected);
+        assert_eq!(decision.model, "kev-latest");
+    }
+}
+
+/// Review focus 5: a Kev server on this machine gets no key, even when the
+/// config names a key source.
+#[test]
+fn a_kev_server_on_this_machine_gets_no_key() {
+    let (url, server) = endpoint(http("200 OK", "", KEV_RESPONSE.as_bytes()));
+    let mut config = kev(&url);
+    config.api_key_command = Some(vec!["/bin/echo".into(), "sk-kev-secret".into()]);
+    assert_eq!(provider::key_account(&config), None);
+    provider::classify(
+        &config,
+        &pinned_account(),
+        &pinned_message(),
+        &config::default_config().policy,
+    )
+    .unwrap();
+    let received = server.join().unwrap();
+    assert!(
+        !received
+            .head
+            .to_ascii_lowercase()
+            .contains("authorization:"),
+        "{}",
+        received.head
+    );
+}
+
+#[test]
+fn kev_failures_name_the_kev_server() {
+    let oversized = vec![b' '; 1024 * 1024 + 1];
+    let cases = [
+        (
+            http("429 Too Many Requests", "", b"provider secret diagnostic"),
+            "Kev server returned HTTP 429",
+        ),
+        (
+            http(
+                "401 Unauthorized",
+                "",
+                br#"{"detail":"provider secret diagnostic"}"#,
+            ),
+            "Kev server returned HTTP 401",
+        ),
+        (
+            http(
+                "422 Unprocessable Entity",
+                "",
+                b"provider secret diagnostic",
+            ),
+            "Kev server returned HTTP 422",
+        ),
+        (
+            http("200 OK", "", &oversized),
+            "Kev server response is too large",
+        ),
+        (http("200 OK", "", b"not-json"), "invalid Kev server JSON"),
+        (
+            http("200 OK", "", br#"{"model":"kev-latest"}"#),
+            "Kev server response lacks typed answers",
+        ),
+    ];
+    for (response, expected) in cases {
+        let error = kev_error(response);
+        assert_eq!(error, expected);
+        assert!(!error.contains("provider secret diagnostic"));
+    }
+    // Nothing listens on a port just freed.
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let config = kev(&format!("http://127.0.0.1:{port}/api/alpha/decisions"));
+    assert_eq!(
+        provider::provider_for("kev")
+            .unwrap()
+            .decide(&config, &request(), None)
+            .unwrap_err()
+            .to_string(),
+        "Kev server request failed"
+    );
+}
+
+/// Kev spec, URL rule: `http` only on this machine; `https` and a key
+/// elsewhere; a managed endpoint is `http://127.0.0.1:PORT/v1/systemone`.
+#[test]
+fn kev_endpoints_follow_the_url_rule() {
+    let adapter = provider::provider_for("kev").unwrap();
+    let server = |endpoint: &str, key_env: &str| {
+        let mut config = adapter.new_config();
+        config.managed = None;
+        config.endpoint = endpoint.into();
+        config.api_key_env = key_env.into();
+        config
+    };
+    let check = |config: &ProviderConfig| {
+        provider::validate_configuration(config)
+            .err()
+            .map(|e| e.to_string())
+    };
+    for local in [
+        "http://127.0.0.1:8009/v1/systemone",
+        "http://localhost:8009/v1/systemone",
+        "http://[::1]:8009/v1/systemone",
+    ] {
+        let config = server(local, "");
+        assert_eq!(check(&config), None, "{local}");
+        assert_eq!(adapter.key_account(&config), None, "{local}");
+    }
+    for remote in [
+        "https://kev.example.test/v1/systemone",
+        "https://example.test/kev/v1/systemone",
+        "https://127.0.0.1:8443/v1/systemone",
+    ] {
+        let config = server(remote, "KEV_API_KEY");
+        assert_eq!(check(&config), None, "{remote}");
+    }
+    assert_eq!(
+        adapter.key_account(&server("https://kev.example.test/v1/systemone", "")),
+        Some("kev")
+    );
+    let https = "provider.endpoint must use https for a server off this machine";
+    let rule = "provider.endpoint must be a Kev server URL ending in /v1/systemone";
+    let cases = [
+        ("http://kev.example.test/v1/systemone", "KEV_API_KEY", https),
+        ("http://192.168.1.5:8009/v1/systemone", "KEV_API_KEY", https),
+        (
+            "https://kev.example.test/v1/systemone",
+            "",
+            "Kev server needs api_key_command or api_key_env",
+        ),
+        ("https://kev.example.test/v1/chat", "KEV_API_KEY", rule),
+        ("http://127.0.0.1:8009/v1/systemone/", "", rule),
+        ("http://127.0.0.1:8009/v1/systemone?x=1", "", rule),
+        ("http://127.0.0.1:8009/v1/systemone#fragment", "", rule),
+        ("ftp://127.0.0.1/v1/systemone", "", rule),
+        ("not a url", "", rule),
+        (
+            "https://user:pass@kev.example.test/v1/systemone",
+            "KEV_API_KEY",
+            "provider.endpoint must not contain a user name or password; use api_key_command for the key",
+        ),
+    ];
+    for (endpoint, key_env, expected) in cases {
+        assert_eq!(
+            check(&server(endpoint, key_env)).as_deref(),
+            Some(expected),
+            "{endpoint}"
+        );
+    }
+    let managed_rule = "a managed Kev endpoint must be http://127.0.0.1:PORT/v1/systemone";
+    let mut managed = adapter.new_config();
+    assert_eq!(check(&managed), None);
+    for endpoint in [
+        "http://localhost:8009/v1/systemone",
+        "http://[::1]:8009/v1/systemone",
+        "http://127.0.0.1/v1/systemone",
+        "http://127.0.0.1:8009/kev/v1/systemone",
+    ] {
+        managed.endpoint = endpoint.into();
+        assert_eq!(check(&managed).as_deref(), Some(managed_rule), "{endpoint}");
+    }
+    managed.endpoint = "http://127.0.0.1:80/v1/systemone".into();
+    assert_eq!(
+        check(&managed).as_deref(),
+        Some("a managed Kev endpoint must use an explicit non-default port (port 80 is not supported)")
+    );
+    managed.endpoint = "https://kev.example.test/v1/systemone".into();
+    managed.api_key_env = "KEV_API_KEY".into();
+    assert_eq!(check(&managed).as_deref(), Some(managed_rule));
+    for endpoint in [
+        "http://127.0.0.1:8009/v1/systemone?x=1",
+        "http://127.0.0.1:8009/v1/systemone#fragment",
+    ] {
+        managed.endpoint = endpoint.into();
+        assert_eq!(check(&managed).as_deref(), Some(rule), "{endpoint}");
+    }
+    managed.endpoint = "http://user:pass@127.0.0.1:8009/v1/systemone".into();
+    assert_eq!(
+        check(&managed).as_deref(),
+        Some("provider.endpoint must not contain a user name or password; use api_key_command for the key")
+    );
+    let mut blank = adapter.new_config();
+    blank.managed = Some(ManagedKev {
+        checkpoint: " ".into(),
+    });
+    assert_eq!(
+        check(&blank).as_deref(),
+        Some("provider.managed.checkpoint cannot be empty")
+    );
+    assert_eq!(
+        provider::kev::models_url("https://example.test/kev/v1/systemone").as_deref(),
+        Some("https://example.test/kev/v1/models")
+    );
+    assert_eq!(
+        provider::kev::models_url("https://example.test/v1/chat"),
+        None
+    );
+}
+
+#[test]
+fn kev_models_are_listed_with_the_key_when_given() {
+    let models = br#"{"models":[{"name":"kev-latest","run":"jaredpalmer/kev-4b@v1.0","device":"mps"},{"name":"jev-latest","run":"jaredpalmer/kev-4b@v1.0"}]}"#;
+    let (url, server) = endpoint(http("200 OK", "", models));
+    let url = url.replace("/api/alpha/decisions", "/v1/models");
+    let list =
+        provider::kev::list_models(&url, Some("fixture-key"), Duration::from_secs(5)).unwrap();
+    let received = server.join().unwrap();
+    assert!(received.head.starts_with("GET /v1/models HTTP/1.1\r\n"));
+    assert!(received
+        .head
+        .to_ascii_lowercase()
+        .contains("\r\nauthorization: bearer fixture-key\r\n"));
+    assert_eq!(list.len(), 2);
+    assert_eq!(list[0].name, "kev-latest");
+    assert_eq!(list[0].run.as_deref(), Some("jaredpalmer/kev-4b@v1.0"));
+    let fails = |response: Vec<u8>| {
+        let (url, server) = endpoint(response);
+        let error = provider::kev::list_models(&url, None, Duration::from_secs(5)).unwrap_err();
+        server.join().unwrap();
+        error
+    };
+    assert_eq!(
+        fails(http("401 Unauthorized", "", b"{}")),
+        provider::kev::ModelsError::Http(401)
+    );
+    assert_eq!(
+        fails(http("200 OK", "", b"not-json")),
+        provider::kev::ModelsError::Invalid
+    );
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let closed = format!("http://127.0.0.1:{port}/v1/models");
+    let error = provider::kev::list_models(&closed, None, Duration::from_secs(5)).unwrap_err();
+    assert_eq!(error, provider::kev::ModelsError::Unreachable);
+    assert_eq!(error.to_string(), "the Kev server did not answer");
+}
+
+/// Optional auth belongs to the shared transport; Kev suppresses it locally.
+#[test]
+fn systemone_transport_sends_bearer_only_when_given() {
+    for key in [None, Some("fixture-key")] {
+        let (url, server) = endpoint(http("200 OK", "", KEV_RESPONSE.as_bytes()));
+        let config = kev(&url);
+        let body = provider::systemone::request_body(&config, &request());
+        provider::systemone::send(&config, &config.endpoint, &body, key, "Kev server").unwrap();
+        let received = server.join().unwrap();
+        let head = received.head.to_ascii_lowercase();
+        assert_eq!(
+            head.contains("\r\nauthorization: bearer fixture-key\r\n"),
+            key.is_some(),
+            "{head}"
+        );
+        assert_eq!(head.contains("\r\nauthorization:"), key.is_some(), "{head}");
     }
 }

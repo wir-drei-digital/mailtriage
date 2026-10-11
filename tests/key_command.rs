@@ -185,3 +185,32 @@ fn a_config_without_a_key_command_serializes_as_before() {
     assert_eq!(loaded.api_key_env, "");
     assert!(provider::validate_configuration(&loaded).is_ok());
 }
+
+/// Kev spec: a remote Kev server's key follows the shared rules, and its
+/// errors name the Kev server; OpenRouter's texts are unchanged.
+#[test]
+fn kev_key_errors_name_the_kev_server() {
+    let mut provider = config::default_config().provider;
+    provider.kind = "kev".into();
+    provider.model = "kev-latest".into();
+    provider.endpoint = "https://kev.example.test/v1/systemone".into();
+    provider.api_key_env = "MT_KEV_KEY_MISSING_TEST".into();
+    assert_eq!(
+        secrets::resolve_key(&provider).unwrap_err().to_string(),
+        "Kev server API key environment variable is missing"
+    );
+    std::env::set_var("MT_KEV_KEY_EMPTY_TEST", " ");
+    provider.api_key_env = "MT_KEV_KEY_EMPTY_TEST".into();
+    assert_eq!(
+        secrets::resolve_key(&provider).unwrap_err().to_string(),
+        "Kev server API key environment variable is empty"
+    );
+    let mut openrouter = openrouter();
+    openrouter.api_key_env = "MT_OPENROUTER_KEY_MISSING_TEST".into();
+    assert_eq!(
+        secrets::resolve_key(&openrouter).unwrap_err().to_string(),
+        "OpenRouter API key environment variable is missing"
+    );
+    assert_eq!(provider::key_owner(&provider), "Kev server");
+    assert_eq!(provider::key_owner(&openrouter), "OpenRouter");
+}
