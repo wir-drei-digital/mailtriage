@@ -2329,6 +2329,27 @@ mod golden {
             "6dfd7bf30e6bf1c0b27ee97af991ecf21dc5ac0400044c2f3adbda7f79d37514"
         );
     }
+
+    /// Kev spec: `managed.checkpoint` is part of the generation hash, as
+    /// `model` is; without `managed` the hash is today's.
+    #[test]
+    fn generation_hash_includes_the_managed_checkpoint() {
+        let mut cfg = crate::config::default_config();
+        let plain = super::generation(&cfg, &cfg.accounts["work"]).unwrap();
+        assert_eq!(
+            plain,
+            "6dfd7bf30e6bf1c0b27ee97af991ecf21dc5ac0400044c2f3adbda7f79d37514"
+        );
+        let with = |checkpoint: &str| crate::domain::ManagedKev {
+            checkpoint: checkpoint.into(),
+        };
+        cfg.provider.managed = Some(with("jaredpalmer/kev-4b@v1.0"));
+        let four = super::generation(&cfg, &cfg.accounts["work"]).unwrap();
+        cfg.provider.managed = Some(with("jaredpalmer/kev-9b@v1.0"));
+        let nine = super::generation(&cfg, &cfg.accounts["work"]).unwrap();
+        assert_ne!(plain, four);
+        assert_ne!(four, nine);
+    }
 }
 
 #[cfg(test)]

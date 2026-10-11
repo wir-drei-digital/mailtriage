@@ -13,7 +13,7 @@ impl DecisionProvider for Fake {
         Ok(())
     }
 
-    fn key_account(&self) -> Option<&'static str> {
+    fn key_account(&self, _config: &ProviderConfig) -> Option<&'static str> {
         None
     }
 

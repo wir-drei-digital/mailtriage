@@ -49,6 +49,19 @@ pub struct ProviderConfig {
     #[serde(default)]
     pub api_key_env: String,
     pub timeout_seconds: u64,
+    /// `kev` only: setup installed this Kev server and mailtriage runs it.
+    /// Serialized only when set, so every other config, and its generation
+    /// hash, is unchanged; the checkpoint is part of the hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed: Option<ManagedKev>,
+}
+
+/// A Kev server mailtriage installed and starts on demand.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedKev {
+    /// The checkpoint Kev serves, as `--run` takes it:
+    /// `jaredpalmer/kev-4b@v1.0`.
+    pub checkpoint: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

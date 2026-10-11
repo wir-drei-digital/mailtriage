@@ -3,7 +3,7 @@
 //! byte-identical OpenRouter request, and the registry.
 use mailtriage::{
     config,
-    domain::{AccountConfig, Address, Category, NormalizedMessage, ProviderConfig},
+    domain::{AccountConfig, Address, Category, ManagedKev, NormalizedMessage, ProviderConfig},
     provider::{self, Decision, DecisionRequest},
     service::Service,
 };
@@ -470,11 +470,49 @@ fn the_registry_knows_exactly_its_kinds() {
             .model,
         "typesafe/jev-latest"
     );
+    let openrouter = provider::provider_for("openrouter").unwrap();
     assert_eq!(
-        provider::provider_for("openrouter").unwrap().key_account(),
+        openrouter.key_account(&openrouter.new_config()),
         Some("openrouter")
     );
-    assert_eq!(provider::provider_for("fake").unwrap().key_account(), None);
+    let fake = provider::provider_for("fake").unwrap();
+    assert_eq!(fake.key_account(&fake.new_config()), None);
+}
+
+/// Kev spec, config: `managed` is written only when set, so every existing
+/// config and its generation hash stay the same, and only `kev` may have it.
+#[test]
+fn managed_is_only_for_kev_and_serialized_only_when_set() {
+    let mut config = openrouter(provider::DECISIONS_ENDPOINT);
+    let written = serde_json::to_value(&config).unwrap();
+    assert!(written.get("managed").is_none(), "{written}");
+    let managed = ManagedKev {
+        checkpoint: "jaredpalmer/kev-4b@v1.0".into(),
+    };
+    config.managed = Some(managed.clone());
+    assert_eq!(
+        serde_json::to_value(&config).unwrap()["managed"],
+        json!({"checkpoint": "jaredpalmer/kev-4b@v1.0"})
+    );
+    assert_eq!(
+        provider::validate_configuration(&config)
+            .unwrap_err()
+            .to_string(),
+        "provider.managed is only for kind kev"
+    );
+    let mut fake = provider::provider_for("fake").unwrap().new_config();
+    fake.managed = Some(managed);
+    assert_eq!(
+        provider::validate_configuration(&fake)
+            .unwrap_err()
+            .to_string(),
+        "provider.managed is only for kind kev"
+    );
+    let read: ProviderConfig = serde_json::from_value(json!({
+        "kind": "fake", "model": "fake/offline", "endpoint": "", "timeout_seconds": 30
+    }))
+    .unwrap();
+    assert_eq!(read.managed, None);
 }
 
 #[test]

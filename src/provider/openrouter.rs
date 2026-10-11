@@ -31,7 +31,7 @@ impl DecisionProvider for OpenRouter {
         Ok(())
     }
 
-    fn key_account(&self) -> Option<&'static str> {
+    fn key_account(&self, _config: &ProviderConfig) -> Option<&'static str> {
         Some("openrouter")
     }
 
@@ -47,6 +47,7 @@ impl DecisionProvider for OpenRouter {
             api_key_command: None,
             api_key_env: DEFAULT_KEY_ENV.to_owned(),
             timeout_seconds: 30,
+            managed: None,
         }
     }
 

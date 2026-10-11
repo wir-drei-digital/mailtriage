@@ -975,7 +975,7 @@ fn classifier_step(
     .into_iter()
     .find_map(|(given, flag)| given.then_some(flag));
     if let (Some(flag), Some(kind)) = (key_flag, args.provider.as_deref()) {
-        if provider::provider_for(kind).is_ok_and(|p| p.key_account().is_none()) {
+        if provider::provider_for(kind).is_ok_and(|p| p.key_account(&p.new_config()).is_none()) {
             return Err(err(
                 2,
                 format!("{STEP_KEY}: {flag} has no effect with --provider {kind}; drop it"),
@@ -1014,7 +1014,7 @@ fn classifier_step(
         )
     })?;
     // A provider without a key has nothing to ask (the offline demo).
-    let Some(account) = adapter.key_account() else {
+    let Some(account) = adapter.key_account(&adapter.new_config()) else {
         return Ok((adapter.new_config(), None));
     };
     // A current provider of this kind changes only where asked, so its

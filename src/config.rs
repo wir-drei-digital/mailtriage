@@ -90,6 +90,7 @@ pub fn default_config() -> AppConfig {
             api_key_command: None,
             api_key_env: String::new(),
             timeout_seconds: 30,
+            managed: None,
         },
         policy: PolicyConfig {
             choice_confidence_min: 0.75,

@@ -78,9 +78,10 @@ pub struct Decision {
 pub trait DecisionProvider: Sync {
     /// Provider-specific rules; the shared rules have already passed.
     fn validate(&self, config: &ProviderConfig) -> Result<()>;
-    /// The key store's account name (`openrouter`); `None` when the
-    /// provider needs no key.
-    fn key_account(&self) -> Option<&'static str>;
+    /// The key store's account name (`openrouter`) when `config` needs a
+    /// key; `None` when it needs none (the offline demo, a Kev server on
+    /// this machine).
+    fn key_account(&self, config: &ProviderConfig) -> Option<&'static str>;
     /// Setup's menu entry for this kind.
     fn label(&self) -> &'static str;
     /// The provider block a new setup writes for this kind.
@@ -109,7 +110,7 @@ pub fn provider_for(kind: &str) -> Result<&'static dyn DecisionProvider> {
 pub fn key_account(config: &ProviderConfig) -> Option<&'static str> {
     provider_for(&config.kind)
         .ok()
-        .and_then(|provider| provider.key_account())
+        .and_then(|provider| provider.key_account(config))
 }
 
 /// The shared rules, then the provider's own.
@@ -121,7 +122,10 @@ pub fn validate_configuration(config: &ProviderConfig) -> Result<()> {
         bail!("provider.model cannot be empty");
     }
     let provider = provider_for(&config.kind)?;
-    if provider.key_account().is_some() {
+    if config.managed.is_some() && config.kind != "kev" {
+        bail!("provider.managed is only for kind kev");
+    }
+    if provider.key_account(config).is_some() {
         match &config.api_key_command {
             Some(command) => {
                 if command.first().is_none_or(|program| program.is_empty()) {
@@ -171,7 +175,7 @@ pub fn classify_with_key(
     }
     let provider = provider_for(&config.kind)?;
     let request = DecisionRequest::new(account, message, chrono::Utc::now().to_rfc3339());
-    let key = match provider.key_account() {
+    let key = match provider.key_account(config) {
         Some(_) => Some(key.get(config)?),
         None => None,
     };
