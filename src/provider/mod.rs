@@ -31,7 +31,10 @@ use crate::{
 };
 use anyhow::{bail, Result};
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 /// What every provider is asked.
 #[derive(Debug, Clone)]
@@ -80,7 +83,33 @@ pub struct Decision {
     pub raw: Value,
 }
 
+/// The provider cannot answer now, for a reason outside the message: a
+/// local server that is not installed or does not start, a server that
+/// does not answer. Like a missing key it skips classification: no job is
+/// taken, no attempt is used, and the reason is reported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderUnavailable(pub String);
+
+impl fmt::Display for ProviderUnavailable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ProviderUnavailable {}
+
 pub trait DecisionProvider: Sync {
+    /// Whether the provider can answer now. Called once per command, after
+    /// the key check and before any job is taken; `Err` skips
+    /// classification like a missing key. Ready by default.
+    fn prepare(
+        &self,
+        _config: &ProviderConfig,
+        _key: Option<&str>,
+    ) -> Result<(), ProviderUnavailable> {
+        Ok(())
+    }
+
     /// Provider-specific rules; the shared rules have already passed.
     fn validate(&self, config: &ProviderConfig) -> Result<()>;
     /// The key store's account name (`openrouter`) when `config` needs a
@@ -126,6 +155,19 @@ pub fn key_account(config: &ProviderConfig) -> Option<&'static str> {
     provider_for(&config.kind)
         .ok()
         .and_then(|provider| provider.key_account(config))
+}
+
+/// `prepare` of `config`'s provider, with the key when it needs one (the
+/// caller has checked that the key resolves). An unknown kind is ready
+/// here; validation refuses it.
+pub fn prepare(config: &ProviderConfig, key: &KeyCache) -> Result<(), ProviderUnavailable> {
+    let Ok(provider) = provider_for(&config.kind) else {
+        return Ok(());
+    };
+    let key = provider
+        .key_account(config)
+        .and_then(|_| key.get(config).ok());
+    provider.prepare(config, key.as_deref())
 }
 
 /// The shared rules, then the provider's own.

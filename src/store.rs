@@ -425,6 +425,16 @@ impl Store {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
+    /// Gives a leased job back without using an attempt: the provider was
+    /// unavailable, so nothing was tried.
+    pub fn unlease(&mut self, id: &str, generation: &str) -> Result<()> {
+        self.db.execute(
+            "UPDATE jobs SET state='queued',attempts=MAX(attempts-1,0),lease_until=NULL WHERE message_id=? AND generation=? AND state='leased'",
+            params![id, generation],
+        )?;
+        Ok(())
+    }
+
     /// Whether `lease` would take the job now (same condition, no change).
     pub fn leasable(&self, id: &str, generation: &str) -> Result<bool> {
         Ok(self.db.query_row("SELECT EXISTS(SELECT 1 FROM jobs WHERE message_id=? AND generation=? AND ((state IN ('queued','retry') AND next_after<=?) OR (state='leased' AND lease_until<=?)))",params![id,generation,now(),now()],|r| r.get(0))?)

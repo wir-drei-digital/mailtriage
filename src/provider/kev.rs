@@ -4,7 +4,7 @@
 //! managed (`managed` is set; setup installs it and `crate::kev` starts it
 //! on demand) or your own server at any URL. A key is needed, and sent,
 //! only for a server off this machine.
-use super::{systemone, Decision, DecisionProvider, DecisionRequest};
+use super::{systemone, Decision, DecisionProvider, DecisionRequest, ProviderUnavailable};
 use crate::domain::{ManagedKev, ProviderConfig};
 use anyhow::{anyhow, bail, Result};
 use serde::Deserialize;
@@ -116,6 +116,33 @@ impl DecisionProvider for Kev {
         }
     }
 
+    /// Managed: Kev is installed and answers, started if needed. Your own
+    /// server: `/v1/models` answers at all; anything it answers is left to
+    /// the request, whose errors count an attempt.
+    fn prepare(
+        &self,
+        config: &ProviderConfig,
+        key: Option<&str>,
+    ) -> Result<(), ProviderUnavailable> {
+        if config.managed.is_some() {
+            return crate::kev::runtime::ensure_running(config);
+        }
+        let url = models_url(&config.endpoint).unwrap_or_default();
+        let timeout = Duration::from_secs(config.timeout_seconds.min(10));
+        let key = if is_local(&config.endpoint) {
+            None
+        } else {
+            key
+        };
+        match list_models(&url, key, timeout) {
+            Err(ModelsError::Unreachable) => Err(ProviderUnavailable(format!(
+                "{} at {url}",
+                ModelsError::Unreachable
+            ))),
+            _ => Ok(()),
+        }
+    }
+
     fn decide(
         &self,
         config: &ProviderConfig,
@@ -124,8 +151,9 @@ impl DecisionProvider for Kev {
     ) -> Result<Decision> {
         self.validate(config)?;
         if config.managed.is_some() {
-            // Replaced in the managed runtime's task by `ensure_running`.
-            bail!("local Kev is not installed; run mailtriage setup --update");
+            // Its errors are `ProviderUnavailable`: the job goes back
+            // without an attempt.
+            crate::kev::runtime::ensure_running(config)?;
         }
         let key = if is_local(&config.endpoint) {
             None

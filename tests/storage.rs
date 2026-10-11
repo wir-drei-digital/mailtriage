@@ -386,3 +386,66 @@ fn smaller_body_policy_is_enforced_on_cached_normalized_content() {
         .iter()
         .any(|r| r == "input_incomplete"));
 }
+
+/// Kev spec: a job taken while the provider turned out unavailable goes
+/// back without using an attempt.
+#[test]
+fn an_unleased_job_is_queued_again_without_an_attempt() {
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("db");
+    let mut st = Store::open(&p).unwrap();
+    st.ensure_account("work", "identity", "g").unwrap();
+    let msg = normalize::rfc822(&mail("unavailable"), 1000).unwrap();
+    let id = st.ingest("work", &msg, "g").unwrap();
+    assert!(st.lease(&id, "g", 300).unwrap());
+    assert!(st.queued("work", 10).unwrap().is_empty());
+    st.unlease(&id, "g").unwrap();
+    assert_eq!(st.queued("work", 10).unwrap(), vec![id.clone()]);
+    let attempts: u32 = rusqlite::Connection::open(&p)
+        .unwrap()
+        .query_row("SELECT attempts FROM jobs WHERE message_id=?", [&id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(attempts, 0);
+}
+
+#[test]
+fn unleasing_preserves_prior_attempts_and_history_and_ignores_other_generations() {
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("db");
+    let mut st = Store::open(&p).unwrap();
+    st.ensure_account("work", "identity", "g").unwrap();
+    let msg = normalize::rfc822(&mail("retry-unavailable"), 1000).unwrap();
+    let id = st.ingest("work", &msg, "g").unwrap();
+    assert!(st.lease(&id, "g", 300).unwrap());
+    st.fail(&id, "g", "earlier request failed", 3).unwrap();
+    let db = rusqlite::Connection::open(&p).unwrap();
+    db.execute(
+        "UPDATE jobs SET next_after='2000-01-01T00:00:00Z' WHERE message_id=?",
+        [&id],
+    )
+    .unwrap();
+    assert!(st.lease(&id, "g", 300).unwrap());
+    st.unlease(&id, "other-generation").unwrap();
+    let attempts = || {
+        db.query_row("SELECT attempts FROM jobs WHERE message_id=?", [&id], |r| {
+            r.get::<_, u32>(0)
+        })
+        .unwrap()
+    };
+    assert_eq!(attempts(), 2);
+    st.unlease(&id, "g").unwrap();
+    assert_eq!(attempts(), 1);
+    assert_eq!(st.queued("work", 10).unwrap(), vec![id.clone()]);
+    st.unlease(&id, "g").unwrap();
+    assert_eq!(attempts(), 1);
+    let history: Vec<String> = db
+        .prepare("SELECT error FROM attempts WHERE message_id=? ORDER BY id")
+        .unwrap()
+        .query_map([&id], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(history, vec!["earlier request failed"]);
+}

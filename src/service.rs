@@ -21,6 +21,7 @@ use fs2::FileExt;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
+    cell::OnceCell,
     collections::{BTreeMap, BTreeSet},
     fmt,
     fs::{self, File, OpenOptions},
@@ -196,6 +197,13 @@ pub struct Service {
     pub store: Store,
     engine_override: Option<Rc<dyn MailEngine>>,
     key: KeyCache,
+    /// Whether the provider can answer (`provider::prepare`), asked at most
+    /// once per `Service` like the key: `Some(reason)` when it cannot.
+    ready: OnceCell<Option<String>>,
+    /// Why a running pass stopped classifying: the provider became
+    /// unavailable after `ready` (see `process_one`).
+    unavailable: Option<String>,
+
     /// Set by `watch` on SIGTERM or Ctrl-C: a running pass stops taking new
     /// messages and skips its filing steps, so it ends within one message.
     stop: Option<Arc<AtomicBool>>,
@@ -233,6 +241,8 @@ impl Service {
             store,
             engine_override: None,
             key: KeyCache::default(),
+            ready: OnceCell::new(),
+            unavailable: None,
             stop: None,
         })
     }
@@ -414,22 +424,29 @@ impl Service {
             Some(_) => "skipped".to_owned(),
             None => self.process_one(name, &account, &generation, &id, None)?,
         };
+        let skipped = skipped.or_else(|| self.unavailable.take());
         let row = self.required(name, &id)?;
         let mut out = json!({"schema_version":1,"item":self.item(&row)?,"outcome":outcome,"partial":outcome=="failed"});
         mark_skipped(&mut out, skipped);
         Ok(out)
     }
     /// Why classification cannot run in this command: the provider needs a
-    /// key, and it is unavailable. Resolved once per `Service` through the
-    /// key cache, before any job is leased, so an unavailable key consumes no
-    /// attempts and its mail stays queued. The reason is a fixed key-error
-    /// string. Callers ask only when a job is eligible to lease, so an idle
-    /// pass never runs the key command.
+    /// key and it is unavailable, or the provider itself cannot answer
+    /// (`ProviderUnavailable`, such as local Kev not installed). Resolved
+    /// once per `Service`, before any job is leased, so it consumes no
+    /// attempts and the mail stays queued. Callers ask only when a job is
+    /// eligible to lease, so an idle pass runs no key command and starts no
+    /// server.
     fn classification_skipped(&self) -> Option<String> {
         let provider = &self.config.provider;
-        // A provider without a key never skips.
-        provider::key_account(provider)?;
-        self.key.get(provider).err().map(|e| e.to_string())
+        if provider::key_account(provider).is_some() {
+            if let Err(e) = self.key.get(provider) {
+                return Some(e.to_string());
+            }
+        }
+        self.ready
+            .get_or_init(|| provider::prepare(provider, &self.key).err().map(|e| e.0))
+            .clone()
     }
     fn process_one(
         &mut self,
@@ -549,7 +566,14 @@ impl Service {
                     ))
                 }
             }
-            Err(_) => {
+            Err(e) => {
+                if let Some(unavailable) = e.downcast_ref::<provider::ProviderUnavailable>() {
+                    // Nothing was tried: the job goes back without an
+                    // attempt, and this command stops classifying.
+                    self.store.unlease(id, generation)?;
+                    self.unavailable = Some(unavailable.to_string());
+                    return Ok("skipped".into());
+                }
                 self.store.fail(
                     id,
                     generation,
@@ -934,18 +958,20 @@ impl Service {
                 break;
             }
             let needed_fetch = self.required(name, &id)?.normalized.is_none();
-            match self
-                .process_one(name, account, generation, &id, h)?
-                .as_str()
-            {
+            let outcome = self.process_one(name, account, generation, &id, h)?;
+            match outcome.as_str() {
                 "classified" => done.classified += 1,
                 "failed" => done.failed += 1,
+                "skipped" => {}
                 _ => done.cached += 1,
             }
             // The canonical row: a merge redirects `id` to the existing message.
             let row = self.required(name, &id)?;
             if needed_fetch && row.normalized.is_some() {
                 done.fetched += 1;
+            }
+            if outcome == "skipped" {
+                return Ok((done, self.unavailable.take()));
             }
             if from.filing {
                 let sources = map.sources.as_slice();
@@ -1829,12 +1855,23 @@ impl Service {
         }
         let h = self.engine(&account)?;
         let mut failed = 0;
+        let mut processed = 0;
+        let mut skipped = skipped;
         for id in &selected {
-            if self.process_one(name, &account, &generation, id, h.as_deref())? == "failed" {
-                failed += 1;
+            match self
+                .process_one(name, &account, &generation, id, h.as_deref())?
+                .as_str()
+            {
+                "failed" => failed += 1,
+                "skipped" => {
+                    skipped = self.unavailable.take();
+                    break;
+                }
+                _ => {}
             }
+            processed += 1;
         }
-        let mut out = json!({"schema_version":1,"matched":matched,"reclassified":selected.len()-failed,"pending":self.coverage(name)?["pending_jobs"],"failed":failed,"partial":failed>0});
+        let mut out = json!({"schema_version":1,"matched":matched,"reclassified":processed-failed,"pending":self.coverage(name)?["pending_jobs"],"failed":failed,"partial":failed>0});
         mark_skipped(&mut out, skipped);
         Ok(out)
     }

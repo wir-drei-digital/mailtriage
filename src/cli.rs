@@ -3,6 +3,7 @@ use mailtriage::{
     config, distribution,
     domain::{Category, FilingMode, UpdateMode},
     engine::ConfigChanged,
+    kev,
     prompt::{self, Prompter},
     provider,
     secrets::KeyStore,
@@ -61,6 +62,13 @@ impl Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Local Kev's supervisor; mailtriage starts it, not you.
+    #[command(hide = true)]
+    Kev {
+        #[command(subcommand)]
+        command: KevCommand,
+    },
+
     Init,
     /// Guided first run: mail account, folders, classifier and key, filing.
     Setup(Box<SetupArg>),
@@ -671,6 +679,32 @@ fn open(path: &Path) -> Result<Service, CliError> {
     Service::open(path).map_err(service_error)
 }
 
+#[derive(Subcommand)]
+enum KevCommand {
+    /// Run Kev until it has had no request for the idle time.
+    Run(KevRunArg),
+}
+
+#[derive(Args)]
+struct KevRunArg {
+    #[arg(long)]
+    dir: PathBuf,
+    #[arg(long)]
+    port: u16,
+    #[arg(long)]
+    checkpoint: String,
+    #[arg(long)]
+    uv: PathBuf,
+    #[arg(long)]
+    allow_download: bool,
+    #[arg(long, default_value_t = 900)]
+    idle_seconds: u64,
+    #[arg(long, default_value_t = 30)]
+    check_seconds: u64,
+    #[arg(long, default_value_t = 10)]
+    stop_grace_seconds: u64,
+}
+
 fn execute(cli: &Cli) -> Result<Value, CliError> {
     match &cli.command {
         Command::Init => {
@@ -800,6 +834,19 @@ fn execute(cli: &Cli) -> Result<Value, CliError> {
         Command::Update(arg) => {
             update::command::run(arg.check, &update::install::EnvHooks).map_err(service_error)
         }
+        Command::Kev {
+            command: KevCommand::Run(arg),
+        } => kev::supervisor::run(&kev::supervisor::RunArgs {
+            dir: arg.dir.clone(),
+            port: arg.port,
+            checkpoint: arg.checkpoint.clone(),
+            uv: arg.uv.clone(),
+            allow_download: arg.allow_download,
+            idle: Duration::from_secs(arg.idle_seconds),
+            check: Duration::from_secs(arg.check_seconds),
+            grace: Duration::from_secs(arg.stop_grace_seconds),
+        })
+        .map_err(service_error),
         Command::Himalaya {
             command: HimalayaCommand::Install(arg),
         } => distribution::himalaya::run(arg.version.as_deref()).map_err(service_error),

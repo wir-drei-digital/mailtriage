@@ -241,6 +241,24 @@ pub(crate) fn read_bounded<R: Read>(
     }
 }
 
+pub(crate) const SIGTERM: i32 = 15;
+pub(crate) const SIGKILL: i32 = 9;
+
+/// Sends `signal` to process `pid`, or to process group `-pid`; `false`
+/// when it could not be sent.
+#[cfg(unix)]
+pub(crate) fn signal(pid: i32, signal: i32) -> bool {
+    unsafe extern "C" {
+        fn kill(pid: i32, signal: i32) -> i32;
+    }
+    unsafe { kill(pid, signal) == 0 }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn signal(_pid: i32, _signal: i32) -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

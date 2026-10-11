@@ -256,3 +256,18 @@ fn an_error_without_a_kind_has_no_reason() {
     assert_eq!(output.status.code(), Some(2));
     assert!(value["error"].get("reason").is_none(), "{value}");
 }
+
+/// `kev run` is mailtriage's own supervisor, not a command for people.
+#[test]
+fn the_kev_supervisor_is_hidden() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_mailtriage"))
+        .arg("--help")
+        .env("HOME", dir.path().join("home"))
+        .env("XDG_DATA_HOME", dir.path().join("data"))
+        .output()
+        .unwrap();
+    let help = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success());
+    assert!(!help.contains("kev"), "{help}");
+}
