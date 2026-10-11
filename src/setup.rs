@@ -64,6 +64,10 @@ pub struct SetupArgs {
     pub mailboxes: Vec<String>,
     pub provider: Option<String>,
     pub model: Option<String>,
+    /// `--kev-url`: a Kev server you run; implies `--provider kev`.
+    pub kev_url: Option<String>,
+    /// `--yes`: agrees to local Kev's download without prompts.
+    pub yes: bool,
     pub key_store: Option<KeyStore>,
     pub key_command: Option<String>,
     pub key_env: Option<String>,
@@ -194,15 +198,30 @@ pub fn run(args: &SetupArgs, path: &Path, p: &mut Prompter) -> Result<Value> {
         &engine,
         old_engine.as_ref().map(|e| e.mailboxes.as_slice()),
     )?;
-    // 5. Classifier.
-    let current = (!matches!(intent, Intent::Create)).then(|| cfg.provider.clone());
-    let (provider, store) = classifier_step(args, p, current.as_ref())?;
     // 6. Categories: a new account gets the defaults, shown once the
-    // config is written.
+    // config is written. Chosen before step 5, whose local Kev check
+    // classifies a sample message with them.
     let categories = match &previous {
         Some(a) => a.categories.clone(),
         None => default_categories(),
     };
+    // 5. Classifier.
+    let current = (!matches!(intent, Intent::Create)).then(|| cfg.provider.clone());
+    let probe = AccountConfig {
+        identity: identity.clone(),
+        timezone: timezone.clone(),
+        brief: brief.clone(),
+        taxonomy_revision: 1,
+        categories: categories.clone(),
+        himalaya: None,
+        engine: None,
+        filing: FilingConfig::default(),
+    };
+    let Classifier {
+        provider,
+        store,
+        kev,
+    } = classifier_step(args, p, current.as_ref(), &probe)?;
     // 7. Filing.
     let mode = filing_step(
         args,
@@ -281,7 +300,7 @@ pub fn run(args: &SetupArgs, path: &Path, p: &mut Prompter) -> Result<Value> {
         .is_some_and(|items| items.iter().all(|i| i["check"] != "state"));
     let service = service_step(args, p, &path, shown, &name, &cfg.provider, state_ok)?;
     next_steps(p, shown, &name, mode, !service.is_null());
-    Ok(json!({"schema_version": 1, "setup": {
+    let mut out = json!({"schema_version": 1, "setup": {
         "config": path,
         "account": name,
         "mailboxes": engine.mailboxes,
@@ -293,7 +312,11 @@ pub fn run(args: &SetupArgs, path: &Path, p: &mut Prompter) -> Result<Value> {
         "updates": cfg.updates.as_str(),
         "doctor": doctor,
         "service": service,
-    }}))
+    }});
+    if let Some(kev) = kev {
+        out["setup"]["kev"] = kev;
+    }
+    Ok(out)
 }
 
 /// Step 8's write: under the exclusive config lock, and only when the file
@@ -960,12 +983,56 @@ fn folders_step(
     Ok(picked.into_iter().map(|i| folders[i].clone()).collect())
 }
 
-/// Step 5: the classifier, and the key store when one was chosen now.
+/// What step 5 chose: the provider block, the key store chosen in this
+/// run, and for Kev what setup found (`setup.kev`).
+struct Classifier {
+    provider: ProviderConfig,
+    store: Option<KeyStore>,
+    kev: Option<Value>,
+}
+
+/// The classifier menu's entries. Kev appears twice: run by mailtriage on
+/// this Mac, or a server you run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Choice {
+    OpenRouter,
+    LocalKev,
+    KevServer,
+    Fake,
+}
+
+/// Local Kev's menu entry, offered only on an Apple Silicon Mac.
+pub const LOCAL_KEV_LABEL: &str = "Local Kev on this Mac (downloads about 9 GB, no API key)";
+
+impl Choice {
+    fn label(self) -> &'static str {
+        match self {
+            Choice::OpenRouter => registered("openrouter").label(),
+            Choice::LocalKev => LOCAL_KEV_LABEL,
+            Choice::KevServer => registered("kev").label(),
+            Choice::Fake => registered("fake").label(),
+        }
+    }
+}
+
+/// The menu, in `provider::KINDS` order.
+fn menu(apple_silicon: bool) -> Vec<Choice> {
+    let mut menu = vec![Choice::OpenRouter];
+    if apple_silicon {
+        menu.push(Choice::LocalKev);
+    }
+    menu.extend([Choice::KevServer, Choice::Fake]);
+    menu
+}
+
+/// Step 5: the classifier; the key store when one was chosen now; local
+/// Kev installed or your own Kev server checked.
 fn classifier_step(
     args: &SetupArgs,
     p: &mut Prompter,
     current: Option<&ProviderConfig>,
-) -> Result<(ProviderConfig, Option<KeyStore>)> {
+    probe: &AccountConfig,
+) -> Result<Classifier> {
     let key_flag = [
         (args.key_store.is_some(), "--key-store"),
         (args.key_command.is_some(), "--key-command"),
@@ -974,52 +1041,143 @@ fn classifier_step(
     ]
     .into_iter()
     .find_map(|(given, flag)| given.then_some(flag));
-    if let (Some(flag), Some(kind)) = (key_flag, args.provider.as_deref()) {
-        if provider::provider_for(kind).is_ok_and(|p| p.key_account(&p.new_config()).is_none()) {
+    // `--kev-url` names a Kev server you run, so it implies `--provider kev`.
+    let kind = match (args.provider.as_deref(), &args.kev_url) {
+        (Some(kind), Some(_)) if kind != "kev" => {
             return Err(err(
                 2,
-                format!("{STEP_KEY}: {flag} has no effect with --provider {kind}; drop it"),
-            ));
+                format!(
+                "{STEP_CLASSIFIER}: --kev-url needs --provider kev; drop it or pass --provider kev"
+            ),
+            ))
+        }
+        (Some(kind), _) => Some(kind.to_owned()),
+        (None, Some(_)) => Some("kev".to_owned()),
+        (None, None) => None,
+    };
+    if let Some(url) = &args.kev_url {
+        kev_url_rule(url)
+            .map_err(|reason| err(2, format!("{STEP_CLASSIFIER}: --kev-url: {reason}")))?;
+    }
+    if let (Some(flag), Some(kind)) = (key_flag, kind.as_deref()) {
+        if let Ok(adapter) = provider::provider_for(kind) {
+            let mut candidate = adapter.new_config();
+            if let Some(url) = &args.kev_url {
+                candidate.endpoint = url.trim().to_owned();
+                candidate.managed = None;
+            }
+            if adapter.key_account(&candidate).is_none() {
+                return Err(err(
+                    2,
+                    if kind == "kev" {
+                        format!("{STEP_KEY}: {flag} has no effect with a Kev server on this machine; drop it")
+                    } else {
+                        format!("{STEP_KEY}: {flag} has no effect with --provider {kind}; drop it")
+                    },
+                ));
+            }
         }
     }
-    let flags = args.provider.is_some() || args.model.is_some() || key_flag.is_some();
-    if let Some(current) = current.filter(|_| !flags) {
+    let flags = kind.is_some() || args.model.is_some() || key_flag.is_some();
+    if kind.is_none() {
+        if let Some(current) = current.filter(|c| c.kind == "kev") {
+            if !flags {
+                let keep = !p.enabled()
+                    || p.confirm(
+                        &format!("Keep the current classifier ({})?", describe(current)),
+                        true,
+                    )?;
+                if keep {
+                    let kev = if current.managed.is_some() {
+                        crate::kev::install::install(p, current, probe, args.yes)?
+                    } else {
+                        check_kev_server(p, current)?
+                    };
+                    return Ok(Classifier {
+                        provider: current.clone(),
+                        store: None,
+                        kev: Some(kev),
+                    });
+                }
+            } else if current.managed.is_some() {
+                if let Some(flag) = key_flag {
+                    return Err(err(2, format!("{STEP_KEY}: {flag} has no effect with a Kev server on this machine; drop it")));
+                }
+                return local_kev_step(args, p, Some(current), probe);
+            } else {
+                return kev_server_step(args, p, Some(current), flags, key_flag.is_some());
+            }
+        }
+    }
+    if let Some(current) = current.filter(|c| !flags && c.kind != "kev") {
         let keep = !p.enabled()
             || p.confirm(
                 &format!("Keep the current classifier ({})?", describe(current)),
                 true,
             )?;
         if keep {
-            return Ok((current.clone(), None));
+            return Ok(Classifier {
+                provider: current.clone(),
+                store: None,
+                kev: None,
+            });
         }
     }
-    let kind = match args.provider.as_deref() {
-        Some(kind) => kind.to_owned(),
-        None if p.enabled() => {
-            let options: Vec<String> = provider::KINDS
-                .iter()
-                .map(|&kind| registered(kind).label().to_owned())
-                .collect();
-            provider::KINDS[p.choose("Which classifier?", &options, 0)?].to_owned()
+    let apple_silicon = crate::kev::apple_silicon();
+    let choice = match kind.as_deref() {
+        Some("kev") if args.kev_url.is_some() => Choice::KevServer,
+        Some("kev") if apple_silicon => Choice::LocalKev,
+        Some("kev") => {
+            return Err(err(
+                2,
+                format!("{STEP_CLASSIFIER}: local Kev needs an Apple Silicon Mac; run your own Kev server and pass --kev-url"),
+            ))
         }
-        None => provider::KINDS[0].to_owned(),
+        Some("openrouter") => Choice::OpenRouter,
+        Some("fake") => Choice::Fake,
+        Some(_) => {
+            return Err(err(
+                2,
+                format!(
+                    "{STEP_CLASSIFIER}: unsupported provider kind; use --provider {}",
+                    provider::KINDS.join(" or ")
+                ),
+            ))
+        }
+        None if p.enabled() => {
+            let menu = menu(apple_silicon);
+            let labels: Vec<String> = menu.iter().map(|c| c.label().to_owned()).collect();
+            menu[p.choose("Which classifier?", &labels, 0)?]
+        }
+        None => Choice::OpenRouter,
     };
-    let adapter = provider::provider_for(&kind).map_err(|e| {
-        err(
-            2,
-            format!(
-                "{STEP_CLASSIFIER}: {e}; use --provider {}",
-                provider::KINDS.join(" or ")
-            ),
-        )
-    })?;
-    // A provider without a key has nothing to ask (the offline demo).
-    let Some(account) = adapter.key_account(&adapter.new_config()) else {
-        return Ok((adapter.new_config(), None));
-    };
+    match choice {
+        Choice::Fake => Ok(Classifier {
+            provider: registered("fake").new_config(),
+            store: None,
+            kev: None,
+        }),
+        Choice::OpenRouter => openrouter_step(args, p, current, flags, key_flag.is_some()),
+        Choice::LocalKev => local_kev_step(args, p, current, probe),
+        Choice::KevServer => kev_server_step(args, p, current, flags, key_flag.is_some()),
+    }
+}
+
+/// OpenRouter: the model, then the key unless a current key stays.
+fn openrouter_step(
+    args: &SetupArgs,
+    p: &mut Prompter,
+    current: Option<&ProviderConfig>,
+    flags: bool,
+    key_flag: bool,
+) -> Result<Classifier> {
+    let adapter = registered("openrouter");
+    let account = adapter
+        .key_account(&adapter.new_config())
+        .expect("OpenRouter needs a key");
     // A current provider of this kind changes only where asked, so its
     // generation hash, and with it every classification, stays put.
-    let current = current.filter(|c| c.kind == kind);
+    let current = current.filter(|c| c.kind == "openrouter");
     let mut provider = current.cloned().unwrap_or_else(|| adapter.new_config());
     provider.model = answer(
         p,
@@ -1032,13 +1190,167 @@ fn classifier_step(
     )?;
     // A current key stays where it is unless a key flag moves it: `--model`
     // or `--provider` alone never switch its source.
-    if flags && key_flag.is_none() && current.is_some() {
-        return Ok((provider, None));
+    if flags && !key_flag && current.is_some() {
+        return Ok(Classifier {
+            provider,
+            store: None,
+            kev: None,
+        });
     }
     let default_env = adapter.new_config().api_key_env;
     let current = current.map(|c| current_store(c, account));
     let store = key_step(args, p, &mut provider, current, account, &default_env)?;
-    Ok((provider, Some(store)))
+    Ok(Classifier {
+        provider,
+        store: Some(store),
+        kev: None,
+    })
+}
+
+/// Local Kev: a managed block on this Mac's port, installed (or found
+/// installed) before anything is written. No key; the model is
+/// `kev-latest` unless `--model` says otherwise.
+fn local_kev_step(
+    args: &SetupArgs,
+    p: &mut Prompter,
+    current: Option<&ProviderConfig>,
+    probe: &AccountConfig,
+) -> Result<Classifier> {
+    let mut provider = current
+        .filter(|c| c.kind == "kev" && c.managed.is_some())
+        .cloned()
+        .unwrap_or_else(|| {
+            let mut new = registered("kev").new_config();
+            new.endpoint = provider::kev::local_endpoint(crate::kev::port());
+            new
+        });
+    if let Some(model) = args.model.as_deref() {
+        provider.model = nonempty(model)
+            .map_err(|reason| err(2, format!("{STEP_CLASSIFIER}: --model: {reason}")))?;
+    }
+    let kev = crate::kev::install::install(p, &provider, probe, args.yes)?;
+    Ok(Classifier {
+        provider,
+        store: None,
+        kev: Some(kev),
+    })
+}
+
+/// A Kev server you run: its URL, the key steps for a server off this
+/// machine (account `kev`), then a check that it serves the model.
+fn kev_server_step(
+    args: &SetupArgs,
+    p: &mut Prompter,
+    current: Option<&ProviderConfig>,
+    flags: bool,
+    key_flag: bool,
+) -> Result<Classifier> {
+    let adapter = registered("kev");
+    let current = current.filter(|c| c.kind == "kev" && c.managed.is_none());
+    let mut provider = current.cloned().unwrap_or_else(|| {
+        let mut new = adapter.new_config();
+        new.managed = None;
+        new.endpoint = String::new();
+        new
+    });
+    if args.kev_url.is_some() || current.is_none() || !flags {
+        let shown = (!provider.endpoint.is_empty()).then(|| provider.endpoint.clone());
+        provider.endpoint = answer(
+            p,
+            STEP_CLASSIFIER,
+            args.kev_url.as_deref(),
+            "--kev-url",
+            "Kev server URL (ends in /v1/systemone)",
+            shown.as_deref(),
+            kev_url_rule,
+        )?;
+    }
+    if let Some(model) = args.model.as_deref() {
+        provider.model = nonempty(model)
+            .map_err(|reason| err(2, format!("{STEP_CLASSIFIER}: --model: {reason}")))?;
+    }
+    let store = match adapter.key_account(&provider) {
+        None => {
+            provider.api_key_command = None;
+            provider.api_key_env = String::new();
+            None
+        }
+        Some(account) => {
+            // A current remote server's key stays unless a key flag moves it.
+            let kept = current.filter(|c| adapter.key_account(c).is_some());
+            if flags && !key_flag && kept.is_some() {
+                None
+            } else {
+                let current = kept.map(|c| current_store(c, account));
+                Some(key_step(
+                    args,
+                    p,
+                    &mut provider,
+                    current,
+                    account,
+                    provider::kev::DEFAULT_KEY_ENV,
+                )?)
+            }
+        }
+    };
+    let kev = check_kev_server(p, &provider)?;
+    Ok(Classifier {
+        provider,
+        store,
+        kev: Some(kev),
+    })
+}
+
+/// A Kev server URL that passes the URL rule, trimmed.
+fn kev_url_rule(url: &str) -> Result<String, String> {
+    let adapter = registered("kev");
+    let mut candidate = adapter.new_config();
+    candidate.managed = None;
+    candidate.endpoint = url.trim().to_owned();
+    adapter.validate(&candidate).map_err(|e| e.to_string())?;
+    Ok(candidate.endpoint)
+}
+
+/// `GET /v1/models` with the key setup can resolve here: the server must
+/// serve the model. A server that wants a key not available here (an
+/// environment variable set only where mailtriage runs) passes with a note.
+fn check_kev_server(p: &mut Prompter, provider: &ProviderConfig) -> Result<Value> {
+    let url = provider::kev::models_url(&provider.endpoint)
+        .expect("a valid Kev endpoint ends in /v1/systemone");
+    let key = provider::key_account(provider).and_then(|_| secrets::resolve_key(provider).ok());
+    let checked = match provider::kev::list_models(&url, key.as_deref(), Duration::from_secs(10)) {
+        Ok(models) if models.iter().any(|m| m.name == provider.model) => true,
+        Ok(_) => {
+            return Err(err(
+                3,
+                format!(
+                    "{STEP_CLASSIFIER}: the Kev server at {url} does not serve {}; check --kev-url and --model",
+                    provider.model
+                ),
+            ))
+        }
+        Err(provider::kev::ModelsError::Http(401 | 403))
+            if key.is_none() && provider::key_account(provider).is_some()
+                && (provider.api_key_command.is_some() || !provider.api_key_env.is_empty()) => false,
+        Err(e) => {
+            return Err(err(
+                3,
+                format!("{STEP_CLASSIFIER}: {e} at {url}; start it or check --kev-url"),
+            ))
+        }
+    };
+    if checked {
+        p.say(&format!(
+            "The Kev server at {} serves {}.",
+            provider.endpoint, provider.model
+        ));
+    } else {
+        p.say(&format!(
+            "The Kev server at {} wants a key that is not available here, so its models were not checked.",
+            provider.endpoint
+        ));
+    }
+    Ok(json!({"mode": "server", "endpoint": provider.endpoint, "checked": checked}))
 }
 
 /// A kind from `provider::KINDS`, which `provider_for` always knows.
@@ -1058,6 +1370,18 @@ fn current_store(provider: &ProviderConfig, account: &str) -> KeyStore {
 fn describe(provider: &ProviderConfig) -> String {
     match (provider.kind.as_str(), &provider.api_key_command) {
         ("fake", _) => "offline demo".to_owned(),
+        ("kev", _) if provider.managed.is_some() => format!("local Kev, {}", provider.model),
+        ("kev", _) if provider::key_account(provider).is_none() => {
+            format!("Kev server at {}", provider.endpoint)
+        }
+        ("kev", Some(_)) => format!(
+            "Kev server at {}, key from a key command",
+            provider.endpoint
+        ),
+        ("kev", None) => format!(
+            "Kev server at {}, key from ${}",
+            provider.endpoint, provider.api_key_env
+        ),
         (_, Some(_)) => format!("{}, key from a key command", provider.model),
         (_, None) => format!("{}, key from ${}", provider.model, provider.api_key_env),
     }
@@ -1067,7 +1391,12 @@ fn describe(provider: &ProviderConfig) -> String {
 /// or chosen from the menu (first option without prompts). The menu's
 /// default is the `current` store when it is offered (a command whose
 /// store is not offered defaults to `command`), else the first option.
-fn chosen_store(args: &SetupArgs, p: &mut Prompter, current: Option<KeyStore>) -> Result<KeyStore> {
+fn chosen_store(
+    args: &SetupArgs,
+    p: &mut Prompter,
+    current: Option<KeyStore>,
+    owner: &str,
+) -> Result<KeyStore> {
     let implied =
         match (args.key_command.is_some(), args.key_env.is_some()) {
             (true, true) => return Err(err(
@@ -1105,7 +1434,7 @@ fn chosen_store(args: &SetupArgs, p: &mut Prompter, current: Option<KeyStore>) -
                 .unwrap_or(0);
             let labels: Vec<String> = options.iter().map(|o| o.label().to_owned()).collect();
             Ok(options[p.choose(
-                "Where should mailtriage get the OpenRouter key?",
+                &format!("Where should mailtriage get the {owner} key?"),
                 &labels,
                 default,
             )?])
@@ -1125,7 +1454,8 @@ fn key_step(
     account: &str,
     default_env: &str,
 ) -> Result<KeyStore> {
-    let store = chosen_store(args, p, current)?;
+    let owner = provider::key_owner(provider);
+    let store = chosen_store(args, p, current, owner)?;
     match store {
         KeyStore::Keychain | KeyStore::SecretService | KeyStore::Pass => {
             let tool_name = store.tool().expect("tool-backed store");
@@ -1169,7 +1499,7 @@ fn key_step(
                     ));
                 }
                 p.say(&format!(
-                    "{tool_name} will now ask for your OpenRouter key; mailtriage never sees it."
+                    "{tool_name} will now ask for your {owner} key; mailtriage never sees it."
                 ));
                 // The tool prompts on the terminal; its stdout is not shown.
                 let status = Command::new(&save[0])
@@ -1376,8 +1706,9 @@ fn doctor_step(
                 }
             } else {
                 format!(
-                    "export {}=<your OpenRouter key> where mailtriage runs",
-                    provider.api_key_env
+                    "export {}=<your {} key> where mailtriage runs",
+                    provider.api_key_env,
+                    provider::key_owner(provider)
                 )
             };
             items.push(check_item(

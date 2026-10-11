@@ -1,7 +1,7 @@
 //! `mailtriage kev run` (hidden): the supervisor `ensure_running` and setup
 //! start. It holds `server.lock`, runs Kev with `uv`, stops it after the
 //! idle time or on TERM, and exits when Kev exits, logging why.
-use super::{control, Layout};
+use super::{control, installation, Installed, Layout};
 use crate::process;
 use anyhow::Result;
 use fs2::FileExt;
@@ -44,18 +44,24 @@ fn note(log: &mut File, text: &str) {
 pub fn run(args: &RunArgs) -> Result<Value> {
     let layout = Layout::new(args.dir.clone());
     std::fs::create_dir_all(layout.root())?;
-    let mut lock = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(layout.lock())?;
-    match lock.try_lock_exclusive() {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-            return Ok(json!({"schema_version": 1, "kev": {"action": "already_running"}}))
-        }
-        Err(e) => return Err(e.into()),
+    let Some(StartLock { mut lock, startup }) = start_lock_with(&layout, || {
+        installation::supervisor_start(&layout, args.allow_download)
+    })?
+    else {
+        return Ok(json!({"schema_version": 1, "kev": {"action": "already_running"}}));
+    };
+    // A delayed ordinary child may resume after setup has replaced the
+    // installation. Revalidate the received arguments under its own shared
+    // startup guard, not merely the caller's earlier guard.
+    if !args.allow_download {
+        Installed::read(&layout)
+            .filter(|i| {
+                i.matches(&args.checkpoint)
+                    && i.uv == args.uv
+                    && process::is_executable(&i.uv)
+                    && layout.src().is_dir()
+            })
+            .ok_or_else(|| std::io::Error::other(super::runtime::NOT_INSTALLED))?;
     }
     control::confirm_terminated(&layout, &lock)?;
     let mut log = OpenOptions::new()
@@ -137,6 +143,7 @@ pub fn run(args: &RunArgs) -> Result<Value> {
         process::terminate(&mut child);
         return Err(e.into());
     }
+    drop(startup);
     layout.touch_last_used();
     // Setup owns this start until its deadline and probe finish. A bounded
     // fallback still ends an orphaned first-download supervisor. The probe
@@ -181,7 +188,34 @@ pub fn run(args: &RunArgs) -> Result<Value> {
     Ok(json!({"schema_version": 1, "kev": {"action": action}}))
 }
 
-fn spawn(command: &mut Command) -> std::io::Result<Child> {
+struct StartLock {
+    lock: File,
+    startup: Option<File>,
+}
+
+fn start_lock_with(
+    layout: &Layout,
+    authorize: impl FnOnce() -> std::io::Result<Option<File>>,
+) -> std::io::Result<Option<StartLock>> {
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(layout.lock())?;
+    match lock.try_lock_exclusive() {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
+        Err(e) => return Err(e),
+    }
+    // Validate the installer ticket only while holding server.lock. A
+    // replacement installer must stop this holder before mutating files,
+    // and a stale/missing ticket exits before publishing or spawning.
+    let startup = authorize()?;
+    Ok(Some(StartLock { lock, startup }))
+}
+
+pub(super) fn spawn(command: &mut Command) -> std::io::Result<Child> {
     let mut attempt = 0;
     loop {
         match command.spawn() {
@@ -195,7 +229,7 @@ fn spawn(command: &mut Command) -> std::io::Result<Child> {
 }
 
 /// TERM to Kev's process group, KILL after `grace`.
-fn end(child: &mut Child, grace: Duration) -> std::io::Result<std::process::ExitStatus> {
+pub(super) fn end(child: &mut Child, grace: Duration) -> std::io::Result<std::process::ExitStatus> {
     let group = -(child.id() as i32);
     checked_signal(group, process::SIGTERM)?;
     let deadline = Instant::now() + grace;
@@ -203,7 +237,7 @@ fn end(child: &mut Child, grace: Duration) -> std::io::Result<std::process::Exit
     // the group and send KILL even when the leader exited first.
     while Instant::now() < deadline {
         child.try_wait()?;
-        if !checked_signal(group, 0)? {
+        if !group_present(child, deadline)? {
             return child.wait();
         }
         thread::sleep(Duration::from_millis(100));
@@ -211,7 +245,7 @@ fn end(child: &mut Child, grace: Duration) -> std::io::Result<std::process::Exit
     checked_signal(group, process::SIGKILL)?;
     let status = child.wait()?;
     let deadline = Instant::now() + Duration::from_secs(2);
-    while checked_signal(group, 0)? {
+    while group_present(child, deadline)? {
         if Instant::now() >= deadline {
             return Err(std::io::Error::other(
                 "Kev process group did not stop after KILL",
@@ -233,4 +267,108 @@ fn checked_signal(pid: i32, signal: i32) -> std::io::Result<bool> {
     } else {
         Err(error)
     }
+}
+
+/// macOS can report EPERM for signal 0 while a successfully signalled
+/// owned group is exiting but not yet waitable. Keep reaping within the
+/// cleanup deadline; only a later ESRCH proves disappearance. A persistent
+/// permission error still propagates and leaves ownership unconfirmed.
+fn group_present(child: &mut Child, deadline: Instant) -> std::io::Result<bool> {
+    let group = -(child.id() as i32);
+    group_present_with(child, deadline, || checked_signal(group, 0))
+}
+
+fn group_present_with(
+    child: &mut Child,
+    deadline: Instant,
+    mut probe: impl FnMut() -> std::io::Result<bool>,
+) -> std::io::Result<bool> {
+    loop {
+        match probe() {
+            Err(e)
+                if e.kind() == std::io::ErrorKind::PermissionDenied
+                    && Instant::now() < deadline =>
+            {
+                child.try_wait()?;
+                thread::sleep(
+                    Duration::from_millis(20)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            result => return result,
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod shutdown_tests {
+    use super::*;
+    use std::os::unix::process::CommandExt;
+
+    fn owned_child() -> Child {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exit 0"]).process_group(0);
+        command.spawn().unwrap()
+    }
+
+    #[test]
+    fn transient_permission_probe_waits_for_confirmed_group_disappearance() {
+        let mut child = owned_child();
+        child.wait().unwrap();
+        let group = -(child.id() as i32);
+        let mut calls = 0;
+        let result =
+            group_present_with(&mut child, Instant::now() + Duration::from_secs(1), || {
+                calls += 1;
+                if calls == 1 {
+                    Err(std::io::Error::from_raw_os_error(1))
+                } else {
+                    checked_signal(group, 0)
+                }
+            });
+        assert!(!result.unwrap());
+        assert!(calls >= 2);
+    }
+
+    #[test]
+    fn persistent_permission_probe_is_bounded_and_never_confirms_shutdown() {
+        let mut child = owned_child();
+        child.wait().unwrap();
+        let began = Instant::now();
+        let mut calls = 0;
+        let result = group_present_with(&mut child, began + Duration::from_millis(40), || {
+            calls += 1;
+            Err(std::io::Error::from_raw_os_error(1))
+        });
+        assert_eq!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert!(began.elapsed() >= Duration::from_millis(40));
+        assert!(began.elapsed() < Duration::from_secs(1));
+        assert!(calls >= 2);
+    }
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn a_replacement_installer_cannot_pass_stop_before_stale_ticket_validation() {
+    let dir = tempfile::tempdir().unwrap();
+    let layout = Layout::new(dir.path().to_path_buf());
+    let old = installation::Guard::acquire(&layout).unwrap();
+    let old_owner = std::fs::read_to_string(layout.installation_owner()).unwrap();
+    drop(old);
+    let result = start_lock_with(&layout, || {
+        let _replacement = installation::Guard::acquire(&layout)?;
+        // This deliberately schedules replacement between ticket inspection
+        // and spawn. Its stop must see the startup lock holder, preventing
+        // checkout mutation until this stale download start has exited.
+        let outcome = super::runtime::stop(&layout, Duration::ZERO)?;
+        assert_eq!(outcome, super::runtime::StopOutcome::TimedOut);
+        installation::validate_owner(&layout, &old_owner)?;
+        Ok(None)
+    });
+    assert!(result.is_err(), "a stale ticket must not start a child");
+    assert!(super::runtime::shutdown_confirmed(&layout).unwrap());
+    assert!(!layout.ownership().exists());
 }

@@ -15,13 +15,20 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// A port nothing listens on right now.
+/// A unique fixture port verified free right now. Keep managed server ports
+/// below the macOS/Linux ephemeral client range, so setup's many outgoing
+/// probes cannot reuse a just-released autoassigned listener port. Allocation
+/// never repeats within this test binary, including concurrent fixtures.
 pub fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    use std::sync::atomic::{AtomicU16, Ordering};
+    static NEXT: AtomicU16 = AtomicU16::new(16_000);
+    loop {
+        let port = NEXT.fetch_add(1, Ordering::Relaxed);
+        assert!(port < 32_000, "fixture port range exhausted");
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
 }
 
 /// Polls `done` every 100 ms until it is true or `timeout` passes.
@@ -187,7 +194,12 @@ pub fn serve_from_env() {
         match listener.accept() {
             Ok((stream, _)) => {
                 last = Instant::now();
-                if let Some(line) = respond(stream, &models, None) {
+                if let Some(line) = respond_with_hook(stream, &models, None, &|| {
+                    if control.join("kill-supervisor-on-post").exists() {
+                        let owner = fs::read_to_string(control.join("supervisor.pid")).unwrap();
+                        assert!(fixture_signal(owner.trim().parse().unwrap(), 9));
+                    }
+                }) {
                     let mut file = fs::OpenOptions::new()
                         .create(true)
                         .append(true)
@@ -219,9 +231,30 @@ control='{control}'
 printf '%s|cwd=%s|HF_HOME=%s|HF_HUB_OFFLINE=%s|UV_OFFLINE=%s|KEV_API_KEY=%s|UV_CACHE_DIR=%s|UV_PYTHON_INSTALL_DIR=%s\n' "$*" "$(pwd -P)" "${{HF_HOME-}}" "${{HF_HUB_OFFLINE-unset}}" "${{UV_OFFLINE-unset}}" "$(if [ "${{KEV_API_KEY+x}}" = x ]; then printf set; else printf unset; fi)" "${{UV_CACHE_DIR-}}" "${{UV_PYTHON_INSTALL_DIR-}}" >> "$control/uv.log"
 case "$1" in
   sync)
+    printf '%s\n' "$$" > "$control/sync-writer.pid"
+    printf '%s\n' "$PPID" > "$control/sync-owner.pid"
     if [ -f "$control/uv-sync-fails" ]; then echo 'stand-in uv: sync failed' >&2; exit 1; fi
-    mkdir -p .venv ;;
+    if [ -f "$control/hold-sync-descendant" ]; then
+      (
+        exec 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&-
+        trap '' TERM
+        touch "$control/descendant-entered"
+        while [ -f "$control/hold-sync-descendant" ]; do sleep 0.1; done
+        mkdir -p .venv
+        touch "$control/descendant-finished"
+      ) &
+    fi
+    touch "$control/sync-entered"
+    if [ -f "$control/kill-sync-owner" ]; then kill -KILL "$PPID"; fi
+    while [ -f "$control/hold-sync" ]; do sleep 0.1; done
+    touch "$control/sync-leader-ended"
+    if [ -f "$control/hold-sync-descendant" ]; then exit 0; fi
+    mkdir -p .venv
+    touch "$control/sync-finished" ;;
   run)
+    mkdir -p "$HF_HOME"
+    printf '%s\n' "$PPID" > "$control/supervisor.pid"
+    printf '%s\n' "$$" > "$control/child.pid"
     port=; run=
     while [ $# -gt 0 ]; do
       case "$1" in
@@ -280,4 +313,57 @@ impl Stub {
     pub fn requests(&self) -> Vec<String> {
         self.requests.lock().unwrap().clone()
     }
+}
+
+/// The stand-in `git`: calls go to `control/git.log`. `clone ... --branch
+/// TAG URL DEST` makes DEST with the tag in `.standin-tag` (exit 128 with
+/// `control/git-clone-fails`); `-C DIR describe --tags --exact-match`
+/// prints it.
+pub fn git_script(control: &Path) -> String {
+    format!(
+        r#"#!/bin/sh
+control='{control}'
+echo "$*" >> "$control/git.log"
+case "$1" in
+  clone)
+    if [ -f "$control/git-clone-fails" ]; then exit 128; fi
+    branch=; dest=; prev=
+    for a in "$@"; do
+      if [ "$prev" = --branch ]; then branch="$a"; fi
+      prev="$a"; dest="$a"
+    done
+    touch "$control/clone-entered"
+    while [ -f "$control/hold-clone" ]; do sleep 0.1; done
+    mkdir -p "$dest" && printf '%s\n' "$branch" > "$dest/.standin-tag"
+    touch "$control/clone-finished" ;;
+  -C)
+    if [ "$3" = describe ] && [ -f "$2/.standin-tag" ]; then cat "$2/.standin-tag"; else exit 128; fi ;;
+  *) exit 64 ;;
+esac
+"#,
+        control = control.display()
+    )
+}
+
+/// The stand-in `brew`: `install uv` copies `uv.standin`, next to the
+/// script, to `uv`. Calls go to `control/brew.log`.
+pub fn brew_script(control: &Path) -> String {
+    format!(
+        r#"#!/bin/sh
+here="$(dirname "$0")"
+echo "$*" >> '{control}/brew.log'
+[ "$1 $2" = "install uv" ] || exit 64
+cp "$here/uv.standin" "$here/uv" && chmod 755 "$here/uv"
+"#,
+        control = control.display()
+    )
+}
+/// Signals only fresh process identities owned by the current test fixture.
+#[cfg(unix)]
+pub fn fixture_signal(pid: i32, signal: i32) -> bool {
+    unsafe extern "C" {
+        fn kill(pid: i32, signal: i32) -> i32;
+    }
+    // SAFETY: the caller supplies the fixture identity and POSIX signal.
+    unsafe { kill(pid, signal) == 0 }
 }

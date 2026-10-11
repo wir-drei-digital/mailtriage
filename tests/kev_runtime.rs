@@ -825,3 +825,42 @@ fn kill_fixture_group(group: i32) {
         kill(-group, 9);
     }
 }
+
+#[test]
+fn installation_busy_inspection_is_read_only_and_distinguishes_shared_startup() {
+    use fs2::FileExt;
+    let f = Fixture::new();
+    assert!(!runtime::installation_in_progress(&f.layout).unwrap());
+    assert!(
+        !f.layout.root().exists(),
+        "inspection creates no layout or lock file"
+    );
+    f.install(CHECKPOINT);
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(f.layout.installation_lock())
+        .unwrap();
+    file.lock_exclusive().unwrap();
+    assert!(runtime::installation_in_progress(&f.layout).unwrap());
+    assert!(
+        !f.layout.lock().exists(),
+        "inspection must not touch server.lock"
+    );
+    FileExt::unlock(&file).unwrap();
+    FileExt::lock_shared(&file).unwrap();
+    assert!(
+        !runtime::installation_in_progress(&f.layout).unwrap(),
+        "normal shared startup is not mutation"
+    );
+    FileExt::unlock(&file).unwrap();
+    drop(file);
+    fs::remove_file(f.layout.installation_lock()).unwrap();
+    fs::create_dir(f.layout.installation_lock()).unwrap();
+    assert!(
+        runtime::installation_in_progress(&f.layout).is_err(),
+        "malformed guard is uncertainty, not idle"
+    );
+}

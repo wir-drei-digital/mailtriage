@@ -4,6 +4,10 @@
 //! starts the server on demand; `supervisor` is the hidden
 //! `mailtriage kev run`.
 mod control;
+pub mod install;
+mod installation;
+#[doc(hidden)]
+pub mod mutation;
 pub mod runtime;
 pub mod supervisor;
 
@@ -67,7 +71,14 @@ impl Layout {
     pub fn installed(&self) -> PathBuf {
         self.root.join("installed.json")
     }
-    /// Held by the running supervisor; holds its PID.
+    /// Excludes shared checkout mutation from normal startup.
+    pub fn installation_lock(&self) -> PathBuf {
+        self.root.join("installation.lock")
+    }
+    pub(crate) fn installation_owner(&self) -> PathBuf {
+        self.root.join("installation.owner")
+    }
+    /// Held by the running supervisor; holds its diagnostic PID.
     pub fn lock(&self) -> PathBuf {
         self.root.join("server.lock")
     }

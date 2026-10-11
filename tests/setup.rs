@@ -3,8 +3,12 @@
 //! and HOME in a temp dir. Prompts are driven with `--interactive` and piped
 //! stdin; every other run uses `--yes`.
 mod common;
+mod kev_support;
 use common::{write_tool, LAUNCHCTL, SYSTEMCTL};
-use mailtriage::secrets;
+use mailtriage::{
+    kev::{runtime, Layout},
+    secrets,
+};
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -822,6 +826,9 @@ fn any_model_is_accepted_and_an_existing_model_is_kept() {
 
 /// Provider adapter spec: `--provider` and the classifier menu offer
 /// exactly `provider::KINDS`, in that order.
+/// Provider adapter and Kev specs: `--provider` offers exactly
+/// `provider::KINDS`, and the menu lists them in that order, with local
+/// Kev only on an Apple Silicon Mac.
 #[test]
 fn setup_offers_exactly_the_registered_kinds() {
     let f = Fixture::new();
@@ -834,34 +841,45 @@ fn setup_offers_exactly_the_registered_kinds() {
         )),
         "{v}"
     );
-    // Enter for the Himalaya account, name, identity, time zone, brief,
-    // folders, classifier, model, key variable and filing.
-    let (out, v) = f.run(
-        &["setup", "--interactive", "--json", "--key-store", "env"],
-        &"\n".repeat(10),
-    );
-    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
-    assert_eq!(v["setup"]["provider"], mailtriage::provider::KINDS[0]);
-    let err = stderr(&out);
-    let menu = err
-        .split("Which classifier?\n")
-        .nth(1)
-        .and_then(|rest| rest.split("Choose").next())
-        .unwrap_or_else(|| panic!("{err}"));
-    let expected: String = mailtriage::provider::KINDS
-        .iter()
-        .enumerate()
-        .map(|(i, kind)| {
-            let label = mailtriage::provider::provider_for(kind).unwrap().label();
-            let default = if i == 0 { " (default)" } else { "" };
-            format!("  {}) {label}{default}\n", i + 1)
-        })
-        .collect();
-    assert_eq!(menu, expected);
+    let label = |kind: &str| mailtriage::provider::provider_for(kind).unwrap().label();
+    for apple_silicon in [true, false] {
+        let f = Fixture::new();
+        let host = json!({"apple_silicon": apple_silicon}).to_string();
+        // Enter for the Himalaya account, name, identity, time zone, brief,
+        // folders, classifier, model, key variable and filing.
+        let (out, v) = f.run_with(
+            &["setup", "--interactive", "--json", "--key-store", "env"],
+            &"\n".repeat(10),
+            &[("MAILTRIAGE_TEST_KEV", host.as_str())],
+        );
+        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+        assert_eq!(v["setup"]["provider"], mailtriage::provider::KINDS[0]);
+        let err = stderr(&out);
+        let menu = err
+            .split("Which classifier?\n")
+            .nth(1)
+            .and_then(|rest| rest.split("Choose").next())
+            .unwrap_or_else(|| panic!("{err}"));
+        let mut labels = vec![label("openrouter")];
+        if apple_silicon {
+            labels.push("Local Kev on this Mac (downloads about 9 GB, no API key)");
+        }
+        labels.extend([label("kev"), label("fake")]);
+        let expected: String = labels
+            .iter()
+            .enumerate()
+            .map(|(i, l)| {
+                format!(
+                    "  {}) {l}{}\n",
+                    i + 1,
+                    if i == 0 { " (default)" } else { "" }
+                )
+            })
+            .collect();
+        assert_eq!(menu, expected);
+    }
 }
 
-/// Final review I4: a classifier flag that is not a key flag keeps the key
-/// where it is, and key flags make no sense with the offline classifier.
 #[test]
 fn a_model_flag_keeps_the_key_source() {
     let f = Fixture::new();
@@ -1919,4 +1937,1173 @@ fn setup_names_the_update_fix_when_auto_cannot_replace_the_service_binary() {
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     let items = v["setup"]["doctor"]["items"].as_array().unwrap();
     assert!(items.iter().all(|i| i["check"] != "update"), "{items:?}");
+}
+
+/// The stand-in Kev server, run by the stand-in `uv` (see `kev_support`).
+#[test]
+#[ignore = "the stand-in Kev server; the stand-in uv runs it"]
+fn kev_standin_server() {
+    kev_support::serve_from_env();
+}
+
+/// Kev's side of a setup fixture: stand-in `git` and `uv` in the fixture's
+/// `bin`, their logs and control files in `control`, Kev's files under the
+/// fixture's HOME, and this machine as `host` describes it
+/// (`MAILTRIAGE_TEST_KEV`). Dropping it stops any supervisor.
+struct KevHost {
+    control: PathBuf,
+    data: PathBuf,
+    port: u16,
+    host: Value,
+}
+
+impl KevHost {
+    fn dir(&self) -> PathBuf {
+        self.data.join("mailtriage/kev")
+    }
+
+    fn log(&self, name: &str) -> String {
+        fs::read_to_string(self.control.join(name)).unwrap_or_default()
+    }
+
+    fn lines(&self, name: &str, prefix: &str) -> Vec<String> {
+        self.log(name)
+            .lines()
+            .filter(|l| l.starts_with(prefix))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn env(&self) -> Vec<(String, String)> {
+        vec![
+            ("MAILTRIAGE_TEST_KEV".into(), self.host.to_string()),
+            ("XDG_DATA_HOME".into(), self.data.display().to_string()),
+        ]
+    }
+}
+
+impl Drop for KevHost {
+    fn drop(&mut self) {
+        let _ = runtime::stop(&Layout::new(self.dir()), runtime::STOP_WAIT);
+    }
+}
+
+impl Fixture {
+    /// An Apple Silicon Mac with room and memory, as setup sees it.
+    fn add_kev(&self) -> KevHost {
+        let control = self.bin.join("kev-control");
+        fs::create_dir_all(&control).unwrap();
+        write_tool(&self.bin, "git", &kev_support::git_script(&control));
+        let exe = std::env::current_exe().unwrap();
+        write_tool(&self.bin, "uv", &kev_support::uv_script(&control, &exe));
+        let port = kev_support::free_port();
+        KevHost {
+            control,
+            data: self.home.join(".local/share"),
+            port,
+            host: json!({"apple_silicon": true, "free_gb": 100, "memory_gb": 48,
+                         "port": port, "start_seconds": 30, "download_seconds": 60}),
+        }
+    }
+
+    fn run_kev(&self, kev: &KevHost, args: &[&str]) -> (Output, Value) {
+        let env = kev.env();
+        let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        self.run_with(args, "", &env)
+    }
+}
+
+const LOCAL_KEV: [&str; 7] = [
+    "setup",
+    "--yes",
+    "--json",
+    "--himalaya-account",
+    "work",
+    "--provider",
+    "kev",
+];
+/// Kev spec, "Managed install": each step runs once, setup stops the server
+/// it started and writes `installed.json` before the config; classifying
+/// later starts Kev offline, and setup again reuses everything.
+#[test]
+fn local_kev_is_installed_checked_and_written() {
+    let f = Fixture::new();
+    let kev = f.add_kev();
+    let (out, v) = f.run_kev(&kev, &LOCAL_KEV);
+    assert_eq!(out.status.code(), Some(0), "{v} {}", stderr(&out));
+    let s = &v["setup"];
+    assert_eq!(s["provider"], "kev");
+    assert_eq!(s["model"], "kev-latest");
+    assert_eq!(s["key_source"], Value::Null);
+    assert_eq!(s["key_store"], Value::Null);
+    assert_eq!(s["kev"]["action"], "installed", "{s}");
+    assert_eq!(s["kev"]["checkpoint"], "jaredpalmer/kev-4b@v1.0");
+    assert_eq!(s["doctor"]["ready"], true, "{}", s["doctor"]);
+    assert_eq!(
+        f.config()["provider"],
+        json!({
+            "kind": "kev", "model": "kev-latest",
+            "endpoint": format!("http://127.0.0.1:{}/v1/systemone", kev.port),
+            "api_key_env": "", "timeout_seconds": 60,
+            "managed": {"checkpoint": "jaredpalmer/kev-4b@v1.0"}
+        })
+    );
+    let dir = kev.dir();
+    let installed: Value =
+        serde_json::from_slice(&fs::read(dir.join("installed.json")).unwrap()).unwrap();
+    assert_eq!(installed["tag"], "kev-1.0");
+    assert_eq!(installed["checkpoint"], "jaredpalmer/kev-4b@v1.0");
+    assert_eq!(installed["uv"], f.bin.join("uv").to_str().unwrap());
+    assert_eq!(
+        kev.lines("git.log", "clone "),
+        vec![format!(
+            "clone --depth 1 --branch kev-1.0 https://github.com/jaredpalmer/kev.git {}",
+            dir.join("src.partial").display()
+        )]
+    );
+    let src = fs::canonicalize(dir.join("src")).unwrap();
+    let sync = kev.lines("uv.log", "sync ");
+    assert_eq!(sync.len(), 1, "{}", kev.log("uv.log"));
+    assert!(
+        sync[0].starts_with(&format!(
+            "sync --frozen --extra serve|cwd={}|HF_HOME={}|",
+            src.display(),
+            dir.join("hf").display()
+        )),
+        "{}",
+        sync[0]
+    );
+    assert!(
+        sync[0].contains(&format!(
+            "|UV_CACHE_DIR={}|",
+            dir.join("uv-cache").display()
+        )),
+        "{}",
+        sync[0]
+    );
+    let runs = kev.lines("uv.log", "run ");
+    assert_eq!(runs.len(), 1);
+    assert!(
+        runs[0].starts_with(&format!(
+            "run --frozen --extra serve python -m kev.serve --run jaredpalmer/kev-4b@v1.0 --host 127.0.0.1 --port {}|",
+            kev.port
+        )),
+        "{}",
+        runs[0]
+    );
+    // Setup's start may download the weights; later starts may not.
+    assert!(runs[0].contains("|HF_HUB_OFFLINE=unset|"), "{}", runs[0]);
+    assert!(kev
+        .log("requests.log")
+        .contains("POST /v1/systemone auth=no"));
+    assert!(
+        !runtime::supervisor_running(&Layout::new(dir.clone())),
+        "setup stops the server it started"
+    );
+    let receipt = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/receipt.eml");
+    let (out, v) = f.run_kev(
+        &kev,
+        &[
+            "classify",
+            "--account",
+            "work",
+            "--input",
+            receipt,
+            "--format",
+            "rfc822",
+            "--json",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{v} {}", stderr(&out));
+    assert_eq!(v["outcome"], "classified", "{v}");
+    let runs = kev.lines("uv.log", "run ");
+    assert_eq!(runs.len(), 2);
+    assert!(runs[1].contains("|HF_HUB_OFFLINE=1|"), "{}", runs[1]);
+    let (out, v) = f.run_kev(
+        &kev,
+        &[
+            "setup",
+            "--update",
+            "--yes",
+            "--json",
+            "--account",
+            "work",
+            "--provider",
+            "kev",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{v} {}", stderr(&out));
+    assert_eq!(v["setup"]["kev"]["action"], "current");
+    assert_eq!(kev.lines("git.log", "clone ").len(), 1);
+}
+
+#[test]
+fn a_failed_install_step_writes_nothing_and_setup_again_resumes() {
+    let f = Fixture::new();
+    let kev = f.add_kev();
+    fs::write(kev.control.join("uv-sync-fails"), "").unwrap();
+    let (out, v) = f.run_kev(&kev, &LOCAL_KEV);
+    assert_eq!(out.status.code(), Some(3), "{v}");
+    assert!(
+        message(&v).starts_with("step 5 (Kev): uv sync failed in "),
+        "{v}"
+    );
+    assert!(message(&v).contains("`mailtriage setup`"), "{v}");
+    assert!(!f.config_path().exists());
+    assert!(kev.dir().join("src").is_dir());
+    assert!(!kev.dir().join("installed.json").exists());
+    fs::remove_file(kev.control.join("uv-sync-fails")).unwrap();
+    let (out, v) = f.run_kev(&kev, &LOCAL_KEV);
+    assert_eq!(out.status.code(), Some(0), "{v} {}", stderr(&out));
+    assert!(
+        stderr(&out).contains("Reusing Kev kev-1.0 in "),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(kev.lines("git.log", "clone ").len(), 1);
+    assert_eq!(kev.lines("uv.log", "sync ").len(), 2);
+}
+
+#[test]
+fn a_missing_uv_comes_from_homebrew_or_its_installer() {
+    let f = Fixture::new();
+    let kev = f.add_kev();
+    fs::rename(f.bin.join("uv"), f.bin.join("uv.standin")).unwrap();
+    let (out, v) = f.run_kev(&kev, &LOCAL_KEV);
+    assert_eq!(out.status.code(), Some(3), "{v}");
+    assert!(
+        message(&v).starts_with(
+            "step 5 (Kev): uv is not on PATH; install it with `curl -LsSf https://astral.sh/uv/install.sh | sh`"
+        ),
+        "{v}"
+    );
+    assert!(kev.lines("git.log", "clone ").is_empty());
+    write_tool(&f.bin, "brew", &kev_support::brew_script(&kev.control));
+    let (out, v) = f.run_kev(&kev, &LOCAL_KEV);
+    assert_eq!(out.status.code(), Some(0), "{v} {}", stderr(&out));
+    assert_eq!(kev.log("brew.log"), "install uv\n");
+    assert!(stderr(&out).contains("Installing uv with Homebrew."));
+}
+
+#[test]
+fn local_kev_needs_an_apple_silicon_mac_room_and_a_yes() {
+    let f = Fixture::new();
+    let mut kev = f.add_kev();
+    kev.host["apple_silicon"] = json!(false);
+    let (out, v) = f.run_kev(&kev, &LOCAL_KEV);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        message(&v),
+        "step 5 (classifier): local Kev needs an Apple Silicon Mac; run your own Kev server and pass --kev-url"
+    );
+    kev.host["apple_silicon"] = json!(true);
+    kev.host["free_gb"] = json!(10);
+    let (out, v) = f.run_kev(&kev, &LOCAL_KEV);
+    assert_eq!(out.status.code(), Some(3));
+    assert!(
+        message(&v).contains(" has 10 GB free and local Kev needs 15 GB;"),
+        "{v}"
+    );
+    kev.host["free_gb"] = json!(100);
+    let (out, v) = f.run_kev(
+        &kev,
+        &[
+            "setup",
+            "--json",
+            "--himalaya-account",
+            "work",
+            "--provider",
+            "kev",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        message(&v),
+        "step 5 (Kev): local Kev downloads about 9 GB; pass --yes to agree, or choose another --provider"
+    );
+    assert!(kev.log("git.log").is_empty());
+    assert!(!f.config_path().exists());
+    kev.host["memory_gb"] = json!(16);
+    let (out, v) = f.run_kev(&kev, &LOCAL_KEV);
+    assert_eq!(out.status.code(), Some(0), "{v} {}", stderr(&out));
+    assert!(
+        stderr(&out).contains("This Mac has 16 GB of memory."),
+        "{}",
+        stderr(&out)
+    );
+}
+
+/// Review focus 4: a local Kev whose checkpoint was edited by hand is
+/// installed with that checkpoint when setup keeps the classifier.
+#[test]
+fn a_kept_local_kev_is_installed_with_its_own_checkpoint() {
+    let f = Fixture::new();
+    let kev = f.add_kev();
+    assert_eq!(f.run(&WORK_ENV, "").0.status.code(), Some(0));
+    let mut c = f.config();
+    c["provider"] = json!({
+        "kind": "kev", "model": "kev-latest",
+        "endpoint": format!("http://127.0.0.1:{}/v1/systemone", kev.port),
+        "timeout_seconds": 60, "managed": {"checkpoint": "test/kev-9b@v1.0"}
+    });
+    fs::write(f.config_path(), serde_json::to_vec_pretty(&c).unwrap()).unwrap();
+    let (out, v) = f.run_kev(
+        &kev,
+        &["setup", "--update", "--yes", "--json", "--account", "work"],
+    );
+    assert_eq!(out.status.code(), Some(0), "{v} {}", stderr(&out));
+    assert_eq!(v["setup"]["kev"]["action"], "installed", "{v}");
+    assert_eq!(v["setup"]["kev"]["checkpoint"], "test/kev-9b@v1.0");
+    let runs = kev.lines("uv.log", "run ");
+    assert!(runs[0].contains("--run test/kev-9b@v1.0 "), "{}", runs[0]);
+    assert_eq!(
+        f.config()["provider"]["managed"]["checkpoint"],
+        "test/kev-9b@v1.0"
+    );
+}
+
+#[test]
+fn a_kev_server_on_this_machine_needs_no_key() {
+    let f = Fixture::new();
+    let stub = kev_support::Stub::start(kev_support::models_for("jaredpalmer/kev-4b@v1.0"), None);
+    let url = stub.endpoint();
+    let base = ["setup", "--yes", "--json", "--himalaya-account", "work"];
+    let refused = [
+        (
+            vec!["--provider", "openrouter", "--kev-url", url.as_str()],
+            "step 5 (classifier): --kev-url needs --provider kev; drop it or pass --provider kev",
+        ),
+        (
+            vec!["--kev-url", url.as_str(), "--key-store", "env"],
+            "step 5 (key): --key-store has no effect with a Kev server on this machine; drop it",
+        ),
+        (
+            vec!["--kev-url", "http://kev.example.test/v1/systemone"],
+            "step 5 (classifier): --kev-url: provider.endpoint must use https for a server off this machine",
+        ),
+    ];
+    for (extra, expected) in refused {
+        let (out, v) = f.run(&[&base[..], &extra].concat(), "");
+        assert_eq!(out.status.code(), Some(2), "{extra:?}: {v}");
+        assert_eq!(message(&v), expected);
+    }
+    assert!(!f.config_path().exists());
+    let (out, v) = f.run(&[&base[..], &["--kev-url", url.as_str()]].concat(), "");
+    assert_eq!(out.status.code(), Some(0), "{v} {}", stderr(&out));
+    let s = &v["setup"];
+    assert_eq!(s["provider"], "kev");
+    assert_eq!(s["key_source"], Value::Null);
+    assert_eq!(
+        s["kev"],
+        json!({"mode": "server", "endpoint": url, "checked": true})
+    );
+    assert_eq!(
+        f.config()["provider"],
+        json!({"kind": "kev", "model": "kev-latest", "endpoint": url, "api_key_env": "", "timeout_seconds": 60})
+    );
+    assert!(stub
+        .requests()
+        .contains(&"GET /v1/models auth=no".to_owned()));
+    let other = kev_support::Stub::start(json!({"models": [{"name": "jev-latest"}]}), None);
+    let (out, v) = f.run(
+        &[
+            "setup",
+            "--update",
+            "--yes",
+            "--json",
+            "--account",
+            "work",
+            "--kev-url",
+            &other.endpoint(),
+        ],
+        "",
+    );
+    assert_eq!(out.status.code(), Some(3), "{v}");
+    assert_eq!(
+        message(&v),
+        format!(
+            "step 5 (classifier): the Kev server at http://127.0.0.1:{}/v1/models does not serve kev-latest; check --kev-url and --model",
+            other.port
+        )
+    );
+}
+
+/// Review focus 5: a remote server's key goes to a key store under account
+/// `kev`, is used to check the server, and never reaches the output.
+#[test]
+fn a_remote_kev_server_uses_a_key_store_under_account_kev() {
+    let f = Fixture::new();
+    fs::write(f.bin.join("pass.key"), "sk-kev-secret\n").unwrap();
+    let (out, v) = f.run(
+        &[
+            "setup",
+            "--yes",
+            "--json",
+            "--himalaya-account",
+            "work",
+            "--kev-url",
+            "https://kev.invalid/v1/systemone",
+            "--key-store",
+            "pass",
+            "--key-stored",
+        ],
+        "",
+    );
+    assert_eq!(out.status.code(), Some(3), "{v}");
+    assert_eq!(
+        message(&v),
+        "step 5 (classifier): the Kev server did not answer at https://kev.invalid/v1/models; start it or check --kev-url"
+    );
+    assert!(
+        f.tool_calls().contains("show mailtriage/kev"),
+        "{}",
+        f.tool_calls()
+    );
+    for text in [stdout(&out), stderr(&out)] {
+        assert!(!text.contains("sk-kev-secret"), "{text}");
+    }
+    assert!(!f.config_path().exists());
+}
+impl KevHost {
+    fn runtime(&self, checkpoint: &str) -> runtime::Runtime {
+        runtime::Runtime {
+            layout: Layout::new(self.dir()),
+            port: self.port,
+            checkpoint: checkpoint.into(),
+            exe: PathBuf::from(env!("CARGO_BIN_EXE_mailtriage")),
+            start_timeout: std::time::Duration::from_secs(10),
+            idle: std::time::Duration::from_secs(900),
+            check: std::time::Duration::from_secs(1),
+        }
+    }
+}
+
+const KEV_UPDATE: [&str; 6] = ["setup", "--update", "--yes", "--json", "--account", "work"];
+
+#[test]
+fn kev_partial_updates_retain_mode_and_endpoint() {
+    let f = Fixture::new();
+    let kev = f.add_kev();
+    let (out, v) = f.run_kev(&kev, &LOCAL_KEV);
+    assert_eq!(out.status.code(), Some(0), "{v}");
+    let before = f.config()["provider"].clone();
+    let (out, v) = f.run_kev(
+        &kev,
+        &[&KEV_UPDATE[..], &["--model", "jev-latest"]].concat(),
+    );
+    assert_eq!(out.status.code(), Some(0), "{v}");
+    assert_eq!(v["setup"]["kev"]["action"], "current");
+    assert_eq!(f.config()["provider"]["endpoint"], before["endpoint"]);
+    assert_eq!(f.config()["provider"]["managed"], before["managed"]);
+    // An unreachable remote fixture proves key selection and non-disclosure,
+    // independent from shared transport's bearer-header transmission tests.
+    let mut config = f.config();
+    config["provider"] = json!({"kind":"kev", "model":"kev-latest", "endpoint":"https://kev.invalid/v1/systemone", "api_key_env":"OLD_KEV_KEY", "timeout_seconds":60});
+    fs::write(f.config_path(), serde_json::to_vec(&config).unwrap()).unwrap();
+    fs::write(f.bin.join("pass.key"), "fixture-kev-private\n").unwrap();
+    let (out, v) = f.run_kev(
+        &kev,
+        &[&KEV_UPDATE[..], &["--key-store", "pass", "--key-stored"]].concat(),
+    );
+    assert_eq!(out.status.code(), Some(3), "{v}");
+    assert!(message(&v).contains("https://kev.invalid/v1/models"), "{v}");
+    assert!(f.tool_calls().contains("show mailtriage/kev"));
+    assert!(!stderr(&out).contains("fixture-kev-private"));
+    assert!(!stdout(&out).contains("fixture-kev-private"));
+    assert_eq!(f.config(), config);
+}
+
+#[test]
+fn kev_kept_managed_configs_require_apple_silicon() {
+    let f = Fixture::new();
+    let mut kev = f.add_kev();
+    assert!(f.run_kev(&kev, &LOCAL_KEV).0.status.success());
+    kev.host["apple_silicon"] = json!(false);
+    for args in [
+        KEV_UPDATE.to_vec(),
+        [&KEV_UPDATE[..], &["--model", "jev-latest"]].concat(),
+    ] {
+        let (out, v) = f.run_kev(&kev, &args);
+        assert_eq!(out.status.code(), Some(2), "{v}");
+        assert!(message(&v).contains("--kev-url"));
+    }
+}
+
+#[test]
+fn kev_kept_own_server_is_checked_and_reported() {
+    let f = Fixture::new();
+    let stub = kev_support::Stub::start(kev_support::models_for("test/checkpoint"), None);
+    assert!(f
+        .run(
+            &[
+                "setup",
+                "--yes",
+                "--json",
+                "--himalaya-account",
+                "work",
+                "--kev-url",
+                &stub.endpoint()
+            ],
+            ""
+        )
+        .0
+        .status
+        .success());
+    let (out, v) = f.run(&KEV_UPDATE, "");
+    assert_eq!(out.status.code(), Some(0), "{v}");
+    assert_eq!(
+        v["setup"]["kev"],
+        json!({"mode":"server", "endpoint":stub.endpoint(), "checked":true})
+    );
+}
+
+#[test]
+fn kev_install_rejects_unknown_ownership_and_unrelated_listeners() {
+    let f = Fixture::new();
+    let kev = f.add_kev();
+    fs::create_dir_all(kev.dir()).unwrap();
+    fs::write(
+        kev.dir().join("server-ownership.json"),
+        r#"{"owner":"lost","child_group":null,"terminated":false}"#,
+    )
+    .unwrap();
+    let (out, v) = f.run_kev(&kev, &LOCAL_KEV);
+    assert_eq!(out.status.code(), Some(3), "{v}");
+    assert!(message(&v).contains("shutdown is unconfirmed"), "{v}");
+    assert!(kev.log("git.log").is_empty());
+    assert!(kev.dir().join("server-ownership.json").exists());
+    assert!(!f.config_path().exists());
+    // Fixture explicitly verifies there are no processes before removing its own proof.
+    assert!(runtime::shutdown_confirmed(&Layout::new(kev.dir())).is_err());
+    fs::remove_file(kev.dir().join("server-ownership.json")).unwrap();
+    let stub = kev_support::Stub::start(kev_support::models_for("jaredpalmer/kev-4b@v1.0"), None);
+    let mut host = kev.host.clone();
+    host["port"] = json!(stub.port);
+    let env = [
+        ("MAILTRIAGE_TEST_KEV", host.to_string()),
+        ("XDG_DATA_HOME", kev.data.display().to_string()),
+    ];
+    let env: Vec<_> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let (out, v) = f.run_with(&LOCAL_KEV, "", &env);
+    assert_eq!(out.status.code(), Some(3), "{v}");
+    assert!(message(&v).contains("used by another program"), "{v}");
+    assert!(kev.log("git.log").is_empty());
+    assert!(mailtriage::provider::kev::list_models(
+        &format!("http://127.0.0.1:{}/v1/models", stub.port),
+        None,
+        std::time::Duration::from_secs(1)
+    )
+    .is_ok());
+}
+
+#[test]
+fn kev_install_current_receipt_requires_source_and_executable() {
+    let f = Fixture::new();
+    let kev = f.add_kev();
+    assert!(f.run_kev(&kev, &LOCAL_KEV).0.status.success());
+    fs::remove_dir_all(kev.dir().join("src")).unwrap();
+    let (out, v) = f.run_kev(&kev, &KEV_UPDATE);
+    assert_eq!(out.status.code(), Some(0), "{v}");
+    assert_eq!(v["setup"]["kev"]["action"], "installed");
+    assert_eq!(kev.lines("git.log", "clone ").len(), 2);
+    let receipt = kev.dir().join("installed.json");
+    let mut installed: Value = serde_json::from_slice(&fs::read(&receipt).unwrap()).unwrap();
+    installed["uv"] = json!(kev.dir().join("missing-uv"));
+    fs::write(&receipt, serde_json::to_vec(&installed).unwrap()).unwrap();
+    let (out, v) = f.run_kev(&kev, &KEV_UPDATE);
+    assert_eq!(out.status.code(), Some(0), "{v}");
+    assert_eq!(v["setup"]["kev"]["action"], "installed");
+}
+
+#[test]
+fn kev_install_excludes_other_installs_and_normal_starts() {
+    use fs2::FileExt;
+    let f = Fixture::new();
+    let kev = f.add_kev();
+    assert!(f.run_kev(&kev, &LOCAL_KEV).0.status.success());
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(kev.dir().join("installation.lock"))
+        .unwrap();
+    file.lock_exclusive().unwrap();
+    let result = runtime::ensure_running_with(&kev.runtime("jaredpalmer/kev-4b@v1.0"));
+    assert!(
+        result.is_err(),
+        "normal starts must be excluded while an install changes shared files"
+    );
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("installation is in progress"));
+    let dir = kev.dir();
+    let uv = f.bin.join("uv");
+    // Standalone --allow-download does not carry the installer's ticket.
+    let (out, _) = f.run_kev(
+        &kev,
+        &[
+            "kev",
+            "run",
+            "--dir",
+            dir.to_str().unwrap(),
+            "--port",
+            &kev.port.to_string(),
+            "--checkpoint",
+            "jaredpalmer/kev-4b@v1.0",
+            "--uv",
+            uv.to_str().unwrap(),
+            "--allow-download",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(3));
+    let (out, v) = f.run_kev(&kev, &KEV_UPDATE);
+    assert_eq!(out.status.code(), Some(3), "{v}");
+    assert!(message(&v).contains("installation is in progress"), "{v}");
+    assert_eq!(kev.lines("uv.log", "run ").len(), 1);
+    // Simulate a checkpoint replacement while mutation owns the guard.
+    let receipt = kev.dir().join("installed.json");
+    let mut installed: Value = serde_json::from_slice(&fs::read(&receipt).unwrap()).unwrap();
+    installed["checkpoint"] = json!("test/replaced@v1");
+    fs::write(&receipt, serde_json::to_vec(&installed).unwrap()).unwrap();
+    FileExt::unlock(&file).unwrap();
+    let result = runtime::ensure_running_with(&kev.runtime("jaredpalmer/kev-4b@v1.0"));
+    assert_eq!(result.unwrap_err().to_string(), runtime::NOT_INSTALLED);
+    assert_eq!(kev.lines("uv.log", "run ").len(), 1);
+}
+
+#[test]
+fn kev_local_authentication_failure_is_actionable() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    let f = Fixture::new();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}/v1/systemone",
+        listener.local_addr().unwrap().port()
+    );
+    let join = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        let mut buffer = [0u8; 4096];
+        let read = socket.read(&mut buffer).unwrap();
+        assert!(read > 0);
+        socket
+            .write_all(
+                b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+            )
+            .unwrap();
+    });
+    let (out, v) = f.run(
+        &[
+            "setup",
+            "--yes",
+            "--json",
+            "--himalaya-account",
+            "work",
+            "--kev-url",
+            &url,
+        ],
+        "",
+    );
+    join.join().unwrap();
+    assert_eq!(out.status.code(), Some(3), "{v}");
+    assert!(message(&v).contains("HTTP 401"), "{v}");
+    assert!(message(&v).contains("--kev-url"));
+    assert!(!f.config_path().exists());
+}
+
+#[test]
+fn kev_interrupted_first_start_resumes_without_success_record() {
+    let f = Fixture::new();
+    let kev = f.add_kev();
+    fs::write(kev.control.join("exit-now"), "").unwrap();
+    let (out, v) = f.run_kev(&kev, &LOCAL_KEV);
+    assert_eq!(out.status.code(), Some(3), "{v}");
+    assert!(!f.config_path().exists());
+    assert!(!kev.dir().join("installed.json").exists());
+    assert!(runtime::shutdown_confirmed(&Layout::new(kev.dir())).unwrap());
+    fs::remove_file(kev.control.join("exit-now")).unwrap();
+    let (out, v) = f.run_kev(&kev, &LOCAL_KEV);
+    assert_eq!(out.status.code(), Some(0), "{v}");
+    assert_eq!(kev.lines("git.log", "clone ").len(), 1);
+    assert_eq!(kev.lines("uv.log", "run ").len(), 2);
+}
+
+#[test]
+fn kev_active_checkpoint_handover_excludes_startup_during_mutation() {
+    let f = Fixture::new();
+    let kev = f.add_kev();
+    assert!(f.run_kev(&kev, &LOCAL_KEV).0.status.success());
+    let old = kev.runtime("jaredpalmer/kev-4b@v1.0");
+    runtime::ensure_running_with(&old).unwrap();
+    assert!(runtime::supervisor_running(&old.layout));
+    let mut config = f.config();
+    config["provider"]["managed"]["checkpoint"] = json!("test/new-checkpoint@v1");
+    fs::write(f.config_path(), serde_json::to_vec(&config).unwrap()).unwrap();
+    fs::write(kev.control.join("hold-sync"), "").unwrap();
+    fs::remove_file(kev.control.join("sync-entered")).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mailtriage"));
+    command
+        .args(KEV_UPDATE)
+        .current_dir(&f.cwd)
+        .env("HOME", &f.home)
+        .env("XDG_CACHE_HOME", f.home.join(".cache"))
+        .env("PATH", format!("{}:/usr/bin:/bin", f.bin.display()))
+        .env("TZ", "Europe/Berlin")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("MAILTRIAGE_CONFIG")
+        .env_remove("HIMALAYA_CONFIG")
+        .env_remove("OPENROUTER_API_KEY")
+        .envs(kev.env())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = command.spawn().unwrap();
+    let reached = kev_support::wait_until(std::time::Duration::from_secs(10), || {
+        kev.control.join("sync-entered").exists()
+    });
+    // Release the fixture gate on every path so a failed assertion leaks no setup process.
+    let blocked = runtime::ensure_running_with(&old);
+    let old_listener = runtime::probe(&old);
+    let mutating = runtime::installation_in_progress(&old.layout);
+    fs::remove_file(kev.control.join("hold-sync")).unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(reached, "{}", stderr(&out));
+    assert_eq!(
+        old_listener,
+        runtime::Probe::Nothing,
+        "old checkpoint must stop before uv sync"
+    );
+    assert!(mutating.unwrap(), "the dependency writer owns exclusion");
+    assert!(blocked
+        .unwrap_err()
+        .to_string()
+        .contains("installation is in progress"));
+    assert!(out.status.success(), "{} {}", stdout(&out), stderr(&out));
+    let installed = mailtriage::kev::Installed::read(&old.layout).unwrap();
+    assert_eq!(installed.checkpoint, "test/new-checkpoint@v1");
+    assert!(runtime::shutdown_confirmed(&old.layout).unwrap());
+    assert_eq!(kev.lines("uv.log", "run ").len(), 3);
+    assert!(kev.lines("uv.log", "run ")[2].contains("--run test/new-checkpoint@v1 "));
+    assert!(runtime::ensure_running_with(&old).is_err());
+}
+
+#[test]
+fn kev_unconfirmed_shutdown_cannot_record_install_success() {
+    let f = Fixture::new();
+    let kev = f.add_kev();
+    fs::write(kev.control.join("kill-supervisor-on-post"), "").unwrap();
+    let (out, v) = f.run_kev(&kev, &LOCAL_KEV);
+    // Explicitly clean the surviving fixture child using its fresh test-owned
+    // PID, independently of the production journal's diagnostic numerical IDs.
+    let pid: i32 = fs::read_to_string(kev.control.join("child.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    kev_support::fixture_signal(-pid, 9);
+    assert!(kev_support::wait_until(
+        std::time::Duration::from_secs(3),
+        || !kev_support::fixture_signal(-pid, 0)
+    ));
+    assert_eq!(out.status.code(), Some(3), "{v}");
+    assert!(message(&v).contains("shutdown is unconfirmed"), "{v}");
+    assert!(!f.config_path().exists());
+    assert!(!kev.dir().join("installed.json").exists());
+    assert!(kev.dir().join("server-ownership.json").exists());
+}
+
+#[test]
+fn kev_weight_repair_uses_the_private_cache_and_setup() {
+    let f = Fixture::new();
+    let kev = f.add_kev();
+    assert!(f.run_kev(&kev, &LOCAL_KEV).0.status.success());
+    let (out, v) = f.run_kev(&kev, &KEV_UPDATE);
+    assert_eq!(out.status.code(), Some(0), "{v}");
+    assert_eq!(v["setup"]["kev"]["action"], "current");
+    // Missing private cache resumes setup; no knowledge of HF internals.
+    fs::remove_dir_all(kev.dir().join("hf")).unwrap();
+    let (out, v) = f.run_kev(&kev, &KEV_UPDATE);
+    assert_eq!(out.status.code(), Some(0), "{v}");
+    assert_eq!(v["setup"]["kev"]["action"], "installed");
+    // An operator invalidates the receipt after independently confirmed stop.
+    assert!(runtime::shutdown_confirmed(&Layout::new(kev.dir())).unwrap());
+    fs::remove_file(kev.dir().join("installed.json")).unwrap();
+    fs::write(kev.control.join("exit-now"), "").unwrap();
+    let (out, v) = f.run_kev(&kev, &KEV_UPDATE);
+    assert_eq!(out.status.code(), Some(3), "{v}");
+    assert!(
+        message(&v).contains(&kev.dir().join("hf").display().to_string()),
+        "{v}"
+    );
+    assert!(message(&v).contains("move"));
+    assert!(message(&v).contains("`mailtriage setup --update --yes`"));
+    fs::rename(kev.dir().join("hf"), kev.dir().join("hf.operator-backup")).unwrap();
+    fs::remove_file(kev.control.join("exit-now")).unwrap();
+    let (out, v) = f.run_kev(&kev, &KEV_UPDATE);
+    assert_eq!(out.status.code(), Some(0), "{v}");
+    assert!(kev.dir().join("hf.operator-backup").is_dir());
+}
+
+#[test]
+fn kev_partial_interactive_update_does_not_reselect_the_endpoint() {
+    let f = Fixture::new();
+    let stub = kev_support::Stub::start(kev_support::models_for("test/own"), None);
+    assert!(f
+        .run(
+            &[
+                "setup",
+                "--yes",
+                "--json",
+                "--himalaya-account",
+                "work",
+                "--kev-url",
+                &stub.endpoint()
+            ],
+            ""
+        )
+        .0
+        .status
+        .success());
+    let (out, v) = f.run(
+        &[
+            "setup",
+            "--update",
+            "--interactive",
+            "--json",
+            "--account",
+            "work",
+            "--model",
+            "jev-latest",
+        ],
+        &"\n".repeat(10),
+    );
+    assert_eq!(out.status.code(), Some(0), "{v} {}", stderr(&out));
+    assert_eq!(f.config()["provider"]["endpoint"], stub.endpoint());
+    assert!(
+        !stderr(&out).contains("Kev server URL (ends in /v1/systemone)"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn kev_interrupted_checkpoint_install_adopts_only_the_owned_supervisor() {
+    let f = Fixture::new();
+    let kev = f.add_kev();
+    assert!(f.run_kev(&kev, &LOCAL_KEV).0.status.success());
+    // The interrupted installer invalidated its receipt, then started a
+    // replacement checkpoint before writing the requested config.
+    fs::remove_file(kev.dir().join("installed.json")).unwrap();
+    let replacement = kev.runtime("test/interrupted-checkpoint@v1");
+    runtime::spawn_supervisor(&replacement, &f.bin.join("uv"), true).unwrap();
+    assert!(kev_support::wait_until(
+        std::time::Duration::from_secs(5),
+        || runtime::probe(&replacement) == runtime::Probe::Ready
+    ));
+    let (out, v) = f.run_kev(&kev, &KEV_UPDATE);
+    assert_eq!(out.status.code(), Some(0), "{v} {}", stderr(&out));
+    assert_eq!(v["setup"]["kev"]["checkpoint"], "jaredpalmer/kev-4b@v1.0");
+    assert!(runtime::shutdown_confirmed(&replacement.layout).unwrap());
+    assert_eq!(kev.lines("uv.log", "run ").len(), 3);
+}
+
+#[test]
+fn kev_concurrent_independent_installs_confirm_shutdown() {
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            std::thread::spawn(|| {
+                let f = Fixture::new();
+                let kev = f.add_kev();
+                let (out, v) = f.run_kev(&kev, &LOCAL_KEV);
+                let detail = format!(
+                    "{v}\n{}\nLOG:{}\nPROOF:{}",
+                    stderr(&out),
+                    fs::read_to_string(kev.dir().join("kev.log")).unwrap_or_default(),
+                    fs::read_to_string(kev.dir().join("server-ownership.json")).unwrap_or_default()
+                );
+                if !out.status.success() {
+                    if let Ok(pid) = fs::read_to_string(kev.control.join("child.pid")) {
+                        kev_support::fixture_signal(-pid.trim().parse::<i32>().unwrap(), 9);
+                    }
+                }
+                (
+                    out.status.success()
+                        && runtime::shutdown_confirmed(&Layout::new(kev.dir())).unwrap_or(false),
+                    detail,
+                )
+            })
+        })
+        .collect();
+    let results: Vec<_> = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect();
+    let failures: Vec<_> = results
+        .into_iter()
+        .filter_map(|(ok, detail)| (!ok).then_some(detail))
+        .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+impl Fixture {
+    fn spawn_kev(&self, kev: &KevHost, args: &[&str]) -> std::process::Child {
+        Command::new(env!("CARGO_BIN_EXE_mailtriage"))
+            .args(args)
+            .current_dir(&self.cwd)
+            .env("HOME", &self.home)
+            .env("XDG_CACHE_HOME", self.home.join(".cache"))
+            .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()))
+            .env("TZ", "Europe/Berlin")
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("MAILTRIAGE_CONFIG")
+            .env_remove("HIMALAYA_CONFIG")
+            .env_remove("OPENROUTER_API_KEY")
+            .envs(kev.env())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+}
+
+#[test]
+fn kev_orphaned_sync_blocks_replacement_until_writer_ends() {
+    let f = Fixture::new();
+    let kev = f.add_kev();
+    fs::write(kev.control.join("hold-sync"), "").unwrap();
+    let mut first = f.spawn_kev(&kev, &LOCAL_KEV);
+    assert!(kev_support::wait_until(
+        std::time::Duration::from_secs(10),
+        || kev.control.join("sync-entered").exists()
+    ));
+    first.kill().unwrap();
+    first.wait().unwrap(); // Kill only setup, not its writer.
+    let mut replacement = f.spawn_kev(&kev, &LOCAL_KEV);
+    let mut early = None;
+    kev_support::wait_until(std::time::Duration::from_secs(2), || {
+        early = replacement.try_wait().unwrap();
+        early.is_some() || kev.lines("uv.log", "sync ").len() > 1
+    });
+    let syncs_while_orphaned = kev.lines("uv.log", "sync ").len();
+    let start = runtime::ensure_running_with(&kev.runtime("jaredpalmer/kev-4b@v1.0"));
+    fs::remove_file(kev.control.join("hold-sync")).unwrap();
+    replacement.wait().unwrap();
+    assert!(kev_support::wait_until(
+        std::time::Duration::from_secs(5),
+        || kev.control.join("sync-finished").exists()
+    ));
+    assert_eq!(
+        syncs_while_orphaned, 1,
+        "replacement entered shared mutation while old writer survived"
+    );
+    assert_eq!(
+        early.and_then(|s| s.code()),
+        Some(3),
+        "replacement must refuse the orphan's retained exclusion"
+    );
+    assert!(start
+        .unwrap_err()
+        .to_string()
+        .contains("installation is in progress"));
+    assert!(kev_support::wait_until(
+        std::time::Duration::from_secs(5),
+        || runtime::shutdown_confirmed(&Layout::new(kev.dir())).unwrap_or(false)
+    ));
+    let (out, v) = f.run_kev(&kev, &LOCAL_KEV);
+    assert_eq!(out.status.code(), Some(0), "{v} {}", stderr(&out));
+}
+
+#[test]
+fn kev_delayed_normal_start_revalidates_completed_replacement() {
+    for change_checkpoint in [true, false] {
+        let f = Fixture::new();
+        let kev = f.add_kev();
+        assert!(f.run_kev(&kev, &LOCAL_KEV).0.status.success());
+        let gate = kev.control.join("delay-normal");
+        fs::write(&gate, "").unwrap();
+        let wrapper = f.bin.join("delayed-mailtriage");
+        write_tool(&f.bin,"delayed-mailtriage",&format!("#!/bin/sh\ntouch '{}'\nwhile [ -f '{}' ]; do sleep 0.1; done\n'{}' \"$@\"\nstatus=$?\nprintf '%s\\n' \"$status\" > '{}'\nexit \"$status\"\n",kev.control.join("normal-delayed").display(),gate.display(),env!("CARGO_BIN_EXE_mailtriage"),kev.control.join("normal-exit").display()));
+        let mut old = kev.runtime("jaredpalmer/kev-4b@v1.0");
+        old.exe = wrapper;
+        runtime::spawn_supervisor(&old, &f.bin.join("uv"), false).unwrap();
+        assert!(kev_support::wait_until(
+            std::time::Duration::from_secs(5),
+            || kev.control.join("normal-delayed").exists()
+        ));
+        let new_tools = f.bin.join("new-tools");
+        fs::create_dir_all(&new_tools).unwrap();
+        write_tool(
+            &new_tools,
+            "uv",
+            &kev_support::uv_script(&kev.control, &std::env::current_exe().unwrap()),
+        );
+        let mut cfg = f.config();
+        if change_checkpoint {
+            cfg["provider"]["managed"]["checkpoint"] = json!("test/replacement@v1");
+        }
+        fs::write(f.config_path(), serde_json::to_vec(&cfg).unwrap()).unwrap();
+        fs::remove_dir_all(kev.dir().join("src/.venv")).unwrap();
+        let mut env = kev.env();
+        env.push((
+            "PATH".into(),
+            format!("{}:{}:/usr/bin:/bin", new_tools.display(), f.bin.display()),
+        ));
+        let env: Vec<_> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let (out, v) = f.run_with(&KEV_UPDATE, "", &env);
+        assert_eq!(out.status.code(), Some(0), "{v} {}", stderr(&out));
+        let installed = mailtriage::kev::Installed::read(&Layout::new(kev.dir())).unwrap();
+        assert_eq!(installed.uv, new_tools.join("uv"));
+        let before = kev.lines("uv.log", "run ").len();
+        fs::remove_file(&gate).unwrap();
+        let observed = kev_support::wait_until(std::time::Duration::from_secs(5), || {
+            kev.control.join("normal-exit").exists() || kev.lines("uv.log", "run ").len() > before
+        });
+        let after = kev.lines("uv.log", "run ").len();
+        let stopped = runtime::stop(&Layout::new(kev.dir()), runtime::STOP_WAIT);
+        assert!(stopped.is_ok(), "{stopped:?}");
+        assert!(
+            observed,
+            "delayed child must reach rejection or spawn before the assertion"
+        );
+        assert_eq!(
+            after, before,
+            "delayed ordinary child launched with stale checkpoint/uv arguments"
+        );
+        assert_eq!(
+            fs::read_to_string(kev.control.join("normal-exit"))
+                .unwrap()
+                .trim(),
+            "3"
+        );
+        assert!(!runtime::supervisor_running(&Layout::new(kev.dir())));
+    }
+}
+
+#[test]
+fn kev_orphaned_clone_blocks_replacement_until_writer_ends() {
+    let f = Fixture::new();
+    let kev = f.add_kev();
+    fs::write(kev.control.join("hold-clone"), "").unwrap();
+    let mut first = f.spawn_kev(&kev, &LOCAL_KEV);
+    assert!(kev_support::wait_until(
+        std::time::Duration::from_secs(10),
+        || kev.control.join("clone-entered").exists()
+    ));
+    first.kill().unwrap();
+    first.wait().unwrap();
+    let mut next = f.spawn_kev(&kev, &LOCAL_KEV);
+    let mut early = None;
+    kev_support::wait_until(std::time::Duration::from_secs(2), || {
+        early = next.try_wait().unwrap();
+        early.is_some() || kev.lines("git.log", "clone ").len() > 1
+    });
+    let clones = kev.lines("git.log", "clone ").len();
+    let busy = runtime::installation_in_progress(&Layout::new(kev.dir())).unwrap();
+    fs::remove_file(kev.control.join("hold-clone")).unwrap();
+    next.wait().unwrap();
+    assert!(kev_support::wait_until(
+        std::time::Duration::from_secs(5),
+        || kev.control.join("clone-finished").exists()
+    ));
+    assert_eq!(clones, 1);
+    assert_eq!(early.and_then(|s| s.code()), Some(3));
+    assert!(busy);
+    assert!(kev_support::wait_until(
+        std::time::Duration::from_secs(5),
+        || runtime::shutdown_confirmed(&Layout::new(kev.dir())).unwrap_or(false)
+    ));
+    let (out, v) = f.run_kev(&kev, &LOCAL_KEV);
+    assert_eq!(out.status.code(), Some(0), "{v}");
+}
+
+#[test]
+fn kev_orphaned_closed_fd_descendant_retains_exclusion_after_its_leader_exits() {
+    let f = Fixture::new();
+    let kev = f.add_kev();
+    for name in ["hold-sync", "hold-sync-descendant"] {
+        fs::write(kev.control.join(name), "").unwrap();
+    }
+    let mut first = f.spawn_kev(&kev, &LOCAL_KEV);
+    assert!(kev_support::wait_until(
+        std::time::Duration::from_secs(10),
+        || kev.control.join("descendant-entered").exists()
+            && kev.control.join("sync-entered").exists()
+    ));
+    first.kill().unwrap();
+    first.wait().unwrap();
+    fs::remove_file(kev.control.join("hold-sync")).unwrap();
+    assert!(kev_support::wait_until(
+        std::time::Duration::from_secs(3),
+        || kev.control.join("sync-leader-ended").exists()
+    ));
+    let mut next = f.spawn_kev(&kev, &LOCAL_KEV);
+    let mut early = None;
+    kev_support::wait_until(std::time::Duration::from_secs(2), || {
+        early = next.try_wait().unwrap();
+        early.is_some() || kev.lines("uv.log", "sync ").len() > 1
+    });
+    let syncs = kev.lines("uv.log", "sync ").len();
+    let busy = runtime::installation_in_progress(&Layout::new(kev.dir())).unwrap();
+    let unfinished = !kev.control.join("descendant-finished").exists();
+    fs::remove_file(kev.control.join("hold-sync-descendant")).unwrap();
+    next.wait().unwrap();
+    assert!(kev_support::wait_until(
+        std::time::Duration::from_secs(5),
+        || kev.control.join("descendant-finished").exists()
+    ));
+    assert_eq!(syncs, 1);
+    assert_eq!(early.and_then(|s| s.code()), Some(3));
+    assert!(busy && unfinished);
+    assert!(kev_support::wait_until(
+        std::time::Duration::from_secs(5),
+        || runtime::shutdown_confirmed(&Layout::new(kev.dir())).unwrap_or(false)
+    ));
+    assert!(!runtime::installation_in_progress(&Layout::new(kev.dir())).unwrap());
+    let (out, v) = f.run_kev(&kev, &LOCAL_KEV);
+    assert_eq!(out.status.code(), Some(0), "{v}");
+}
+
+#[test]
+fn kev_abandoned_mutation_helper_preserves_proof_and_blocks_replacement() {
+    let f = Fixture::new();
+    let kev = f.add_kev();
+    for name in ["hold-sync", "kill-sync-owner"] {
+        fs::write(kev.control.join(name), "").unwrap();
+    }
+    let mut first = f.spawn_kev(&kev, &LOCAL_KEV);
+    assert!(kev_support::wait_until(
+        std::time::Duration::from_secs(10),
+        || kev.control.join("sync-entered").exists()
+    ));
+    let mut status = None;
+    assert!(kev_support::wait_until(
+        std::time::Duration::from_secs(5),
+        || {
+            status = first.try_wait().unwrap();
+            status.is_some()
+        }
+    ));
+    assert_eq!(status.and_then(|s| s.code()), Some(3));
+    let (out, v) = f.run_kev(&kev, &LOCAL_KEV);
+    let syncs = kev.lines("uv.log", "sync ").len();
+    let proof = runtime::shutdown_confirmed(&Layout::new(kev.dir()));
+    assert!(
+        !runtime::installation_in_progress(&Layout::new(kev.dir())).unwrap(),
+        "abandoned proof must block even after descriptor exclusion is gone"
+    );
+    fs::remove_file(kev.control.join("hold-sync")).unwrap();
+    assert!(kev_support::wait_until(
+        std::time::Duration::from_secs(5),
+        || kev.control.join("sync-finished").exists()
+    ));
+    assert_eq!(out.status.code(), Some(3), "{v}");
+    assert!(message(&v).contains("shutdown is unconfirmed"));
+    assert_eq!(syncs, 1);
+    assert!(proof.is_err());
+    assert!(kev.dir().join("server-ownership.json").exists());
+    assert!(!kev.dir().join("installed.json").exists());
+    assert!(!f.config_path().exists());
 }

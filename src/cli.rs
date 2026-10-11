@@ -17,6 +17,7 @@ use mailtriage::{
 };
 use serde_json::{json, Value};
 use std::{
+    ffi::OsString,
     fs,
     io::{self, IsTerminal, Read, Write},
     path::{Path, PathBuf},
@@ -207,6 +208,9 @@ struct SetupArg {
     provider: Option<String>,
     #[arg(long)]
     model: Option<String>,
+    /// The URL of a Kev server you run, ending in /v1/systemone (implies --provider kev).
+    #[arg(long, value_name = "URL")]
+    kev_url: Option<String>,
     #[arg(long, value_parser = KeyStore::ALL.map(KeyStore::flag))]
     key_store: Option<String>,
     /// Shell command that prints the key (stored as /bin/sh -c).
@@ -248,6 +252,8 @@ impl SetupArg {
             mailboxes: self.mailboxes.clone(),
             provider: self.provider.clone(),
             model: self.model.clone(),
+            kev_url: self.kev_url.clone(),
+            yes: self.yes,
             key_store: self.key_store.as_deref().and_then(KeyStore::from_flag),
             key_command: self.key_command.clone(),
             key_env: self.key_env.clone(),
@@ -649,6 +655,16 @@ pub fn run() -> i32 {
     };
     match execute(&cli) {
         Ok(mut value) => {
+            if matches!(
+                &cli.command,
+                Command::Kev {
+                    command: KevCommand::Mutate(_)
+                }
+            ) {
+                // Internal writer output is already streamed; no helper
+                // implementation result belongs in setup's progress flow.
+                return 0;
+            }
             // A result printed with a failure exit code, such as a `self
             // install` whose setup failed; the key itself is not printed.
             let code = value
@@ -683,6 +699,9 @@ fn open(path: &Path) -> Result<Service, CliError> {
 enum KevCommand {
     /// Run Kev until it has had no request for the idle time.
     Run(KevRunArg),
+    /// Internal bounded installation command supervisor.
+    #[command(hide = true)]
+    Mutate(KevMutationArg),
 }
 
 #[derive(Args)]
@@ -703,6 +722,22 @@ struct KevRunArg {
     check_seconds: u64,
     #[arg(long, default_value_t = 10)]
     stop_grace_seconds: u64,
+}
+
+#[derive(Args)]
+struct KevMutationArg {
+    #[arg(long)]
+    dir: PathBuf,
+    #[arg(long, value_parser = clap::value_parser!(i32).range(3..))]
+    guard_fd: i32,
+    #[arg(long)]
+    program: PathBuf,
+    #[arg(long)]
+    cwd: PathBuf,
+    #[arg(long)]
+    timeout_seconds: u64,
+    #[arg(last = true)]
+    arguments: Vec<OsString>,
 }
 
 fn execute(cli: &Cli) -> Result<Value, CliError> {
@@ -845,6 +880,17 @@ fn execute(cli: &Cli) -> Result<Value, CliError> {
             idle: Duration::from_secs(arg.idle_seconds),
             check: Duration::from_secs(arg.check_seconds),
             grace: Duration::from_secs(arg.stop_grace_seconds),
+        })
+        .map_err(service_error),
+        Command::Kev {
+            command: KevCommand::Mutate(arg),
+        } => kev::mutation::run(&kev::mutation::Args {
+            dir: arg.dir.clone(),
+            guard_fd: arg.guard_fd,
+            program: arg.program.clone(),
+            cwd: arg.cwd.clone(),
+            arguments: arg.arguments.clone(),
+            timeout: Duration::from_secs(arg.timeout_seconds),
         })
         .map_err(service_error),
         Command::Himalaya {

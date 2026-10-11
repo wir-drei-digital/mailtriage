@@ -1,7 +1,7 @@
 //! Starting local Kev on demand (Kev spec, `ensure_running`) and stopping
 //! it. Errors are `ProviderUnavailable`, so classification is skipped, not
 //! failed.
-use super::{control, Installed, Layout, CHECK, IDLE, START_TIMEOUT, STOP_GRACE};
+use super::{control, installation, Installed, Layout, CHECK, IDLE, START_TIMEOUT, STOP_GRACE};
 use crate::{
     domain::ProviderConfig,
     provider::{kev, ProviderUnavailable},
@@ -112,6 +112,12 @@ pub fn ensure_running(config: &ProviderConfig) -> Result<(), ProviderUnavailable
 /// request. Concurrent callers may both start a supervisor: the lock keeps
 /// one, and both wait until it answers.
 pub fn ensure_running_with(rt: &Runtime) -> Result<(), ProviderUnavailable> {
+    if !rt.layout.root().is_dir() {
+        return Err(ProviderUnavailable(NOT_INSTALLED.to_owned()));
+    }
+    let _startup =
+        installation::startup(&rt.layout).map_err(|e| ProviderUnavailable(e.to_string()))?;
+    // Read the shared receipt only after excluding mutations.
     let installed = Installed::read(&rt.layout)
         .filter(|i| i.matches(&rt.checkpoint))
         .ok_or_else(|| ProviderUnavailable(NOT_INSTALLED.to_owned()))?;
@@ -151,6 +157,24 @@ unsafe extern "C" {
 /// output closed. Ending its parent's process group leaves it running;
 /// an independent session does not escape systemd cgroups. A thread reaps it, so a long `watch` keeps no zombies.
 pub fn spawn_supervisor(rt: &Runtime, uv: &Path, allow_download: bool) -> std::io::Result<()> {
+    let _startup = installation::startup(&rt.layout)?;
+    spawn(rt, uv, allow_download, None)
+}
+
+pub(crate) fn spawn_install_supervisor(
+    rt: &Runtime,
+    uv: &Path,
+    guard: &installation::Guard,
+) -> std::io::Result<()> {
+    spawn(rt, uv, true, Some(guard))
+}
+
+fn spawn(
+    rt: &Runtime,
+    uv: &Path,
+    allow_download: bool,
+    guard: Option<&installation::Guard>,
+) -> std::io::Result<()> {
     shutdown_confirmed(&rt.layout)?;
     let mut command = Command::new(&rt.exe);
     command
@@ -176,6 +200,10 @@ pub fn spawn_supervisor(rt: &Runtime, uv: &Path, allow_download: bool) -> std::i
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    installation::clear_authorization(&mut command);
+    if let Some(guard) = guard {
+        guard.authorize(&rt.layout, &mut command)?;
+    }
     if allow_download {
         command.arg("--allow-download");
     }
@@ -206,6 +234,13 @@ fn lock_file(layout: &Layout) -> std::io::Result<fs::File> {
         .create(true)
         .truncate(false)
         .open(layout.lock())
+}
+
+/// Whether an installer or its supervised writer holds exclusive mutation
+/// ownership. Starts no process and creates no file. A busy layout is not
+/// ready even if an old receipt exists; server.lock may belong to a writer.
+pub fn installation_in_progress(layout: &Layout) -> std::io::Result<bool> {
+    installation::in_progress(layout)
 }
 
 /// Checks the supervisor lock without hiding filesystem or locking errors.
