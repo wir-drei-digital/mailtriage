@@ -298,11 +298,16 @@ pub fn shutdown_confirmed(layout: &Layout) -> std::io::Result<bool> {
 
 /// Read-only ownership inspection for doctor. A missing lock alongside
 /// ownership evidence is uncertain; doctor never creates a control file.
-fn inspect_shutdown(layout: &Layout) -> std::io::Result<bool> {
+enum ShutdownInspectionError {
+    LockAccess(std::io::Error),
+    Other(std::io::Error),
+}
+
+fn inspect_shutdown(layout: &Layout) -> Result<bool, ShutdownInspectionError> {
     match fs::metadata(layout.root()) {
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(true),
-        Err(e) => return Err(e),
+        Err(e) => return Err(ShutdownInspectionError::Other(e)),
     }
     let file = match OpenOptions::new()
         .read(true)
@@ -312,20 +317,20 @@ fn inspect_shutdown(layout: &Layout) -> std::io::Result<bool> {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return if layout.ownership().exists() {
-                Err(control::unconfirmed(layout))
+                Err(ShutdownInspectionError::Other(control::unconfirmed(layout)))
             } else {
                 Ok(true)
             };
         }
-        Err(e) => return Err(e),
+        Err(e) => return Err(ShutdownInspectionError::LockAccess(e)),
     };
     match file.try_lock_exclusive() {
         Ok(()) => {
-            control::confirm_terminated(layout, &file)?;
+            control::confirm_terminated(layout, &file).map_err(ShutdownInspectionError::Other)?;
             Ok(true)
         }
         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(false),
-        Err(e) => Err(e),
+        Err(e) => Err(ShutdownInspectionError::LockAccess(e)),
     }
 }
 
@@ -376,7 +381,20 @@ pub fn status(config: &ProviderConfig, key: Option<&str>) -> Value {
         }
         let stopped = match inspect_shutdown(&rt.layout) {
             Ok(stopped) => stopped,
-            Err(e) => {
+            Err(ShutdownInspectionError::LockAccess(e))
+                if e.kind() == std::io::ErrorKind::PermissionDenied =>
+            {
+                not_ready(
+                    &mut out,
+                    format!("cannot read and write {}: {e}", rt.layout.lock().display()),
+                    format!(
+                        "correct ownership and permissions for {}, then rerun `mailtriage doctor`",
+                        rt.layout.lock().display()
+                    ),
+                );
+                return out;
+            }
+            Err(ShutdownInspectionError::LockAccess(e) | ShutdownInspectionError::Other(e)) => {
                 not_ready(&mut out, e.to_string(), repair_ownership);
                 return out;
             }

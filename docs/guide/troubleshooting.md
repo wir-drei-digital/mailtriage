@@ -25,7 +25,7 @@ The first passes scan existing mail in batches, so a large inbox can take time. 
 
 Check `provider.key_present` and `provider.key_error` in the `doctor` result. Common causes are a locked key store or a key set only in your terminal's environment.
 
-With Kev, the reason names a missing installation, an occupied port, a failed start or an unreachable server. See [How it starts and stops](./local-kev.md#how-it-starts-and-stops) for the fixes. Your mail stays queued, and no retry attempt is used.
+With Kev, the reason can name a missing installation, an installation in progress, uncertain ownership, an occupied port, a failed start or an unreachable server. Wait for an active installation to finish. If ownership is uncertain, preserve the directory and its evidence while you verify that no server, writer or descendant remains. Follow [Repair an installation](./local-kev.md#repair-an-installation) for the next step. Your mail stays queued, and no retry attempt is used.
 
 Use [a key store](./provider.md#the-openrouter-key) for the background service. Once the key works, later passes classify the queued mail without losing retry attempts from the skipped passes.
 

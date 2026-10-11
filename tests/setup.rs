@@ -2389,12 +2389,106 @@ impl KevHost {
 const KEV_UPDATE: [&str; 6] = ["setup", "--update", "--yes", "--json", "--account", "work"];
 
 #[test]
+fn loopback_kev_key_only_updates_reject_every_key_flag_without_side_effects() {
+    let f = Fixture::new();
+    let stub = kev_support::Stub::start(kev_support::models_for("test/checkpoint"), None);
+    let (out, v) = f.run(
+        &[
+            "setup",
+            "--yes",
+            "--json",
+            "--himalaya-account",
+            "work",
+            "--kev-url",
+            &stub.endpoint(),
+        ],
+        "",
+    );
+    assert_eq!(out.status.code(), Some(0), "{v}");
+    let config = fs::read(f.config_path()).unwrap();
+    let requests = stub.requests();
+    let tool_calls = f.tool_calls();
+    for flags in [
+        vec!["--key-env", "KEV_API_KEY"],
+        vec!["--key-command", "printf fixture-key"],
+        vec!["--key-store", "pass"],
+        vec!["--key-stored"],
+    ] {
+        let (out, v) = f.run(&[&KEV_UPDATE[..], &flags].concat(), "");
+        assert_eq!(out.status.code(), Some(2), "{flags:?}: {v}");
+        assert!(
+            message(&v).contains("has no effect with a Kev server on this machine"),
+            "{v}"
+        );
+        assert!(message(&v).contains(flags[0]), "{v}");
+        assert_eq!(stub.requests(), requests, "provider probed after {flags:?}");
+        assert_eq!(f.tool_calls(), tool_calls, "key tool ran after {flags:?}");
+        assert_eq!(fs::read(f.config_path()).unwrap(), config);
+        assert!(!f.home.join(".local/share/mailtriage/kev").exists());
+    }
+}
+
+#[test]
+fn interactive_keyless_kev_choice_rejects_key_flag_before_server_check() {
+    let f = Fixture::new();
+    let stub = kev_support::Stub::start(kev_support::models_for("test/checkpoint"), None);
+    let input = format!("2\n{}\n\n", stub.endpoint());
+    let host = json!({"apple_silicon": false}).to_string();
+    let (out, v) = f.run_with(
+        &[
+            "setup",
+            "--interactive",
+            "--json",
+            "--himalaya-account",
+            "work",
+            "--account",
+            "work",
+            "--identity",
+            "work@example.test",
+            "--timezone",
+            "Europe/Berlin",
+            "--brief",
+            "Fixture",
+            "--mailbox",
+            "INBOX",
+            "--key-env",
+            "KEV_API_KEY",
+        ],
+        &input,
+        &[("MAILTRIAGE_TEST_KEV", &host)],
+    );
+    assert_eq!(out.status.code(), Some(2), "{v} {}", stderr(&out));
+    assert!(
+        message(&v).contains("--key-env has no effect with a Kev server on this machine"),
+        "{v}"
+    );
+    assert!(stub.requests().is_empty(), "provider was checked");
+    assert!(f.tool_calls().is_empty(), "key tool ran");
+    assert!(!f.config_path().exists());
+    assert!(!f.home.join(".local/share/mailtriage/kev").exists());
+}
+
+#[test]
 fn kev_partial_updates_retain_mode_and_endpoint() {
     let f = Fixture::new();
     let kev = f.add_kev();
     let (out, v) = f.run_kev(&kev, &LOCAL_KEV);
     assert_eq!(out.status.code(), Some(0), "{v}");
     let before = f.config()["provider"].clone();
+    let uv_calls = kev.log("uv.log");
+    let key_calls = f.tool_calls();
+    let (out, v) = f.run_kev(
+        &kev,
+        &[&KEV_UPDATE[..], &["--key-env", "KEV_API_KEY"]].concat(),
+    );
+    assert_eq!(out.status.code(), Some(2), "{v}");
+    assert!(
+        message(&v).contains("--key-env has no effect with a Kev server on this machine"),
+        "{v}"
+    );
+    assert_eq!(f.config()["provider"], before);
+    assert_eq!(kev.log("uv.log"), uv_calls, "managed install ran");
+    assert_eq!(f.tool_calls(), key_calls, "key tool ran");
     let (out, v) = f.run_kev(
         &kev,
         &[&KEV_UPDATE[..], &["--model", "jev-latest"]].concat(),

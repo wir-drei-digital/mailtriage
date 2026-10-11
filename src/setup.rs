@@ -1025,6 +1025,21 @@ fn menu(apple_silicon: bool) -> Vec<Choice> {
     menu
 }
 
+fn reject_keyless_key_flag(flag: Option<&str>, config: &ProviderConfig) -> Result<()> {
+    if let Some(flag) = flag.filter(|_| provider::key_account(config).is_none()) {
+        let reason = if config.kind == "kev" {
+            "a Kev server on this machine".to_owned()
+        } else {
+            format!("--provider {}", config.kind)
+        };
+        return Err(err(
+            2,
+            format!("{STEP_KEY}: {flag} has no effect with {reason}; drop it"),
+        ));
+    }
+    Ok(())
+}
+
 /// Step 5: the classifier; the key store when one was chosen now; local
 /// Kev installed or your own Kev server checked.
 fn classifier_step(
@@ -1059,25 +1074,6 @@ fn classifier_step(
         kev_url_rule(url)
             .map_err(|reason| err(2, format!("{STEP_CLASSIFIER}: --kev-url: {reason}")))?;
     }
-    if let (Some(flag), Some(kind)) = (key_flag, kind.as_deref()) {
-        if let Ok(adapter) = provider::provider_for(kind) {
-            let mut candidate = adapter.new_config();
-            if let Some(url) = &args.kev_url {
-                candidate.endpoint = url.trim().to_owned();
-                candidate.managed = None;
-            }
-            if adapter.key_account(&candidate).is_none() {
-                return Err(err(
-                    2,
-                    if kind == "kev" {
-                        format!("{STEP_KEY}: {flag} has no effect with a Kev server on this machine; drop it")
-                    } else {
-                        format!("{STEP_KEY}: {flag} has no effect with --provider {kind}; drop it")
-                    },
-                ));
-            }
-        }
-    }
     let flags = kind.is_some() || args.model.is_some() || key_flag.is_some();
     if kind.is_none() {
         if let Some(current) = current.filter(|c| c.kind == "kev") {
@@ -1100,12 +1096,10 @@ fn classifier_step(
                     });
                 }
             } else if current.managed.is_some() {
-                if let Some(flag) = key_flag {
-                    return Err(err(2, format!("{STEP_KEY}: {flag} has no effect with a Kev server on this machine; drop it")));
-                }
+                reject_keyless_key_flag(key_flag, current)?;
                 return local_kev_step(args, p, Some(current), probe);
             } else {
-                return kev_server_step(args, p, Some(current), flags, key_flag.is_some());
+                return kev_server_step(args, p, Some(current), flags, key_flag);
             }
         }
     }
@@ -1152,14 +1146,21 @@ fn classifier_step(
         None => Choice::OpenRouter,
     };
     match choice {
-        Choice::Fake => Ok(Classifier {
-            provider: registered("fake").new_config(),
-            store: None,
-            kev: None,
-        }),
+        Choice::Fake => {
+            let provider = registered("fake").new_config();
+            reject_keyless_key_flag(key_flag, &provider)?;
+            Ok(Classifier {
+                provider,
+                store: None,
+                kev: None,
+            })
+        }
         Choice::OpenRouter => openrouter_step(args, p, current, flags, key_flag.is_some()),
-        Choice::LocalKev => local_kev_step(args, p, current, probe),
-        Choice::KevServer => kev_server_step(args, p, current, flags, key_flag.is_some()),
+        Choice::LocalKev => {
+            reject_keyless_key_flag(key_flag, &registered("kev").new_config())?;
+            local_kev_step(args, p, current, probe)
+        }
+        Choice::KevServer => kev_server_step(args, p, current, flags, key_flag),
     }
 }
 
@@ -1243,7 +1244,7 @@ fn kev_server_step(
     p: &mut Prompter,
     current: Option<&ProviderConfig>,
     flags: bool,
-    key_flag: bool,
+    key_flag: Option<&str>,
 ) -> Result<Classifier> {
     let adapter = registered("kev");
     let current = current.filter(|c| c.kind == "kev" && c.managed.is_none());
@@ -1269,6 +1270,7 @@ fn kev_server_step(
         provider.model = nonempty(model)
             .map_err(|reason| err(2, format!("{STEP_CLASSIFIER}: --model: {reason}")))?;
     }
+    reject_keyless_key_flag(key_flag, &provider)?;
     let store = match adapter.key_account(&provider) {
         None => {
             provider.api_key_command = None;
@@ -1278,7 +1280,7 @@ fn kev_server_step(
         Some(account) => {
             // A current remote server's key stays unless a key flag moves it.
             let kept = current.filter(|c| adapter.key_account(c).is_some());
-            if flags && !key_flag && kept.is_some() {
+            if flags && key_flag.is_none() && kept.is_some() {
                 None
             } else {
                 let current = kept.map(|c| current_store(c, account));

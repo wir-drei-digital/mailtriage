@@ -18,6 +18,7 @@ use mailtriage::{
 use serde_json::{json, Value};
 use std::{
     fs,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Command,
     thread,
@@ -253,6 +254,37 @@ fn doctor_reports_installation_busy_before_inspecting_server_lock() {
     );
     assert_eq!(kev["running"], false, "{kev}");
     assert!(!f.layout.lock().exists(), "doctor created a server lock");
+}
+
+#[test]
+fn doctor_names_nonwritable_server_lock_without_claiming_ready_or_resetting_it() {
+    let f = Fixture::new();
+    f.install(CHECKPOINT);
+    fs::write(f.layout.lock(), "fixture lock\n").unwrap();
+    fs::set_permissions(f.layout.lock(), fs::Permissions::from_mode(0o400)).unwrap();
+    let before = fs::read(f.layout.lock()).unwrap();
+    let kev = f.doctor(&f.managed_config())["provider"]["kev"].clone();
+    assert_eq!(kev["ready"], false, "{kev}");
+    assert!(
+        kev["error"]
+            .as_str()
+            .unwrap()
+            .contains(f.layout.lock().to_str().unwrap()),
+        "{kev}"
+    );
+    let fix = kev["fix"].as_str().unwrap();
+    assert!(
+        fix.contains("ownership") && fix.contains("permissions"),
+        "{kev}"
+    );
+    assert!(fix.contains("mailtriage doctor"), "{kev}");
+    assert!(!fix.contains("backup"), "{kev}");
+    assert_eq!(fs::read(f.layout.lock()).unwrap(), before);
+    assert_eq!(
+        fs::metadata(f.layout.lock()).unwrap().permissions().mode() & 0o777,
+        0o400
+    );
+    assert!(f.runs().is_empty(), "doctor started Kev");
 }
 
 #[test]
