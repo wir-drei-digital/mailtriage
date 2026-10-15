@@ -18,7 +18,7 @@ use std::{
 };
 use update_support::{
     archive, download_path, fake_binary, release_archive, run, sha256_hex, Reply, Sandbox, Server,
-    LIST,
+    CURRENT_STABLE, LIST,
 };
 
 const RUNNING: &str = env!("CARGO_PKG_VERSION");
@@ -447,7 +447,7 @@ fn a_current_cli_still_updates_an_older_tray() {
     let server = Server::start();
     publish(
         &server,
-        RUNNING,
+        CURRENT_STABLE,
         TrayAsset::Good,
         Path::new("/dev/null"),
         true,
@@ -462,11 +462,14 @@ fn a_current_cli_still_updates_an_older_tray() {
     );
     assert_eq!(
         update["tray"],
-        json!({"action": "updated", "from": "0.0.1", "to": RUNNING, "error": null})
+        json!({"action": "updated", "from": "0.0.1", "to": CURRENT_STABLE, "error": null})
     );
-    assert_eq!(version_of(&tray), format!("mailtriage-tray {RUNNING}"));
     assert_eq!(
-        server.count(&download_path(RUNNING, &cli_archive(RUNNING))),
+        version_of(&tray),
+        format!("mailtriage-tray {CURRENT_STABLE}")
+    );
+    assert_eq!(
+        server.count(&download_path(CURRENT_STABLE, &cli_archive(CURRENT_STABLE))),
         0
     );
     assert_eq!(
@@ -488,7 +491,7 @@ fn a_held_lock_is_exit_5_when_only_the_tray_needs_it() {
     let server = Server::start();
     publish(
         &server,
-        RUNNING,
+        CURRENT_STABLE,
         TrayAsset::Good,
         Path::new("/dev/null"),
         true,
@@ -548,7 +551,7 @@ fn a_skip_that_cannot_be_recorded_is_a_warning() {
     let server = Server::start();
     publish(
         &server,
-        RUNNING,
+        CURRENT_STABLE,
         TrayAsset::Good,
         Path::new("/dev/null"),
         true,
@@ -598,7 +601,7 @@ fn a_tray_that_may_not_be_replaced_fails_the_tray_part_with_a_backoff() {
     let server = Server::start();
     publish(
         &server,
-        RUNNING,
+        CURRENT_STABLE,
         TrayAsset::Good,
         Path::new("/dev/null"),
         true,
@@ -616,7 +619,7 @@ fn a_tray_that_may_not_be_replaced_fails_the_tray_part_with_a_backoff() {
     assert_eq!(out["update"]["action"], "current");
     assert_eq!(
         out["update"]["tray"],
-        json!({"action": "failed", "from": "0.0.1", "to": RUNNING, "error": refusal})
+        json!({"action": "failed", "from": "0.0.1", "to": CURRENT_STABLE, "error": refusal})
     );
     assert_eq!(server.count("/download/"), 0, "{:?}", server.requests());
     assert_eq!(version_of(&tray), "mailtriage-tray 0.0.1");
@@ -638,7 +641,7 @@ fn a_tray_that_may_not_be_replaced_is_an_error_event_in_watch() {
     let server = Server::start();
     let assets = publish(
         &server,
-        RUNNING,
+        CURRENT_STABLE,
         TrayAsset::Good,
         Path::new("/dev/null"),
         false,
@@ -650,8 +653,8 @@ fn a_tray_that_may_not_be_replaced_is_an_error_event_in_watch() {
         &sandbox,
         &cache_with(
             &assets,
-            RUNNING,
-            json!({"mailtriage": assets[&cli_archive(RUNNING)], "mailtriage-tray": assets[&tray_archive(RUNNING)]}),
+            CURRENT_STABLE,
+            json!({"mailtriage": assets[&cli_archive(CURRENT_STABLE)], "mailtriage-tray": assets[&tray_archive(CURRENT_STABLE)]}),
             "2999-01-01T00:00:00Z",
             json!({}),
         ),
@@ -684,7 +687,7 @@ fn watch_installs_an_older_tray_from_the_cache_after_its_backoff() {
     let server = Server::start();
     let assets = publish(
         &server,
-        RUNNING,
+        CURRENT_STABLE,
         TrayAsset::Good,
         Path::new("/dev/null"),
         false,
@@ -696,8 +699,8 @@ fn watch_installs_an_older_tray_from_the_cache_after_its_backoff() {
         &sandbox,
         &cache_with(
             &assets,
-            RUNNING,
-            json!({"mailtriage": assets[&cli_archive(RUNNING)], "mailtriage-tray": assets[&tray_archive(RUNNING)]}),
+            CURRENT_STABLE,
+            json!({"mailtriage": assets[&cli_archive(CURRENT_STABLE)], "mailtriage-tray": assets[&tray_archive(CURRENT_STABLE)]}),
             "2999-01-01T00:00:00Z",
             json!({
                 key(&sandbox.bin): {"version": RUNNING, "at": now, "last_error": null, "failures": 0, "next_attempt_at": null},
@@ -710,7 +713,7 @@ fn watch_installs_an_older_tray_from_the_cache_after_its_backoff() {
         ),
     );
     let mut watch = sandbox.watch(&server, &config);
-    wait_for_tray(&tray, RUNNING);
+    wait_for_tray(&tray, CURRENT_STABLE);
     watch.wait_passes(2);
     assert!(watch.events("restarting").is_empty(), "{:#?}", watch.seen);
     assert!(watch.events("error").is_empty(), "{:#?}", watch.seen);
@@ -718,7 +721,7 @@ fn watch_installs_an_older_tray_from_the_cache_after_its_backoff() {
     assert_eq!(code, Some(0));
     assert_eq!(server.count(LIST), 0, "{:?}", server.requests());
     let entry = &sandbox.cache()["installs"][key(&tray)];
-    assert_eq!(entry["version"], RUNNING);
+    assert_eq!(entry["version"], CURRENT_STABLE);
     assert_eq!(
         (entry["last_error"].clone(), entry["failures"].clone()),
         (Value::Null, json!(0))
@@ -734,7 +737,7 @@ fn a_tray_failure_in_watch_is_an_error_event_with_a_backoff() {
     let server = Server::start();
     let assets = publish(
         &server,
-        RUNNING,
+        CURRENT_STABLE,
         TrayAsset::BadSum,
         Path::new("/dev/null"),
         false,
@@ -745,8 +748,8 @@ fn a_tray_failure_in_watch_is_an_error_event_with_a_backoff() {
         &sandbox,
         &cache_with(
             &assets,
-            RUNNING,
-            json!({"mailtriage": assets[&cli_archive(RUNNING)], "mailtriage-tray": assets[&tray_archive(RUNNING)]}),
+            CURRENT_STABLE,
+            json!({"mailtriage": assets[&cli_archive(CURRENT_STABLE)], "mailtriage-tray": assets[&tray_archive(CURRENT_STABLE)]}),
             "2999-01-01T00:00:00Z",
             json!({}),
         ),
@@ -757,7 +760,7 @@ fn a_tray_failure_in_watch_is_an_error_event_with_a_backoff() {
         error["update"]["message"],
         format!(
             "installing the mailtriage-tray update failed: checksum mismatch for {}",
-            tray_archive(RUNNING)
+            tray_archive(CURRENT_STABLE)
         )
     );
     watch.wait_passes(3);
@@ -765,7 +768,7 @@ fn a_tray_failure_in_watch_is_an_error_event_with_a_backoff() {
     let (code, _) = watch.stop();
     assert_eq!(code, Some(0));
     assert_eq!(version_of(&tray), "mailtriage-tray 0.0.1");
-    let path = download_path(RUNNING, &tray_archive(RUNNING));
+    let path = download_path(CURRENT_STABLE, &tray_archive(CURRENT_STABLE));
     assert_eq!(server.count(&path), 1, "the backoff holds the next try off");
     let entry = &sandbox.cache()["installs"][key(&tray)];
     assert_eq!(entry["failures"], 1);
@@ -781,7 +784,7 @@ fn watch_refreshes_a_release_recorded_without_the_tray_then_installs_it() {
     let server = Server::start();
     let assets = publish(
         &server,
-        RUNNING,
+        CURRENT_STABLE,
         TrayAsset::Good,
         Path::new("/dev/null"),
         true,
@@ -793,20 +796,20 @@ fn watch_refreshes_a_release_recorded_without_the_tray_then_installs_it() {
         &sandbox,
         &cache_with(
             &assets,
-            RUNNING,
-            json!({"mailtriage": assets[&cli_archive(RUNNING)]}),
+            CURRENT_STABLE,
+            json!({"mailtriage": assets[&cli_archive(CURRENT_STABLE)]}),
             &tomorrow,
             json!({}),
         ),
     );
     let mut watch = sandbox.watch(&server, &config);
-    wait_for_tray(&tray, RUNNING);
+    wait_for_tray(&tray, CURRENT_STABLE);
     watch.wait_passes(2);
     watch.stop();
     assert_eq!(server.count(LIST), 1);
     assert_eq!(
         sandbox.cache()["release"]["archives"]["mailtriage-tray"]["name"],
-        tray_archive(RUNNING)
+        tray_archive(CURRENT_STABLE)
     );
 }
 
@@ -818,7 +821,7 @@ fn an_offline_watcher_does_not_refresh_a_release_without_the_tray_every_pass() {
     let server = Server::start();
     let assets = publish(
         &server,
-        RUNNING,
+        CURRENT_STABLE,
         TrayAsset::Good,
         Path::new("/dev/null"),
         false,
@@ -831,8 +834,8 @@ fn an_offline_watcher_does_not_refresh_a_release_without_the_tray_every_pass() {
         &sandbox,
         &cache_with(
             &assets,
-            RUNNING,
-            json!({"mailtriage": assets[&cli_archive(RUNNING)]}),
+            CURRENT_STABLE,
+            json!({"mailtriage": assets[&cli_archive(CURRENT_STABLE)]}),
             &tomorrow,
             json!({}),
         ),

@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use std::{fs, os::unix::fs::PermissionsExt, path::Path, time::Duration};
 use update_support::{
     download_path, fake_binary, platform, release_archive, run, sha256_hex, Reply, Sandbox, Server,
+    CURRENT_STABLE,
 };
 
 const RUNNING: &str = env!("CARGO_PKG_VERSION");
@@ -128,7 +129,7 @@ fn update_installs_a_newer_release_and_lists_the_services() {
 fn update_reports_current_without_downloading() {
     let sandbox = Sandbox::new();
     let server = Server::start();
-    server.publish(RUNNING, &release_archive(b"never used"));
+    server.publish(CURRENT_STABLE, &release_archive(b"never used"));
     let (code, v, _) = run(sandbox.command(&server).args(["update", "--json"]));
     assert_eq!(code, Some(0), "{v}");
     assert_eq!(
@@ -265,7 +266,7 @@ fn a_binary_that_is_not_replaceable_but_current_is_current() {
         (&shared, "unsafe_permissions"),
     ] {
         let server = Server::start();
-        server.publish(RUNNING, &release_archive(b"never used"));
+        server.publish(CURRENT_STABLE, &release_archive(b"never used"));
         let (code, v, stderr) = run(sandbox.command(&server).args(["update", "--json"]));
         assert_eq!(code, Some(0), "{reason}: {v} {stderr}");
         assert_eq!(

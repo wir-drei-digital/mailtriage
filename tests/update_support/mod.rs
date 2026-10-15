@@ -17,6 +17,16 @@ use std::{
 /// The first page of the release list, as `Endpoint::releases_url` asks.
 pub const LIST: &str = "/repos/wir-drei-digital/mailtriage/releases?per_page=30";
 
+/// A stable release no newer than the CLI under test, but newer than the
+/// old 0.0.1 tray fixtures. Release candidates must not masquerade as stable
+/// tags: discovery deliberately rejects them. Stable builds still exercise
+/// the exact-current-version case.
+pub const CURRENT_STABLE: &str = if env!("CARGO_PKG_VERSION_PRE").is_empty() {
+    env!("CARGO_PKG_VERSION")
+} else {
+    "0.0.2"
+};
+
 /// One canned answer.
 #[derive(Clone)]
 pub struct Reply {
