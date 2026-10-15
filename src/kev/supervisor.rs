@@ -378,6 +378,13 @@ fn a_replacement_installer_cannot_pass_stop_before_stale_ticket_validation() {
         Ok(None)
     });
     assert!(result.is_err(), "a stale ticket must not start a child");
-    assert!(super::runtime::shutdown_confirmed(&layout).unwrap());
+    // Other tests fork concurrently. A forked child can briefly retain this
+    // lock's open-file description until exec closes its inherited FD, even
+    // after start_lock_with has returned. Use the bounded stop check rather
+    // than requiring immediate lock availability.
+    assert!(matches!(
+        super::runtime::stop(&layout, Duration::from_secs(2)).unwrap(),
+        super::runtime::StopOutcome::AlreadyStopped | super::runtime::StopOutcome::Stopped
+    ));
     assert!(!layout.ownership().exists());
 }
