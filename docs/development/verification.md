@@ -74,7 +74,17 @@ Final local automated verification after the configurable-idle changes:
 | `cargo test --workspace --locked --offline` | 902 passed, 7 ignored, zero failures |
 | `cargo build --release --locked --offline -p mailtriage` | Pass, macOS arm64 CLI |
 
-The ignored tests are not counted as executed live checks. Release-candidate installation, publication, cross-platform release verification, and the post-release install check remain separate steps in [Releases](./releases.md). No release was published as part of these checks.
+The ignored tests are not counted as executed live checks. Release-candidate and publication results are recorded separately below, following [Releases](./releases.md).
+
+## First release (2026-10-15)
+
+The [v0.1.0-rc.1 candidate](https://github.com/wir-drei-digital/mailtriage/releases/tag/v0.1.0-rc.1) passed native release builds, tests, smoke checks, and archive validation on Linux amd64, Linux arm64, and macOS arm64. Its downloaded macOS CLI and tray archives passed SHA-256 and layout checks, and both executables reported `0.1.0-rc.1`. The downloaded CLI initialized an isolated fake-provider configuration and classified a sample, then started the existing managed Kev installation and classified a fresh synthetic message with `kev-latest` in 15.29 seconds.
+
+The complete local candidate suite passed with 902 tests passed, 7 ignored, and zero failures. Candidate preparation also corrected test-only assumptions about transient fork-inherited file locks and stable release fixtures during prerelease builds. The stable version commit changes only package versions; its [native CI](https://github.com/wir-drei-digital/mailtriage/actions/runs/38787875388) and [Dovecot integration checks](https://github.com/wir-drei-digital/mailtriage/actions/runs/38787875341) passed before tagging `v0.1.0`.
+
+The [v0.1.0 stable release](https://github.com/wir-drei-digital/mailtriage/releases/tag/v0.1.0) was published as Latest after its [three-platform release workflow](https://github.com/wir-drei-digital/mailtriage/actions/runs/38788877716) passed. The [post-release installer check](https://github.com/wir-drei-digital/mailtriage/actions/runs/38789925603) installed the published release and a private Himalaya successfully on macOS arm64, Linux amd64, and Linux arm64.
+
+The release workflow skipped its Homebrew update because `HOMEBREW_TAP_TOKEN` was not configured. The v0.1.0 formula was then rendered from the published checksum manifest, checked with `ruby -c` and `brew style`, and published directly using the repository's tap publishing script. The tap was initialized with the README and test workflow maintained in `packaging/homebrew/tap/`. The [tap installation tests](https://github.com/wir-drei-digital/homebrew-tap/actions/runs/38790209402) passed on macOS and Ubuntu. Future automatic tap updates still require that release-workflow secret.
 
 ## Live gates
 
