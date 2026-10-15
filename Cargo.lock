@@ -2804,7 +2804,7 @@ dependencies = [
 
 [[package]]
 name = "mailtriage"
-version = "0.1.0-rc.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2828,7 +2828,7 @@ dependencies = [
 
 [[package]]
 name = "mailtriage-tray"
-version = "0.1.0-rc.1"
+version = "0.1.0"
 dependencies = [
  "arboard",
  "chrono",

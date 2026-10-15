@@ -1,6 +1,6 @@
 [package]
 name = "mailtriage"
-version = "0.1.0-rc.1"
+version = "0.1.0"
 edition = "2021"
 description = "Local email classification and attention queries for humans and agents"
 license = "MIT"
