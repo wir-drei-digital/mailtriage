@@ -716,7 +716,7 @@ struct KevRunArg {
     uv: PathBuf,
     #[arg(long)]
     allow_download: bool,
-    #[arg(long, default_value_t = 900)]
+    #[arg(long, default_value_t = kev::IDLE.as_secs())]
     idle_seconds: u64,
     #[arg(long, default_value_t = 30)]
     check_seconds: u64,

@@ -42,23 +42,23 @@ Those changes happen on your mail server. Every mail client connected to that ma
 
 ## Get started
 
-You need macOS on Apple silicon or Linux on amd64 or arm64, an IMAP mailbox, and an OpenRouter API key.
+You need macOS on Apple silicon or Linux on amd64 or arm64, an IMAP mailbox, and a classifier. Choose OpenRouter with an API key, [local Kev](./guide/local-kev.md) on an Apple Silicon Mac without a key, or [your own Kev server](./guide/provider.md#run-your-own-kev-server).
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/wir-drei-digital/mailtriage/main/install.sh | sh
 ```
 
-The installer offers to run setup, which connects your mailbox and key. Setup starts with a filing preview that makes no mailbox changes.
+The installer offers to run setup, which connects your mailbox and chosen classifier. Setup starts with a filing preview that makes no mailbox changes.
 
 [Installation options](./guide/install.md) · [Setup walkthrough](./guide/setup.md) · [Troubleshooting](./guide/troubleshooting.md)
 
 ## How it works
 
-mailtriage reads mail through Himalaya and asks an AI model through OpenRouter to choose a category, urgency and whether you need to act. With live filing enabled, it uses those decisions to organize your mailbox. It also keeps a local record that you or an agent can inspect and correct from the terminal.
+mailtriage reads mail through Himalaya and asks your chosen classifier to choose a category, urgency and whether you need to act. With live filing enabled, it uses those decisions to organize your mailbox. It also keeps a local record that you or an agent can inspect and correct from the terminal.
 
 <span id="what-stays-and-what-leaves"></span>
 
-**Message content is sent to OpenRouter for classification.** The worker runs locally, but the default classifier is an external service. See [where your data goes](./guide/introduction.md#where-your-data-goes).
+**Where message content goes depends on your classifier.** OpenRouter receives it when you choose Jev. Local Kev keeps classification on your Mac, while your own Kev server receives it at its configured address. See [where your data goes](./guide/introduction.md#where-your-data-goes).
 
 <span id="what-it-never-does"></span>
 

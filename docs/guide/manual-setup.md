@@ -1,6 +1,6 @@
 # Manual setup
 
-Write the configuration yourself when you want full control, for example on a server. You set up Himalaya, create the configuration, provide the key, check the result and run a first pass. Install mailtriage first ([Install](./install.md)).
+Write the configuration yourself when you want full control, for example on a server. You set up Himalaya, create the configuration, provide a key when the classifier needs one, check the result and run a first pass. Install mailtriage first ([Install](./install.md)).
 
 ## 1. Set up Himalaya
 
@@ -56,7 +56,11 @@ mailtriage init --config ~/.config/mailtriage/mailtriage.json --json
 
 The first command that opens an account stores its binding: `identity`, the Himalaya account name, `imap.server` and the other non-secret IMAP settings. A later change to any of them is refused with exit code 5 (see [Account binding](./reference.md#account-binding)).
 
+Choose the provider in your configuration using [Classifier and models](./provider.md). For local Kev, use [its setup flow](./local-kev.md#set-it-up) to install the model and Python environment; `init` alone does not install them.
+
 ## 3. Provide the OpenRouter key
+
+This step applies to OpenRouter. Local or loopback Kev needs no key; a Kev server on another machine needs its own key under the [Kev server rules](./provider.md#run-your-own-kev-server).
 
 Set `provider.api_key_command` to a command that prints the key, or set `provider.api_key_env` and the variable it names. On macOS, store the key in the Keychain (the command prompts for it):
 
@@ -104,7 +108,7 @@ Look for `ready: true`, `transport.configured: true` and `provider.key_present: 
 
 `doctor` runs the key command to check it, so on macOS the first run may show a Keychain access dialog. For Kev, it may request `GET /v1/models`; it never starts local Kev. For OpenRouter and `fake`, it makes no provider request.
 
-It logs in to the IMAP server only when filing is on, to add a `filing` block with the server's capabilities, folders and problems. The first `sync` is therefore the first full test of the IMAP login and the API key.
+It logs in to the IMAP server only when filing is on, to add a `filing` block with the server's capabilities, folders and problems. The first `sync` is therefore the first full test of the IMAP login and classification provider.
 
 ## 5. First run
 
@@ -134,4 +138,4 @@ It logs in to the IMAP server only when filing is on, to add a `filing` block wi
 
 5. To move mail into category folders, follow the [filing rollout](./filing.md#rollout).
 
-The first passes work through the existing mail in each watched folder, oldest UID first. Each pass scans at most `--limit` UIDs per folder and classifies at most `--limit` messages. Every classification is one OpenRouter request.
+The first passes work through the existing mail in each watched folder, oldest UID first. Each pass scans at most `--limit` UIDs per folder and classifies at most `--limit` messages. Every classification uses the configured provider. OpenRouter makes an API request, your own Kev server receives a request, and local Kev runs inference on your Mac.

@@ -18,7 +18,10 @@ fn on_disk(path: &Path) -> Value {
 }
 
 fn default_json() -> Value {
-    serde_json::to_value(config::default_config()).unwrap()
+    let mut c = config::default_config();
+    c.policy.choice_mode = mailtriage::domain::ChoiceMode::Strict;
+    c.schema_version = 3;
+    serde_json::to_value(c).unwrap()
 }
 
 fn mailtriage(dir: &Path, args: &[&str]) -> (Option<i32>, Value) {
@@ -40,7 +43,9 @@ fn mailtriage(dir: &Path, args: &[&str]) -> (Option<i32>, Value) {
 fn schema_3_is_written_with_an_explicit_updates() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("mailtriage.json");
-    config::save(&path, &config::default_config()).unwrap();
+    let mut c = config::default_config();
+    c.policy.choice_mode = mailtriage::domain::ChoiceMode::Strict;
+    config::save(&path, &c).unwrap();
     let written = on_disk(&path);
     assert_eq!(written["schema_version"], 3);
     assert_eq!(written["updates"], "auto");
@@ -95,19 +100,20 @@ fn the_updates_mode_is_read_without_the_rest_of_validation() {
         config::read_updates_mode(&path).unwrap(),
         UpdateMode::Notify
     );
-    c["schema_version"] = json!(5);
+    c["schema_version"] = json!(6);
     let path = write(dir.path(), &c);
     assert!(config::read_updates_mode(&path).is_err());
     assert!(config::read_updates_mode(&dir.path().join("missing.json")).is_err());
 }
 
 #[test]
-fn init_and_categories_apply_write_schema_3_and_keep_updates() {
+fn init_and_categories_apply_keep_updates_and_best_guess() {
     let dir = tempfile::tempdir().unwrap();
     let (code, _) = mailtriage(dir.path(), &["init", "--json"]);
     assert_eq!(code, Some(0));
     let path = dir.path().join("mailtriage.json");
-    assert_eq!(on_disk(&path)["schema_version"], 3);
+    assert_eq!(on_disk(&path)["schema_version"], 5);
+    assert_eq!(on_disk(&path)["policy"]["choice_mode"], "best_guess");
     assert_eq!(on_disk(&path)["updates"], "auto");
 
     let mut c = on_disk(&path);
@@ -136,7 +142,8 @@ fn init_and_categories_apply_write_schema_3_and_keep_updates() {
     assert_eq!(code, Some(0), "{v}");
     let written = on_disk(&path);
     assert_eq!(written["updates"], "off");
-    assert_eq!(written["schema_version"], 3);
+    assert_eq!(written["schema_version"], 5);
+    assert_eq!(written["policy"]["choice_mode"], "best_guess");
     assert_eq!(
         written["accounts"]["work"]["categories"][0]["description"],
         "People I write with"

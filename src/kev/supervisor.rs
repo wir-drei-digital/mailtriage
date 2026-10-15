@@ -155,6 +155,7 @@ pub fn run(args: &RunArgs) -> Result<Value> {
         args.idle
     };
     let mut checked = Instant::now();
+    let mut idle_shutdown_guard = None;
     let action = loop {
         if let Some(status) = child.try_wait()? {
             end(&mut child, args.grace)?;
@@ -170,6 +171,10 @@ pub fn run(args: &RunArgs) -> Result<Value> {
         if checked.elapsed() >= args.check {
             checked = Instant::now();
             if layout.idle_for() >= idle {
+                let Some(guard) = super::runtime::idle_guard(&layout, idle) else {
+                    continue;
+                };
+                idle_shutdown_guard = Some(guard);
                 note(
                     &mut log,
                     &format!(
@@ -185,6 +190,10 @@ pub fn run(args: &RunArgs) -> Result<Value> {
         thread::sleep(Duration::from_millis(200));
     };
     ownership.finish(&layout)?;
+    // Publish confirmed shutdown and release supervisor ownership before a
+    // waiting request can probe the port and start the next supervisor.
+    drop(lock);
+    drop(idle_shutdown_guard);
     Ok(json!({"schema_version": 1, "kev": {"action": action}}))
 }
 

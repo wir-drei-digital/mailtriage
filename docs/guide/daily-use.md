@@ -20,6 +20,8 @@ Or keep checking in a terminal until you press Ctrl-C:
 mailtriage watch --account work --interval-seconds 60
 ```
 
+With local Kev, these checks start the model only when there is classification work. Empty polls do not reset its [configurable idle timer](./local-kev.md#change-the-idle-timeout), which defaults to 5 minutes.
+
 Use one worker per account: the service, `watch`, or individual `sync` runs. Running two at once causes a lock conflict.
 
 The first checks work through existing mail. A large inbox may take many passes. Mail that enters and leaves a watched folder between checks will not be seen.

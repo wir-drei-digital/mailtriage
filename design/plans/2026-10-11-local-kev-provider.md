@@ -5061,7 +5061,7 @@ Expect `classified`, not `cached`, to establish that Kev answered while offline.
 
 - [ ] **Step 6: Idle stop and restart**
 
-Wait 16 minutes without classifying, then:
+Wait 6 minutes without classifying, then:
 
 ```sh
 lsof -nP -iTCP:8009 -sTCP:LISTEN
@@ -5071,7 +5071,7 @@ printf '\nRestart probe %s\n' "$(date +%s)" >> /tmp/kev-live/restart.eml
 /usr/bin/time -p $MT --config /tmp/kev-live/mailtriage.json classify --account kevlive --input /tmp/kev-live/restart.eml --format rfc822 --json | jq .outcome
 ```
 
-Expected: before classification nothing listens, and recent log lines include `stopping Kev after 900 seconds without a request` and `Kev exited (...)`. The fresh input returns `classified`, not `cached`; a new `starting Kev: --run ...` line and elapsed time show that this command restarted Kev and ran inference. Keep filing off throughout.
+Expected: before classification nothing listens, and recent log lines include `stopping Kev after 300 seconds without a request` and `Kev exited (...)`. The fresh input returns `classified`, not `cached`; a new `starting Kev: --run ...` line and elapsed time show that this command restarted Kev and ran inference. Keep filing off throughout.
 
 - [ ] **Step 7: Resume and clean up**
 

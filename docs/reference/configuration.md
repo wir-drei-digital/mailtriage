@@ -25,7 +25,7 @@ Here is a configuration for one account. The tables below explain each part.
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 5,
   "updates": "auto",
   "state_dir": "state",
   "provider": {
@@ -37,6 +37,9 @@ Here is a configuration for one account. The tables below explain each part.
     "timeout_seconds": 30
   },
   "policy": {
+    "choice_mode": "best_guess",
+    "best_guess_confidence_min": 0.25,
+    "best_guess_margin_min": 0.05,
     "choice_confidence_min": 0.75,
     "action_yes_min": 0.8,
     "action_no_max": 0.2,
@@ -55,7 +58,7 @@ Here is a configuration for one account. The tables below explain each part.
         {
           "id": "correspondence",
           "name": "Correspondence",
-          "description": "Direct conversations with people, including customers and colleagues",
+          "description": "Direct personal or work conversations: questions, replies, collaboration, scheduling, and support exchanges. Includes informational conversations that need no reply. Excludes automated notifications and unsolicited sales outreach.",
           "examples": [],
           "catch_all": false,
           "folder": "INBOX"
@@ -63,35 +66,35 @@ Here is a configuration for one account. The tables below explain each part.
         {
           "id": "transactions",
           "name": "Transactions",
-          "description": "Invoices, receipts, orders and account activity",
+          "description": "Confirmations and records of purchases or financial activity: orders, receipts, invoices, payments, refunds, subscriptions billed or renewed, account funding, and delivery updates for an order. Excludes login, verification, and security notifications.",
           "examples": [],
           "catch_all": false
         },
         {
           "id": "updates",
           "name": "Updates",
-          "description": "Automated status, ticket and service notifications",
+          "description": "Automated notifications about an account, service, or system: verification codes, login links, activation, password resets, security alerts, usage limits, workflow results, outages, and status changes. Includes factual product changes affecting an existing service. Excludes purchase records and marketing offers.",
           "examples": [],
           "catch_all": false
         },
         {
           "id": "newsletters",
           "name": "Newsletters",
-          "description": "Editorial mail and subscriptions",
+          "description": "Editorial publications and recurring informational digests: articles, analysis, community news, and curated reading. Their main purpose is informing or educating. Excludes operational notifications and messages mainly promoting a purchase, upgrade, or offer.",
           "examples": [],
           "catch_all": false
         },
         {
           "id": "promotions",
           "name": "Promotions",
-          "description": "Offers and marketing",
+          "description": "Marketing and sales messages: offers, discounts, product pitches, upgrade invitations, promotional events, and unsolicited sales outreach. Includes personalized sales emails and subscribed marketing. Excludes ordinary conversations and factual notices about an existing account.",
           "examples": [],
           "catch_all": false
         },
         {
           "id": "other",
           "name": "Other",
-          "description": "Mail that fits none of the other categories",
+          "description": "Mail whose main purpose fits none of the other categories. Use only when no defined category fits; verification, login, activation, and service notifications belong in Updates.",
           "examples": [],
           "catch_all": true
         }
@@ -126,7 +129,7 @@ Top level:
 
 | Field | What to set |
 | --- | --- |
-| `schema_version` | `3`, or `4` while an account has `filing.reply_queue` on, as written by `init`, `setup` and every command that edits the file. mailtriage reads schemas 1 to 4. Releases before automatic updates read only 1 and 2, and releases before the reply queue only 1 to 3, so they refuse a newer file instead of rewriting it without `updates` or `reply_queue`. |
+| `schema_version` | `5` for choice-selection settings or an explicit local Kev idle timeout, including new best-guess configs; otherwise `4` while an account has `filing.reply_queue` on, or `3`. mailtriage reads schemas 1 to 5. Older binaries refuse schema 5 instead of silently losing the selection settings. Set it to 5 when manually adding best-guess settings or `managed.idle_seconds`. Commands that save the file write the required version automatically. |
 | `updates` | What `watch` does about new releases: `"auto"` installs them, `"notify"` only reports them, `"off"` makes no network call. A config without the key means `"auto"`. See [Updates](./updates.md). |
 | `state_dir` | Directory for the SQLite database and normalized message text. mailtriage creates it with mode 0700. Keep it on a local filesystem. |
 | `provider` | The classification provider, below. |
@@ -142,6 +145,7 @@ Account (`accounts.NAME`):
 | `brief` | A few sentences about the recipient: role, whose mail matters, what usually needs action. Sent to the provider with every message. Replace the `init` placeholder. |
 | `taxonomy_revision` | Leave as is. `categories apply` advances it. |
 | `categories` | The categories to choose from, below. |
+| `choice_mode` | Optional `"strict"` or `"best_guess"` override for this account's category and urgency. Omit it to use `policy.choice_mode`. Requires schema 5. |
 | `engine` | The Himalaya settings, below. Without an engine the account can only `classify` files. |
 | `filing` | Filing settings, below. Optional; filing is off by default. |
 
@@ -183,27 +187,36 @@ Provider (`provider`):
 | `api_key_command` | Optional. A command that prints the API key, as a list of program and arguments, such as `["/usr/bin/security", "find-generic-password", "-s", "mailtriage", "-a", "openrouter", "-w"]`. The first element must be a non-empty program. When set, it is the only key source. See [Key command rules](./provider.md#key-command-rules). Ignored for `fake` and for a Kev server on this machine. |
 | `api_key_env` | The name of the environment variable that holds the API key, such as `OPENROUTER_API_KEY`: uppercase letters `A` to `Z`, digits and `_` only. This is the variable's name, never the key. For `openrouter` and a Kev server off this machine, required unless `api_key_command` is set; it may then be empty or missing. Ignored for `fake` and for a Kev server on this machine. |
 | `timeout_seconds` | Time limit for each provider request, 1 to 300. |
-| `managed` | Only for `kev`, written by setup for [local Kev](./provider.md#local-kev): `{"checkpoint": "jaredpalmer/kev-4b@v1.0"}`. Leave it out for a server you run. |
+| `managed` | Only for `kev`, written by setup for [local Kev](./provider.md#local-kev): `{"checkpoint": "jaredpalmer/kev-4b@v1.0", "idle_seconds": 300}`. `idle_seconds` is optional, defaults to 300 (5 minutes), and accepts whole numbers from 1 to 86400. It applies on the next start and requires schema 5 when present. Leave `managed` out for a server you run. |
 
 This is what goes to the classifier. For each message the provider receives the account's `identity`, `timezone` and `brief`, each category's `name` and `description`, and the message's sender, To and Cc addresses, subject, date and body text up to `policy.max_body_chars`.
 
 mailtriage never falls back to another provider. A failed request marks the message failed, and a later pass retries it.
 
-Policy (`policy`), with the `init` defaults:
+### Policy selection
+
+Policy (`policy`), with the `init` defaults. A missing `choice_mode` reads as `strict` for compatibility; new `init` and `setup` files explicitly select `best_guess`.
 
 | Field | Default | Effect |
 | --- | --- | --- |
 | `review_mode` | `true` | Every classification gets the reason `review_mode`, so all open mail is listed in the attention view. Turn it off only after you have checked the results on your own mail. |
-| `choice_confidence_min` | `0.75` | A category or urgency below this confidence is left empty, and the message is listed for attention. 0 to 1. |
+| `choice_mode` | `"best_guess"` in new configs; `"strict"` when omitted | Selection policy for both category and urgency. An account can override the mode. |
+| `choice_confidence_min` | `0.75` | Strict mode only: a category or urgency below this confidence is left empty. 0 to 1. |
+| `best_guess_confidence_min` | `0.25` | Best guess only: minimum confidence for each category or urgency choice. 0 to 1. |
+| `best_guess_margin_min` | `0.05` | Best guess only: minimum probability lead over the runner-up, in absolute units (0.05 is 5 percentage points). 0 to 1. Ties are always withheld, even with a zero minimum. |
 | `action_yes_min` | `0.8` | `action_required` becomes `true` at or above this probability. |
 | `action_no_max` | `0.2` | `action_required` becomes `false` at or below this probability. Between the two values it stays empty. Must be lower than `action_yes_min`. |
 | `max_body_chars` | `20000` | Body characters kept and sent to the provider, 1 to 1000000. A longer body is cut, and the message is marked incomplete (`input_incomplete`). Incomplete messages are not filed automatically. |
 | `max_attempts` | `5` | Failed fetch or classification attempts before mailtriage stops retrying a message, 1 to 100. The wait before a retry starts at 1 minute and doubles per attempt, up to 64 minutes. |
 | `freshness_hours` | `24` | Open messages whose classification is older than this are classified again. With OpenRouter, each open message costs one request per period. Must be positive. |
 
-Changing `brief`, `timezone`, a category's `id`, `description`, `examples` or `catch_all`, the `provider` block (except `api_key_command`) or the `policy` block queues every open message for classification again.
+Both modes withhold missing answers (`category_missing`, `urgency_missing`) and choices below their confidence floor (`category_low_confidence`, `urgency_low_confidence`). Best guess also withholds choices whose probability lead is too small (`category_ambiguous`, `urgency_ambiguous`). It requires the provider's chosen label to be the unique probability leader; it does not replace that label with a different one. Original scores are retained.
 
-Setting, changing or removing `api_key_command` does not.
+Accepted best-guess fields appear in `classification.best_guess_fields` as `"category"` and/or `"urgency"`. The field is omitted when empty and is also stored in `item.model_decision` from `read`. Effective results remove markers for fields with manual overrides. A marker alone does not add an uncertainty reason or change review or filing rules. Best guess does not affect action-required thresholds. The defaults are provisional settings, not accuracy claims.
+
+Changing `brief`, `timezone`, a category's `id`, `description`, `examples` or `catch_all`, the `provider` block (except `api_key_command` and `managed.idle_seconds`) or the `policy` block queues every open message for classification again. Changing an account's effective `choice_mode` queues that account's open mail again. Manual corrections survive; done mail stays done.
+
+Setting, changing or removing `api_key_command` does not. Changing only `provider.managed.idle_seconds` also does not reclassify mail; it affects the next local Kev process start.
 
 Filing (`accounts.NAME.filing`), described in [Filing into folders](./filing.md):
 

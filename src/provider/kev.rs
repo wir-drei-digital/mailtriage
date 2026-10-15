@@ -83,6 +83,12 @@ impl DecisionProvider for Kev {
             if managed.checkpoint.trim().is_empty() {
                 bail!("provider.managed.checkpoint cannot be empty");
             }
+            if managed
+                .idle_seconds
+                .is_some_and(|seconds| !(1..=86400).contains(&seconds))
+            {
+                bail!("provider.managed.idle_seconds must be between 1 and 86400");
+            }
         }
         Ok(())
     }
@@ -112,6 +118,7 @@ impl DecisionProvider for Kev {
             timeout_seconds: 60,
             managed: Some(ManagedKev {
                 checkpoint: DEFAULT_CHECKPOINT.to_owned(),
+                idle_seconds: None,
             }),
         }
     }
@@ -150,11 +157,13 @@ impl DecisionProvider for Kev {
         key: Option<&str>,
     ) -> Result<Decision> {
         self.validate(config)?;
-        if config.managed.is_some() {
+        let _activity = if config.managed.is_some() {
             // Its errors are `ProviderUnavailable`: the job goes back
             // without an attempt.
-            crate::kev::runtime::ensure_running(config)?;
-        }
+            Some(crate::kev::runtime::begin_request(config)?)
+        } else {
+            None
+        };
         let key = if is_local(&config.endpoint) {
             None
         } else {

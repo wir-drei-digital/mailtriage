@@ -592,9 +592,10 @@ latest schema `LATEST` and a newer one `LATEST + 1`.
 that needs action in its source folder until it is answered or marked done
 (spec: `design/specs/2026-10-08-reply-queue-design.md`).
 
-A config
-that turns it on is written as `schema_version` 4; every other config stays
-3. `config::SCHEMA_VERSION` (4) is the newest schema a binary reads;
+A config that turns it on needs at least `schema_version` 4. Choice-selection
+settings and explicit Kev idle timeouts, including the new best-guess default, require schema 5. A strict
+config without choice settings, an explicit Kev idle timeout, or the reply queue stays on schema 3.
+`config::SCHEMA_VERSION` (5) is the newest schema a binary reads;
 `config::written_schema` is the one a write produces.
 
 Schema v9 (migration 9) adds the table `read_approvals(account, message_id,

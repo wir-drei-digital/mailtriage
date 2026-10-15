@@ -52,7 +52,7 @@ pub fn install(
             format!("{STEP}: {e}; check the provider block, then run `mailtriage setup` again"),
         )
     })?;
-    // Setup checks stop requests frequently; runtime's normal idle remains 900s.
+    // Setup checks stop requests frequently; the runtime keeps the configured idle.
     rt.check = Duration::from_secs(1);
     let layout = &rt.layout;
     let guard = installation::Guard::acquire(layout).map_err(|e| lifecycle_error(layout, e))?;

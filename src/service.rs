@@ -1012,6 +1012,7 @@ impl Service {
                 classified_at: String::new(),
                 raw: Value::Null,
                 reasons: vec![],
+                best_guess_fields: vec![],
             },
         };
         c.state = row.status.clone();
@@ -1037,9 +1038,19 @@ impl Service {
             .and_then(|id| account.categories.iter().find(|cat| &cat.id == id))
             .map(|cat| cat.name.clone());
         let placement = self.placement_item(row, &account)?;
-        Ok(
-            json!({"id":row.id,"account":row.account,"from":row.envelope.get("from").cloned().unwrap_or(json!([])),"subject":row.envelope.get("subject").cloned().unwrap_or(json!("")),"sent_at":row.envelope.get("sent_at").cloned().unwrap_or(Value::Null),"received_at":Value::Null,"first_observed_at":row.observed_at,"classification":{"state":c.state,"urgency":c.urgency,"category_id":c.category_id,"category_name":category_name,"action_required":c.action_required,"taxonomy_revision":c.taxonomy_revision,"model":c.model,"classified_at":c.classified_at,"reasons":c.reasons},"overrides":row.overrides,"review_state":row.review_state,"attention":!reasons.is_empty(),"attention_reasons":reasons,"error":row.error,"source_present":source_present,"placement":placement}),
-        )
+        c.best_guess_fields.retain(|field| {
+            let key = if field == "category" {
+                "category_id"
+            } else {
+                field
+            };
+            row.overrides.get(key).is_none()
+        });
+        let mut item = json!({"id":row.id,"account":row.account,"from":row.envelope.get("from").cloned().unwrap_or(json!([])),"subject":row.envelope.get("subject").cloned().unwrap_or(json!("")),"sent_at":row.envelope.get("sent_at").cloned().unwrap_or(Value::Null),"received_at":Value::Null,"first_observed_at":row.observed_at,"classification":{"state":c.state,"urgency":c.urgency,"category_id":c.category_id,"category_name":category_name,"action_required":c.action_required,"taxonomy_revision":c.taxonomy_revision,"model":c.model,"classified_at":c.classified_at,"reasons":c.reasons},"overrides":row.overrides,"review_state":row.review_state,"attention":!reasons.is_empty(),"attention_reasons":reasons,"error":row.error,"source_present":source_present,"placement":placement});
+        if !c.best_guess_fields.is_empty() {
+            item["classification"]["best_guess_fields"] = json!(c.best_guess_fields);
+        }
+        Ok(item)
     }
     /// The `placement` object of an item (spec "Commands"); null without a
     /// placement. `folder` is the home while the location is known;
@@ -1955,9 +1966,15 @@ fn generation(config: &AppConfig, account: &AccountConfig) -> Result<String> {
     let mut provider = serde_json::to_value(&config.provider)?;
     if let Some(fields) = provider.as_object_mut() {
         fields.remove("api_key_command");
+        if let Some(managed) = fields.get_mut("managed").and_then(Value::as_object_mut) {
+            // Process lifetime does not change classification semantics.
+            managed.remove("idle_seconds");
+        }
     }
+    let mut policy = config.policy.clone();
+    policy.choice_mode = account.choice_mode.unwrap_or(policy.choice_mode);
     Ok(hash(&serde_json::to_vec(
-        &json!({"rubric_version":1,"normalizer_version":1,"taxonomy_revision":account.taxonomy_revision,"categories":category_semantics(&account.categories),"brief":account.brief,"timezone":account.timezone,"provider":provider,"policy":config.policy}),
+        &json!({"rubric_version":1,"normalizer_version":1,"taxonomy_revision":account.taxonomy_revision,"categories":category_semantics(&account.categories),"brief":account.brief,"timezone":account.timezone,"provider":provider,"policy":policy}),
     )?))
 }
 fn hash(bytes: &[u8]) -> String {
@@ -2323,6 +2340,33 @@ fn binding_identity(account: &AccountConfig, engine: Option<&dyn MailEngine>) ->
 mod golden {
     use crate::domain::HimalayaConfig;
 
+    fn legacy_config() -> crate::domain::AppConfig {
+        let mut value = serde_json::to_value(crate::config::default_config()).unwrap();
+        value["schema_version"] = serde_json::json!(3);
+        // Preserve the original taxonomy as well as the original policy:
+        // these fixed hashes characterize existing installations.
+        for (category, description) in value["accounts"]["work"]["categories"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .zip([
+                "Direct conversations with people",
+                "Receipts, orders and account activity",
+                "Status and service updates",
+                "Editorial mail and subscriptions",
+                "Offers and marketing",
+                "Mail outside the other categories",
+            ])
+        {
+            category["description"] = serde_json::json!(description);
+        }
+        value["policy"]
+            .as_object_mut()
+            .unwrap()
+            .remove("choice_mode");
+        crate::config::from_bytes(&serde_json::to_vec(&value).unwrap()).unwrap()
+    }
+
     #[test]
     fn binding_identity_is_unchanged_for_legacy_himalaya_accounts() {
         let dir = tempfile::tempdir().unwrap();
@@ -2350,7 +2394,7 @@ mod golden {
 
     #[test]
     fn generation_hash_is_unchanged_by_filing_and_folder_fields() {
-        let mut cfg = crate::config::default_config();
+        let mut cfg = legacy_config();
         let expected = "6dfd7bf30e6bf1c0b27ee97af991ecf21dc5ac0400044c2f3adbda7f79d37514";
         assert_eq!(
             super::generation(&cfg, &cfg.accounts["work"]).unwrap(),
@@ -2367,7 +2411,7 @@ mod golden {
 
     #[test]
     fn generation_hash_ignores_the_key_command() {
-        let mut cfg = crate::config::default_config();
+        let mut cfg = legacy_config();
         cfg.provider.api_key_command = Some(vec![
             "/usr/bin/security".into(),
             "find-generic-password".into(),
@@ -2382,7 +2426,7 @@ mod golden {
     /// `model` is; without `managed` the hash is today's.
     #[test]
     fn generation_hash_includes_the_managed_checkpoint() {
-        let mut cfg = crate::config::default_config();
+        let mut cfg = legacy_config();
         let plain = super::generation(&cfg, &cfg.accounts["work"]).unwrap();
         assert_eq!(
             plain,
@@ -2390,9 +2434,15 @@ mod golden {
         );
         let with = |checkpoint: &str| crate::domain::ManagedKev {
             checkpoint: checkpoint.into(),
+            idle_seconds: None,
         };
         cfg.provider.managed = Some(with("jaredpalmer/kev-4b@v1.0"));
         let four = super::generation(&cfg, &cfg.accounts["work"]).unwrap();
+        cfg.provider.managed.as_mut().unwrap().idle_seconds = Some(1200);
+        assert_eq!(
+            super::generation(&cfg, &cfg.accounts["work"]).unwrap(),
+            four
+        );
         cfg.provider.managed = Some(with("jaredpalmer/kev-9b@v1.0"));
         let nine = super::generation(&cfg, &cfg.accounts["work"]).unwrap();
         assert_ne!(plain, four);

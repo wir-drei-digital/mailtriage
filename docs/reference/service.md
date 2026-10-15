@@ -140,7 +140,7 @@ Two configs can name the same account. The service of an account belongs to one 
 
 On a server you may prefer a system-wide unit that runs as a dedicated user.
 
-First give the config a key command: set `provider.api_key_command` to a command that prints the key for that user, for example from `pass` or another key store (see [The OpenRouter key](./provider.md#the-openrouter-key)). The unit then holds no secret.
+For OpenRouter or a Kev server off this machine, give the config a key command: set `provider.api_key_command` to a command that prints the key for that user, for example from `pass` or another key store (see [The OpenRouter key](./provider.md#the-openrouter-key)). The unit then holds no secret.
 
 A systemd example, in `/etc/systemd/system/mailtriage-work.service`:
 

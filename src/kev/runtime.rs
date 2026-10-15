@@ -63,7 +63,11 @@ impl Runtime {
             start_timeout: super::test_kev()
                 .start_seconds
                 .map_or(START_TIMEOUT, Duration::from_secs),
-            idle: IDLE,
+            idle: config
+                .managed
+                .as_ref()
+                .and_then(|m| m.idle_seconds)
+                .map_or(IDLE, Duration::from_secs),
             check: CHECK,
         })
     }
@@ -111,10 +115,56 @@ pub fn ensure_running(config: &ProviderConfig) -> Result<(), ProviderUnavailable
     ensure_running_with(&Runtime::for_config(config)?)
 }
 
+/// A shared activity lock excludes idle shutdown through loading and inference.
+/// File locks disappear if a caller crashes; completion starts a fresh idle period.
+pub(crate) struct RequestGuard(fs::File);
+
+impl RequestGuard {
+    fn acquire(layout: &Layout) -> Result<Self, ProviderUnavailable> {
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(layout.last_used())
+            .map_err(|e| ProviderUnavailable(format!("cannot record local Kev activity: {e}")))?;
+        FileExt::lock_shared(&file)
+            .map_err(|e| ProviderUnavailable(format!("cannot lock local Kev activity: {e}")))?;
+        Ok(Self(file))
+    }
+}
+
+impl Drop for RequestGuard {
+    fn drop(&mut self) {
+        let _ = self.0.set_modified(std::time::SystemTime::now());
+    }
+}
+
+/// Protect a managed classification until its HTTP response has been handled.
+pub(crate) fn begin_request(config: &ProviderConfig) -> Result<RequestGuard, ProviderUnavailable> {
+    ensure_ready_with(&Runtime::for_config(config)?)
+}
+
+/// Idle shutdown holds this exclusive lock through child termination, so a
+/// new caller waits, then probes and restarts the server after it has stopped.
+pub(super) fn idle_guard(layout: &Layout, idle: Duration) -> Option<fs::File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(layout.last_used())
+        .ok()?;
+    FileExt::try_lock_exclusive(&file).ok()?;
+    (layout.idle_for() >= idle).then_some(file)
+}
+
 /// Kev answers on its port, started here if nothing does; records a
 /// request. Concurrent callers may both start a supervisor: the lock keeps
 /// one, and both wait until it answers.
 pub fn ensure_running_with(rt: &Runtime) -> Result<(), ProviderUnavailable> {
+    ensure_ready_with(rt).map(drop)
+}
+
+fn ensure_ready_with(rt: &Runtime) -> Result<RequestGuard, ProviderUnavailable> {
     if !rt.layout.root().is_dir() {
         return Err(ProviderUnavailable(NOT_INSTALLED.to_owned()));
     }
@@ -125,11 +175,12 @@ pub fn ensure_running_with(rt: &Runtime) -> Result<(), ProviderUnavailable> {
         .filter(|i| i.matches(&rt.checkpoint))
         .ok_or_else(|| ProviderUnavailable(NOT_INSTALLED.to_owned()))?;
     shutdown_confirmed(&rt.layout).map_err(|e| ProviderUnavailable(e.to_string()))?;
+    let activity = RequestGuard::acquire(&rt.layout)?;
     match probe(rt) {
         Probe::Ready => {
             shutdown_confirmed(&rt.layout).map_err(|e| ProviderUnavailable(e.to_string()))?;
             rt.layout.touch_last_used();
-            return Ok(());
+            return Ok(activity);
         }
         Probe::Other => return Err(rt.port_taken()),
         Probe::Nothing => {}
@@ -142,7 +193,7 @@ pub fn ensure_running_with(rt: &Runtime) -> Result<(), ProviderUnavailable> {
             Probe::Ready => {
                 shutdown_confirmed(&rt.layout).map_err(|e| ProviderUnavailable(e.to_string()))?;
                 rt.layout.touch_last_used();
-                return Ok(());
+                return Ok(activity);
             }
             Probe::Other => return Err(rt.port_taken()),
             Probe::Nothing if Instant::now() >= deadline => return Err(rt.did_not_start()),

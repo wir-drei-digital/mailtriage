@@ -195,6 +195,9 @@ pub fn serve_from_env() {
             Ok((stream, _)) => {
                 last = Instant::now();
                 if let Some(line) = respond_with_hook(stream, &models, None, &|| {
+                    if let Ok(delay) = fs::read_to_string(control.join("delay-post")) {
+                        thread::sleep(Duration::from_secs(delay.trim().parse().unwrap()));
+                    }
                     if control.join("kill-supervisor-on-post").exists() {
                         let owner = fs::read_to_string(control.join("supervisor.pid")).unwrap();
                         assert!(fixture_signal(owner.trim().parse().unwrap(), 9));

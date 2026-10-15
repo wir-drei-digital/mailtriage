@@ -22,7 +22,7 @@ use std::{
 pub const TAG: &str = "kev-1.0";
 pub const REPO: &str = "https://github.com/jaredpalmer/kev.git";
 /// How long Kev may go without a request before the supervisor stops it.
-pub const IDLE: Duration = Duration::from_secs(15 * 60);
+pub const IDLE: Duration = Duration::from_secs(5 * 60);
 /// How often the supervisor looks.
 pub const CHECK: Duration = Duration::from_secs(30);
 /// How long Kev has after TERM before it gets KILL.

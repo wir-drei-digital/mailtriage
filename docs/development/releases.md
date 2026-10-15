@@ -14,6 +14,7 @@ stable release within about a day, and their background services switch to it
 between passes (see [Updates](../guide/updates.md)). Before you push a `vX.Y.Z`
 tag:
 
+- Complete the relevant [live verification checks](./verification.md), including local Kev idle shutdown and fresh restart when shipping managed Kev changes. Record completed and pending outcomes separately.
 - Try the build on one machine first with a release candidate tag,
   `vX.Y.Z-rc.N`. It is published as a prerelease, which mailtriage never
   installs automatically; install it there by hand from its archive.

@@ -22,14 +22,16 @@ Live filing needs a verified mail provider. **None of the listed providers has a
 
 ## Where your data goes
 
-With the default OpenRouter provider, mailtriage sends message headers and body text to OpenRouter's Decisions API for classification. It also sends your address, time zone, brief and category definitions. The [configuration reference](../reference/configuration.md#a-complete-configuration) describes the fields and text limits.
+With the OpenRouter provider, mailtriage sends message headers and body text to OpenRouter's Decisions API for classification. It also sends your address, time zone, brief and category definitions. The [configuration reference](../reference/configuration.md#a-complete-configuration) describes the fields and text limits.
+
+With [local Kev](./local-kev.md), classification stays on an Apple Silicon Mac and works offline after installation. With [your own Kev server](./provider.md#run-your-own-kev-server), classification goes to the server you configure.
 
 Your mailbox remains on your mail server. The local database holds message text, decisions and your corrections. The offline `fake` provider sends nothing, but uses simple keyword rules rather than an AI model.
 
 ## Get started
 
 1. [Install mailtriage](./install.md).
-2. [Run setup](./setup.md) to connect your mailbox and OpenRouter key.
+2. [Run setup](./setup.md) to connect your mailbox and choose a classifier.
 3. [Review your mail](./daily-use.md) and adjust your categories.
 
 The examples use an account named `work`. Replace it with the name you choose during setup.

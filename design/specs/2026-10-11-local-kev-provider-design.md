@@ -33,7 +33,7 @@ The model weights never enter this repository.
 | Model | `model: "kev-latest"`, the name Kev serves its checkpoint under. |
 | Key | Needed only for a server off this machine. `key_account()` takes the config to say so. |
 | URL rule | `http` only for `127.0.0.1`, `localhost` and `[::1]`; any other host needs `https` and a key. A managed endpoint must be on this machine. |
-| Lifecycle | On demand: a supervisor process starts Kev and stops it after 15 minutes without a request. No second launchd agent. |
+| Lifecycle | On demand: a supervisor process starts Kev and stops it after the configured idle timeout (5 minutes by default). No second launchd agent. |
 | Platforms | Managed: macOS on arm64. Your own server: everywhere mailtriage runs. |
 | Install location | `<data dir>/mailtriage/kev/`, next to the private Himalaya. The weights go to `kev/hf` (`HF_HOME`), so one directory holds everything. |
 | Compatibility | OpenRouter and `fake` configs, requests, generation hashes and outputs are unchanged. |
@@ -141,7 +141,7 @@ The supervisor. It:
 2. starts `uv run --frozen --extra serve python -m kev.serve --run <checkpoint>
    --host 127.0.0.1 --port <port>` in `kev/src`, with `HF_HOME=kev/hf` and
    `HF_HUB_OFFLINE=1`, output appended to `<logs>/kev.log`;
-3. every 30 seconds, stops Kev when `last-used` is older than 15 minutes: TERM,
+3. every 30 seconds, stops Kev when `last-used` is older than the configured idle timeout (5 minutes by default): TERM,
    then KILL after 10 seconds;
 4. exits when Kev exits, for any reason, logging the exit status.
 

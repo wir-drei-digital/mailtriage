@@ -21,7 +21,7 @@ Setup asks one question at a time. Press Enter to accept the value shown in brac
 | Filing | Keep `dry_run`. It previews moves without changing your mailbox. |
 | Background service | Accept if you want mailtriage to check for new mail automatically. |
 
-A new account gets six categories: Correspondence, Transactions, Updates, Newsletters, Promotions and Other. You can [edit them later](./categories.md).
+A new account gets six categories: Correspondence, Transactions, Updates, Newsletters, Promotions and Other. Their [descriptions](./categories.md#default-category-boundaries) include examples and exclusions. New configurations use [best-guess selection](./configuration.md#category-and-urgency-selection) for category and urgency; existing configurations without a mode keep strict behavior. You can edit categories and selection settings later. Local Kev uses a [configurable 5-minute idle timeout](./local-kev.md#change-the-idle-timeout).
 
 Setup never enables live filing. Automatic updates are on by default; [change the update mode](./updates.md#modes) if needed.
 
@@ -57,7 +57,7 @@ mailtriage sync --account work --limit 20
 mailtriage list --account work
 ```
 
-Do not run `sync` alongside the service for the same account. The first passes work through existing mail, so a large inbox takes time. Each classification uses an OpenRouter request.
+Do not run `sync` alongside the service for the same account. The first passes work through existing mail, so a large inbox takes time. Each classification uses your chosen provider: an API request for OpenRouter or your own Kev server, or local inference for local Kev.
 
 ## Updating an account
 

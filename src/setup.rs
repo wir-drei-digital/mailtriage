@@ -208,6 +208,7 @@ pub fn run(args: &SetupArgs, path: &Path, p: &mut Prompter) -> Result<Value> {
     // 5. Classifier.
     let current = (!matches!(intent, Intent::Create)).then(|| cfg.provider.clone());
     let probe = AccountConfig {
+        choice_mode: previous.as_ref().and_then(|a| a.choice_mode),
         identity: identity.clone(),
         timezone: timezone.clone(),
         brief: brief.clone(),
@@ -240,6 +241,7 @@ pub fn run(args: &SetupArgs, path: &Path, p: &mut Prompter) -> Result<Value> {
     cfg.accounts.insert(
         name.clone(),
         AccountConfig {
+            choice_mode: previous.as_ref().and_then(|a| a.choice_mode),
             identity,
             timezone,
             brief,

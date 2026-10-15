@@ -274,6 +274,7 @@ fn missing_answers_become_reasons() {
 #[test]
 fn uncertainty_and_review_mode_remain_attention_items() {
     let mut c = config::default_config();
+    c.policy.choice_mode = mailtriage::domain::ChoiceMode::Strict;
     let a = &c.accounts["work"];
     let result = policy::apply(
         checked(decision("correspondence", "low", 0.5, 0.5), a),

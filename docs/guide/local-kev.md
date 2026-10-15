@@ -4,10 +4,12 @@ You can sort mail without sending its text to an outside classifier or getting a
 
 Kev answers the same three questions as OpenRouter's Jev, with a choice, confidence and probabilities for each label. Your categories, urgency and attention list work the same way.
 
+New setups use [best-guess selection](./configuration.md#category-and-urgency-selection) for category and urgency: confidence must reach 0.25 and the chosen label must lead the runner-up by 5 percentage points. Existing configs keep strict mode unless you change it. If every category is empty, inspect `item.model_decision.raw.answers` with `read` and check the mode and thresholds before changing your category descriptions. A successful classification can still leave uncertain fields empty.
+
 ::: warning Important
 - Local Kev needs a Mac with Apple Silicon (M1 or later). On another machine, [run your own Kev server](./provider.md#run-your-own-kev-server).
 - Kev-4B is less accurate than Jev in [Kev's published comparisons](https://github.com/jaredpalmer/kev/blob/kev-1.0/README.md#what-to-expect). Expect more uncertain mail. Check its choices for a few days before turning on live filing.
-- Kev starts when mail needs classifying and stops after 15 minutes without a request. The first message after a pause waits for the model to load. The 10 to 30 second estimate still needs a live check with mailtriage.
+- Kev starts when mail needs classifying and stops after 5 minutes without a request. The first message after a pause waits for the model to load. See the [recorded live check](../development/verification.md#local-kev-2026-10-15) for observed startup and warm-request timings.
 :::
 
 ## What you need
@@ -41,11 +43,26 @@ mailtriage setup --update --yes --account work --provider kev
 
 ## How it starts and stops
 
-When `sync`, `watch` or the background service has mail to classify, mailtriage starts Kev and waits for it to load. After 15 minutes without a request, Kev stops and frees memory. The service needs no separate Kev job.
+When `sync`, `watch` or the background service has mail to classify, mailtriage starts Kev and waits for it to load. After 5 minutes without a request, Kev stops and frees memory. Model loading and active classifications are protected from idle shutdown; the countdown starts after work finishes. The supervisor checks every 30 seconds, so shutdown can occur up to 30 seconds later. Checking for mail every minute does not keep Kev awake when there is nothing to classify. The service needs no separate Kev job.
+
+### Change the idle timeout
+
+Set `idle_seconds` inside your existing `provider.managed` block, and set the top-level `schema_version` to `5`:
+
+```json
+"managed": {
+  "checkpoint": "jaredpalmer/kev-4b@v1.0",
+  "idle_seconds": 300
+}
+```
+
+The default is **300 seconds (5 minutes)** when omitted. Use a whole number from 1 to 86400; for example, `1200` keeps Kev warm for 20 minutes. The supervisor checks every 30 seconds, so it can stop up to 30 seconds after the timeout.
+
+A new value takes effect the next time Kev starts. All configs share one local Kev process; the config that starts it supplies the timeout for that process. Reusing a running process keeps its existing timeout. Changing only `idle_seconds` does not queue mail for classification again. Setup preserves the setting when updating a local Kev account. Setup's initial model download has its own longer deadline and is not cut short by a small idle setting.
 
 Kev listens on `127.0.0.1:8009` and needs no key. Ordinary starts keep both uv and the model hub offline after setup. Setup itself can download dependencies and weights.
 
-Kev uses about 12 GB of memory according to its published guidance. [Kev's Apple M5 benchmark](https://github.com/jaredpalmer/kev/blob/kev-1.0/README.md#what-to-expect) reports 721 ms for five questions; this is an upstream result, not a mailtriage measurement. Speed and memory on this Mac still need the live check.
+Kev uses about 12 GB of memory according to its published guidance. [Kev's Apple M5 benchmark](https://github.com/jaredpalmer/kev/blob/kev-1.0/README.md#what-to-expect) reports 721 ms for five questions; this is an upstream result, not a mailtriage measurement. A [live mailtriage check on 2026-10-15](../development/verification.md#local-kev-2026-10-15) measured 7.81 seconds for the first post-setup request and 0.74 to 0.79 seconds for two warm requests on a 48 GiB Apple Silicon Mac. These include classification as well as startup where applicable. The final runtime also shut down after 300 idle seconds and restarted for a fresh classification in 11.15 seconds. Memory was not measured.
 
 If Kev cannot start, classification waits. Your mail stays queued, no retry attempt is used, and the next pass tries again. The result of `sync` gives a reason:
 

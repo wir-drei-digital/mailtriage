@@ -13,6 +13,7 @@ fn legacy_json(dir: &std::path::Path) -> serde_json::Value {
     .unwrap();
     let mut c = serde_json::to_value(config::default_config()).unwrap();
     c["schema_version"] = json!(1);
+    c["policy"].as_object_mut().unwrap().remove("choice_mode");
     c["accounts"]["work"]["himalaya"] = json!({
         "binary": "himalaya", "config": "h.toml", "account": "work",
         "mailboxes": ["INBOX"], "expected_version": "2.1.0",
@@ -154,7 +155,7 @@ fn source_mailboxes_are_checked_when_filing_is_on() {
 fn unsupported_schema_versions_are_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c.json");
-    for version in [0, 5] {
+    for version in [0, 6] {
         let mut c = serde_json::to_value(config::default_config()).unwrap();
         c["schema_version"] = json!(version);
         fs::write(&path, c.to_string()).unwrap();
@@ -174,6 +175,7 @@ fn the_reply_queue_alone_makes_a_config_schema_4() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c.json");
     let mut c = config::default_config();
+    c.policy.choice_mode = mailtriage::domain::ChoiceMode::Strict;
     config::save(&path, &c).unwrap();
     let on_disk: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     assert_eq!(on_disk["schema_version"], 3);

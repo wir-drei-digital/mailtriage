@@ -15,7 +15,7 @@ mailtriage watch --account work --limit 100 --interval-seconds 60 --json
 
 `sync` runs one bounded pass: it scans the watched folders, fetches new messages, classifies queued ones and, with filing on, files them. `--limit` is 1 to 500 (default 100).
 
-Its result reports `discovered`, `fetched`, `classified`, `cached`, `failed`, `pending` and `scan_errors`, plus `coverage`, with filing on `filing`, and, when the OpenRouter key is unavailable, `classification` (`{"skipped": true, "reason": "..."}`; see [The OpenRouter key](./provider.md#the-openrouter-key)).
+Its result reports `discovered`, `fetched`, `classified`, `cached`, `failed`, `pending` and `scan_errors`, plus `coverage`, with filing on `filing`, and, when a required key or the Kev server is unavailable, `classification` (`{"skipped": true, "reason": "..."}`; see [The OpenRouter key](./provider.md#the-openrouter-key)).
 
 `watch` repeats the pass every `--interval-seconds` (1 to 86400, default 60) until Ctrl-C or SIGTERM. Run it under a supervisor that restarts it, such as the [background service](./service.md).
 
@@ -59,6 +59,8 @@ mailtriage export --account work --json > mailtriage-export.json
 `correct` sets an override for one decision: `--urgency`, `--category` (a category `id`) or `--action-required`. Say an invoice ended up in `correspondence`: `correct --category transactions` puts it in the right category, and it stays there.
 
 `--clear FIELD` removes the override, and the model's decision applies again. Overrides survive reclassification. With filing on, a category correction also moves the message (see [Corrections from a mail client](./filing.md#corrections-from-a-mail-client)).
+
+With [best-guess selection](./configuration.md#policy-selection), `classification.best_guess_fields` lists accepted category and urgency guesses. It is omitted when empty. `read` returns the stored decision under `item.model_decision`, including original confidence and probabilities under `raw.answers`. Missing categories or urgency can mean low confidence or an ambiguous probability lead; inspect `reasons` there. Review mode still adds mail to attention, and it does not prevent filing.
 
 `done` marks a message handled. It leaves the attention view, stays done when the message is classified again, and nothing changes on the server. `reopen` reverses it and classifies the message again if the configuration changed since.
 

@@ -13,12 +13,24 @@ use std::{
     process::Command,
 };
 
-const DEFAULT_OFF: &str = "v1:fe333646885134da461c3ef57080b76e331c276b50c3e1fa44935bdd418f02ac";
-const DEFAULT_ON: &str = "v1:c0fe803aca4c84827ee579f2d8ba4e1ce496e3cd9f0fc493a034cf030dceee69";
+const LEGACY_OFF: &str = "v1:fe333646885134da461c3ef57080b76e331c276b50c3e1fa44935bdd418f02ac";
+const LEGACY_ON: &str = "v1:c0fe803aca4c84827ee579f2d8ba4e1ce496e3cd9f0fc493a034cf030dceee69";
 const UNICODE_ON: &str = "v1:7733c397ba1df0b0d3ffe42025d7551f2f164d2413ce93c4ef65c1a60b1591f5";
 
-fn defaults() -> Vec<Category> {
-    config::default_config().accounts["work"].categories.clone()
+fn legacy_categories() -> Vec<Category> {
+    // These digest vectors cover the taxonomy shipped before refinement.
+    let mut categories = config::default_config().accounts["work"].categories.clone();
+    for (category, description) in categories.iter_mut().zip([
+        "Direct conversations with people",
+        "Receipts, orders and account activity",
+        "Status and service updates",
+        "Editorial mail and subscriptions",
+        "Offers and marketing",
+        "Mail outside the other categories",
+    ]) {
+        category.description = description.into();
+    }
+    categories
 }
 
 fn parse(text: &str) -> Vec<Category> {
@@ -27,11 +39,11 @@ fn parse(text: &str) -> Vec<Category> {
 
 #[test]
 fn digests_are_fixed_vectors() {
-    assert_eq!(categories::digest(false, &defaults()), DEFAULT_OFF);
-    assert_eq!(categories::digest(true, &defaults()), DEFAULT_ON);
-    let mut swapped = defaults();
+    assert_eq!(categories::digest(false, &legacy_categories()), LEGACY_OFF);
+    assert_eq!(categories::digest(true, &legacy_categories()), LEGACY_ON);
+    let mut swapped = legacy_categories();
     swapped.swap(0, 1);
-    assert_ne!(categories::digest(false, &swapped), DEFAULT_OFF);
+    assert_ne!(categories::digest(false, &swapped), LEGACY_OFF);
     let unicode = parse(
         r#"[{"id":"cafe","name":"Café ☕ Rechnungen","description":"Belege für Kaffee","catch_all":true,"folder":"Cafe"}]"#,
     );
@@ -49,12 +61,13 @@ fn digests_are_fixed_vectors() {
     );
 }
 
-/// A config with the default `work` account, filing in `mode`.
+/// A config with the legacy taxonomy, filing in `mode`.
 fn config_with(dir: &Path, mode: FilingMode) -> PathBuf {
     let path = dir.join("mailtriage.json");
     let mut c = config::default_config();
     c.state_dir = dir.join("state");
     c.accounts.get_mut("work").unwrap().filing.mode = mode;
+    c.accounts.get_mut("work").unwrap().categories = legacy_categories();
     config::save(&path, &c).unwrap();
     path
 }
@@ -69,9 +82,11 @@ fn export_and_validate_report_the_digest() {
     let dir = tempfile::tempdir().unwrap();
     let path = config_with(dir.path(), FilingMode::Off);
     let mut service = Service::open(&path).unwrap();
-    assert_eq!(service.categories("work").unwrap()["digest"], DEFAULT_OFF);
-    let checked = service.validate_categories("work", defaults()).unwrap();
-    assert_eq!(checked["digest"], DEFAULT_OFF);
+    assert_eq!(service.categories("work").unwrap()["digest"], LEGACY_OFF);
+    let checked = service
+        .validate_categories("work", legacy_categories())
+        .unwrap();
+    assert_eq!(checked["digest"], LEGACY_OFF);
     assert_eq!(
         checked["changes"],
         json!({"added":[],"removed":[],"renamed":[],"folders_changed":[],"edited":[],"reclassifies":false})
@@ -95,7 +110,7 @@ fn run(dir: &Path, args: &[&str]) -> (i32, Value) {
 fn apply_checks_the_expected_digest_first() {
     let dir = tempfile::tempdir().unwrap();
     let path = config_with(dir.path(), FilingMode::Off);
-    let mut renamed = defaults();
+    let mut renamed = legacy_categories();
     renamed[3].name = "News Digest".into();
     fs::write(
         dir.path().join("cats.json"),
@@ -120,7 +135,7 @@ fn apply_checks_the_expected_digest_first() {
     };
     // A stale digest: exit 5, nothing written.
     let before = fs::read(&path).unwrap();
-    let (code, out) = apply(DEFAULT_ON);
+    let (code, out) = apply(LEGACY_ON);
     assert_eq!(code, 5);
     assert_eq!(
         out["error"],
@@ -128,10 +143,10 @@ fn apply_checks_the_expected_digest_first() {
     );
     assert_eq!(fs::read(&path).unwrap(), before);
     // The current digest: applied, and the result carries the new one.
-    let (code, out) = apply(DEFAULT_OFF);
+    let (code, out) = apply(LEGACY_OFF);
     assert_eq!(code, 0, "{out}");
     assert_eq!(out["categories"][3]["name"], "News Digest");
-    assert_ne!(out["digest"], DEFAULT_OFF);
+    assert_ne!(out["digest"], LEGACY_OFF);
 }
 
 #[test]
@@ -142,13 +157,13 @@ fn turning_filing_off_between_export_and_apply_is_a_change() {
         .as_str()
         .unwrap()
         .to_owned();
-    assert_eq!(digest, categories::digest(true, &defaults()));
+    assert_eq!(digest, categories::digest(true, &legacy_categories()));
     let mut c: AppConfig = config::load(&path).unwrap();
     c.accounts.get_mut("work").unwrap().filing.mode = FilingMode::Off;
     config::save(&path, &c).unwrap();
     let error = Service::open(&path)
         .unwrap()
-        .apply_categories_expecting("work", defaults(), Some(&digest))
+        .apply_categories_expecting("work", legacy_categories(), Some(&digest))
         .unwrap_err();
     assert_eq!(reason(error), (5, Some("categories_changed")));
 }
@@ -164,7 +179,7 @@ fn a_config_rewritten_during_apply_is_config_changed() {
     c.accounts.get_mut("work").unwrap().brief = "changed".into();
     config::save(&path, &c).unwrap();
     let error = service
-        .apply_categories_expecting("work", defaults(), Some(DEFAULT_OFF))
+        .apply_categories_expecting("work", legacy_categories(), Some(LEGACY_OFF))
         .unwrap_err();
     assert_eq!(reason(error), (5, ErrorKind::ConfigChanged.reason()));
 }
@@ -173,7 +188,7 @@ fn changes_for(mode: FilingMode, edit: impl FnOnce(&mut Vec<Category>)) -> Chang
     let dir = tempfile::tempdir().unwrap();
     let path = config_with(dir.path(), mode);
     let service = Service::open(&path).unwrap();
-    let mut next = defaults();
+    let mut next = legacy_categories();
     edit(&mut next);
     let previous = &service.config.accounts["work"];
     categories::changes(
@@ -247,7 +262,7 @@ fn reclassifies_matches_whether_apply_advances_the_revision() {
     for (what, edit) in edits {
         let dir = tempfile::tempdir().unwrap();
         let path = config_with(dir.path(), FilingMode::DryRun);
-        let mut next = defaults();
+        let mut next = legacy_categories();
         edit(&mut next);
         let mut service = Service::open(&path).unwrap();
         let checked = service.validate_categories("work", next.clone()).unwrap();

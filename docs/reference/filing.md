@@ -96,7 +96,7 @@ mailtriage filing replies --account work --approve
 
 `--reply-queue off` turns it off; without the flag, `filing enable` keeps the configured value (`filing.reply_queue`, default `false`). With the queue off, held mail files like other mail, and mail you already approved in `filing replies` is still marked read.
 
-A config with the queue on is written as schema 4, which mailtriage releases without the reply queue refuse to read.
+A config with the queue on needs at least schema 4, which mailtriage releases without the reply queue refuse to read. Configs with choice-selection settings use schema 5, including new setups with best guess enabled.
 
 - **Answered**: a mail client sets `\Answered` when you reply from it. Each pass reads the flags of the held mail again, and the next pass after your reply moves it to its category folder without changing its read state.
 - **Approval**: `filing replies` lists the answered or done mail that mailtriage filed, or is filing, and has not marked read: `id`, `subject`, `from`, `folder` (the source folder until the next pass confirms the move), `answered`, `requested_at` and `approved_at`. Mail whose move is given up (it failed, the mail vanished, or you reopened it first) leaves the list, even if you approved it. `--approve` approves all of it, `--approve --id ID` (repeatable) single messages; an id that is not waiting fails with exit code 2 and approves nothing. The next live pass adds `\Seen` to approved mail where it is now, after checking that its UID still names it; if it does not, the pass reports `read_mismatch` and the message waits.

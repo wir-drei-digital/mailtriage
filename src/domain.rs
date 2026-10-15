@@ -62,10 +62,25 @@ pub struct ManagedKev {
     /// The checkpoint Kev serves, as `--run` takes it:
     /// `jaredpalmer/kev-4b@v1.0`.
     pub checkpoint: String,
+    /// Runtime-only setting; omitted means the default five-minute idle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyConfig {
+    #[serde(default, skip_serializing_if = "ChoiceMode::is_strict")]
+    pub choice_mode: ChoiceMode,
+    #[serde(
+        default = "default_best_guess_confidence_min",
+        skip_serializing_if = "is_default_best_guess_confidence_min"
+    )]
+    pub best_guess_confidence_min: f64,
+    #[serde(
+        default = "default_best_guess_margin_min",
+        skip_serializing_if = "is_default_best_guess_margin_min"
+    )]
+    pub best_guess_margin_min: f64,
     pub choice_confidence_min: f64,
     pub action_yes_min: f64,
     pub action_no_max: f64,
@@ -75,6 +90,41 @@ pub struct PolicyConfig {
     pub freshness_hours: u64,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChoiceMode {
+    #[default]
+    Strict,
+    BestGuess,
+}
+
+impl ChoiceMode {
+    pub fn is_strict(&self) -> bool {
+        *self == Self::Strict
+    }
+}
+
+fn default_best_guess_confidence_min() -> f64 {
+    0.25
+}
+fn default_best_guess_margin_min() -> f64 {
+    0.05
+}
+fn is_default_best_guess_confidence_min(value: &f64) -> bool {
+    *value == default_best_guess_confidence_min()
+}
+fn is_default_best_guess_margin_min(value: &f64) -> bool {
+    *value == default_best_guess_margin_min()
+}
+
+impl PolicyConfig {
+    pub fn has_choice_settings(&self) -> bool {
+        !self.choice_mode.is_strict()
+            || !is_default_best_guess_confidence_min(&self.best_guess_confidence_min)
+            || !is_default_best_guess_margin_min(&self.best_guess_margin_min)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountConfig {
     pub identity: String,
@@ -82,6 +132,9 @@ pub struct AccountConfig {
     pub brief: String,
     pub taxonomy_revision: u64,
     pub categories: Vec<Category>,
+    /// Overrides the global category and urgency selection mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choice_mode: Option<ChoiceMode>,
     /// Schema 1 location of the Himalaya settings. Read on load, moved into
     /// `engine` by `config::normalize`, never serialized.
     #[serde(default, skip_serializing)]
@@ -230,6 +283,9 @@ pub struct Classification {
     pub raw: serde_json::Value,
     #[serde(default)]
     pub reasons: Vec<String>,
+    /// Fields accepted using the best-guess policy; scores remain in `raw`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub best_guess_fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -114,7 +114,7 @@ A config with `managed` uses [local Kev](#local-kev). One without it uses a serv
 }
 ```
 
-`managed.checkpoint` helps decide when to classify open mail again, just as `model` does. Changing it by hand to `jaredpalmer/kev-9b@v1.0` queues open mail again; `mailtriage setup --update` then installs that checkpoint. Setup offers only Kev-4B. Other provider kinds reject `managed`.
+`managed.checkpoint` helps decide when to classify open mail again, just as `model` does. Changing it by hand to `jaredpalmer/kev-9b@v1.0` queues open mail again; `mailtriage setup --update` then installs that checkpoint. Setup offers only Kev-4B. Other provider kinds reject `managed`. Optional `managed.idle_seconds` controls process lifetime only and does not change the classification generation. It defaults to 300 seconds; valid whole-number values are 1 to 86400. An explicit `idle_seconds` field requires config schema 5, even when set to 300. Setup omits it in a new config and preserves it when present in an existing config.
 
 ### The URL rule
 
@@ -129,7 +129,7 @@ Setup installs local Kev into `<data dir>/mailtriage/kev`, usually `~/.local/sha
 
 When mail needs classifying, mailtriage checks `GET http://127.0.0.1:PORT/v1/models`. If nothing answers, it starts a supervisor and waits up to 120 seconds, checking every second. One supervisor owns the shared installation. It runs `uv run --frozen --extra serve python -m kev.serve --run CHECKPOINT --host 127.0.0.1 --port PORT` in `src` with `HF_HUB_OFFLINE=1` and `UV_OFFLINE=1`; output goes to `kev.log`. Ordinary starts make no download.
 
-Every 30 seconds, the supervisor checks whether 15 minutes have passed since the last request. It then asks the whole owned Kev process group to stop with TERM, followed by KILL after 10 seconds if needed. The supervisor records its final exit status. It also exits when Kev exits on its own. On macOS it runs in an independent session, so it can outlive a `watch` pass. The background service needs no separate Kev job.
+Every 30 seconds, the supervisor checks whether the configured idle timeout (5 minutes by default) has passed since the last request. The timeout is read from `provider.managed.idle_seconds` when starting the process. A running supervisor keeps its timeout, including when another config reuses it; the config that starts the shared process supplies its timeout. Model loading and in-flight classifications hold a shared activity lock on `last-used`. Completion records the new last-used time before releasing the lock. Idle shutdown requires an exclusive activity lock and rechecks the timeout while holding it through process-group termination. Empty mail polls do not reset it. It then asks the whole owned Kev process group to stop with TERM, followed by KILL after 10 seconds if needed. The supervisor records its final exit status. It also exits when Kev exits on its own. On macOS it runs in an independent session, so it can outlive a `watch` pass. The background service needs no separate Kev job.
 
 Before setup changes the shared checkout or checkpoint, it stops an owned supervisor and confirms shutdown. An installation guard prevents ordinary starts during mutation. Setup rejects an unrelated listener on the port. If ownership termination cannot be confirmed, it leaves durable evidence and refuses to replace files. A free lock alone does not establish whole-group termination; see [Repair an installation](../guide/local-kev.md#repair-an-installation).
 

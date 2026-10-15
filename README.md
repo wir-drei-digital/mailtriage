@@ -1,11 +1,11 @@
 # mailtriage
 
-mailtriage is a local command-line tool that classifies your email. For each message it decides a category from your own list, an urgency (`low`, `medium` or `high`), and whether you need to act, using OpenRouter's Jev decisions model. It reads mail through the [Himalaya](https://github.com/pimalaya/himalaya) CLI. With live filing, it moves mail into one IMAP folder per category, so every mail client shows the result. Every command can print JSON, so agents can use it as well as people.
+mailtriage is a local command-line tool that classifies your email. For each message it decides a category from your own list, an urgency (`low`, `medium` or `high`), and whether you need to act, using OpenRouter's Jev decisions model or Kev on your own hardware. It reads mail through the [Himalaya](https://github.com/pimalaya/himalaya) CLI. With live filing, it moves mail into one IMAP folder per category, so every mail client shows the result. Every command can print JSON, so agents can use it as well as people.
 
 ## How it works
 
 - `sync` and `watch` read new mail over IMAP through Himalaya. mailtriage never sends, deletes or expunges mail and never marks mail unread. Only the optional reply queue marks mail read: answered or done mail you approved.
-- Each new message goes to OpenRouter's Decisions API, which returns the three decisions.
+- Each new message goes to your chosen classifier: OpenRouter with Jev, local Kev on an Apple Silicon Mac, or your own Kev server. Local Kev runs offline after setup.
 - Messages and decisions are stored in a local SQLite database. `list` and `read` work from it without network access.
 - Filing is `off`, `dry_run` (plans moves and changes nothing) or `live` (creates the folders, moves mail and flags mail that needs action).
 - With the [reply queue](https://wir-drei-digital.github.io/mailtriage/guide/filing#reply-queue), mail that needs action stays in the inbox until you answer it; then it is filed, and marked read once you approve it.
@@ -14,7 +14,7 @@ mailtriage is a local command-line tool that classifies your email. For each mes
 
 - [Himalaya](https://github.com/pimalaya/himalaya) with IMAP support, in a version mailtriage is tested with (2.1.0 or 2.2.1). `mailtriage setup` offers to install one for mailtriage when none is found ([Himalaya versions](https://wir-drei-digital.github.io/mailtriage/guide/himalaya)).
 - An IMAP account. Filing needs a server with the MOVE extension.
-- An [OpenRouter](https://openrouter.ai) API key.
+- A classifier: an [OpenRouter](https://openrouter.ai) API key, [local Kev](https://wir-drei-digital.github.io/mailtriage/guide/local-kev) on an Apple Silicon Mac, or your own Kev server. Local Kev needs no API key.
 - macOS or Linux. The background service uses launchd on macOS and systemd on Linux.
 
 ## Install
@@ -41,7 +41,7 @@ Setup asks one question at a time and shows a default that Enter accepts:
 
 1. the Himalaya account to use, or a new one created with `himalaya configure`;
 2. your address, time zone and the folders to watch;
-3. where the OpenRouter key lives: the macOS Keychain, Secret Service, `pass`, a command that prints it, or an environment variable. The store's own tool asks for the key, and mailtriage never writes it to a file;
+3. which classifier to use: OpenRouter, local Kev on Apple Silicon, or your own Kev server. For a classifier that needs a key, choose the macOS Keychain, Secret Service, `pass`, a command, or an environment variable. The store's own tool asks for the key, and mailtriage never writes it to a file;
 4. whether to file mail into folders (`dry_run` by default; setup never turns on `live`);
 5. whether to run `watch` in the background with launchd or systemd.
 
@@ -53,6 +53,8 @@ mailtriage list --account work
 ```
 
 `work` stands for the account name you chose in setup; it defaults to the Himalaya account name.
+
+New configs use [best-guess selection](https://wir-drei-digital.github.io/mailtriage/guide/configuration#category-and-urgency-selection) for category and urgency, with a confidence floor and a minimum lead over the runner-up. Existing configs without a mode keep strict behavior. The [six default categories](https://wir-drei-digital.github.io/mailtriage/guide/categories#default-category-boundaries) include examples and exclusions in their descriptions. Local Kev stops after 5 idle minutes by default; `provider.managed.idle_seconds` configures the timeout for its next start.
 
 ## For agents
 

@@ -128,6 +128,7 @@ impl Fixture {
         provider.endpoint = provider::kev::local_endpoint(self.port);
         provider.managed = Some(ManagedKev {
             checkpoint: CHECKPOINT.into(),
+            idle_seconds: None,
         });
         provider
     }
@@ -433,6 +434,93 @@ fn two_callers_at_once_leave_one_server() {
 }
 
 #[test]
+fn a_short_configured_idle_does_not_interrupt_startup() {
+    let f = Fixture::new();
+    f.install(CHECKPOINT);
+    f.control("delay", "3");
+    let mut rt = f.runtime();
+    rt.idle = Duration::from_secs(1);
+    rt.check = Duration::from_secs(1);
+    rt.start_timeout = Duration::from_secs(6);
+    runtime::ensure_running_with(&rt).unwrap();
+    assert_eq!(runtime::probe(&rt), Probe::Ready);
+}
+
+#[test]
+fn a_short_configured_idle_does_not_interrupt_a_classification() {
+    let f = Fixture::new();
+    f.install(CHECKPOINT);
+    f.control("delay-post", "3");
+    let mut rt = f.runtime();
+    rt.idle = Duration::from_secs(1);
+    rt.check = Duration::from_secs(1);
+    runtime::ensure_running_with(&rt).unwrap();
+    let c = config::default_config();
+    let message =
+        mailtriage::normalize::rfc822(&mail("idle-request", "Receipt", "Payment received."), 20000)
+            .unwrap();
+    let result = provider::classify(
+        &f.managed_config(),
+        &c.accounts["work"],
+        &message,
+        &c.policy,
+    )
+    .unwrap();
+    assert_eq!(result.model, "kev-latest");
+    assert!(runtime::supervisor_running(&f.layout));
+    assert!(wait_until(Duration::from_secs(8), || {
+        !runtime::supervisor_running(&f.layout)
+    }));
+}
+
+#[test]
+fn managed_idle_setting_controls_the_real_supervisor() {
+    let f = Fixture::new();
+    f.install(CHECKPOINT);
+    let mut value = serde_json::to_value(f.managed_config()).unwrap();
+    value["managed"]["idle_seconds"] = json!(1);
+    let provider: ProviderConfig = serde_json::from_value(value).unwrap();
+    let mut rt = Runtime::for_config(&provider).unwrap();
+    rt.exe = PathBuf::from(env!("CARGO_BIN_EXE_mailtriage"));
+    rt.check = Duration::from_secs(1);
+    runtime::ensure_running_with(&rt).unwrap();
+    assert!(wait_until(Duration::from_secs(8), || {
+        !runtime::supervisor_running(&f.layout)
+    }));
+    assert!(f
+        .kev_log()
+        .contains("stopping Kev after 1 seconds without a request"));
+}
+
+#[test]
+fn managed_idle_settings_are_validated_and_protected_on_save() {
+    let f = Fixture::new();
+    let mut c = config::default_config();
+    c.policy.choice_mode = mailtriage::domain::ChoiceMode::Strict;
+    c.provider = f.managed_config();
+    let mut value = serde_json::to_value(c).unwrap();
+    for invalid in [json!(0), json!(86401), json!(-1), json!(1.5)] {
+        value["provider"]["managed"]["idle_seconds"] = invalid.clone();
+        assert!(
+            config::from_bytes(&serde_json::to_vec(&value).unwrap()).is_err(),
+            "accepted {invalid}"
+        );
+    }
+    value["provider"]["managed"]["idle_seconds"] = json!(1200);
+    let c = config::from_bytes(&serde_json::to_vec(&value).unwrap()).unwrap();
+    let path = f.root.join("idle-config.json");
+    config::save(&path, &c).unwrap();
+    let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved["schema_version"], 5);
+    assert_eq!(saved["provider"]["managed"]["idle_seconds"], 1200);
+    let loaded = config::load(&path).unwrap();
+    assert_eq!(
+        Runtime::for_config(&loaded.provider).unwrap().idle,
+        Duration::from_secs(1200)
+    );
+}
+
+#[test]
 fn kev_stops_after_the_idle_time_unless_it_is_used() {
     let f = Fixture::new();
     f.install(CHECKPOINT);
@@ -540,6 +628,7 @@ fn an_uninstalled_local_kev_skips_classification_without_an_attempt() {
         c.provider = provider::provider_for("kev").unwrap().new_config();
         c.provider.managed = Some(ManagedKev {
             checkpoint: "test/never-installed@v0".into(),
+            idle_seconds: None,
         });
     });
     h.fake

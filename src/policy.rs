@@ -1,5 +1,5 @@
 use crate::{
-    domain::{AccountConfig, Classification, PolicyConfig, Urgency},
+    domain::{AccountConfig, ChoiceMode, Classification, PolicyConfig, Urgency},
     provider::{Choice, Decision},
 };
 use chrono::Utc;
@@ -13,17 +13,23 @@ pub fn apply(
     incomplete: bool,
 ) -> Classification {
     let mut reasons = Vec::new();
+    let mut best_guess_fields = Vec::new();
+    let mode = account.choice_mode.unwrap_or(policy.choice_mode);
     let category_id = confident(
         decision.category,
-        policy.choice_confidence_min,
+        policy,
+        mode,
         "category",
         &mut reasons,
+        &mut best_guess_fields,
     );
     let urgency = confident(
         decision.urgency,
-        policy.choice_confidence_min,
+        policy,
+        mode,
         "urgency",
         &mut reasons,
+        &mut best_guess_fields,
     )
     .and_then(|label| match label.as_str() {
         "low" => Some(Urgency::Low),
@@ -65,28 +71,49 @@ pub fn apply(
         classified_at: Utc::now().to_rfc3339(),
         raw: decision.raw,
         reasons,
+        best_guess_fields,
     }
 }
 
-/// The chosen label when the provider answered with enough confidence;
-/// otherwise `None` and the reason.
+/// Apply the selected acceptance policy to a contract-checked choice.
 fn confident(
     choice: Option<Choice>,
-    confidence_min: f64,
+    policy: &PolicyConfig,
+    mode: ChoiceMode,
     label: &str,
     reasons: &mut Vec<String>,
+    best_guess_fields: &mut Vec<String>,
 ) -> Option<String> {
-    match choice {
-        None => {
-            reasons.push(format!("{label}_missing"));
-            None
-        }
-        Some(choice) if choice.confidence < confidence_min => {
-            reasons.push(format!("{label}_low_confidence"));
-            None
-        }
-        Some(choice) => Some(choice.choice),
+    let Some(choice) = choice else {
+        reasons.push(format!("{label}_missing"));
+        return None;
+    };
+    let confidence_min = match mode {
+        ChoiceMode::Strict => policy.choice_confidence_min,
+        ChoiceMode::BestGuess => policy.best_guess_confidence_min,
+    };
+    if choice.confidence < confidence_min {
+        reasons.push(format!("{label}_low_confidence"));
+        return None;
     }
+    if mode == ChoiceMode::BestGuess {
+        let chosen = choice.probabilities[&choice.choice];
+        let runner_up = choice
+            .probabilities
+            .iter()
+            .filter(|(name, _)| *name != &choice.choice)
+            .map(|(_, p)| *p)
+            .fold(0.0_f64, f64::max);
+        let lead = chosen - runner_up;
+        // The wire probabilities are rounded; avoid rejecting exact boundaries
+        // because of floating-point subtraction. Ties are always withheld.
+        if lead <= 0.0 || lead + 1e-12 < policy.best_guess_margin_min {
+            reasons.push(format!("{label}_ambiguous"));
+            return None;
+        }
+        best_guess_fields.push(label.to_owned());
+    }
+    Some(choice.choice)
 }
 
 pub fn attention(classification: &Classification, review_state: &str) -> Vec<String> {

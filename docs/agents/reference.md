@@ -33,13 +33,13 @@ The agent calls `mailtriage` as an ordinary process. It needs no SDK and no dire
 
    - `--yes` turns prompts off. Each answer comes from its flag or its default.
    - `--himalaya-account NAME` is required: an account with IMAP in the Himalaya configuration. Add `--himalaya-install` to install a tested Himalaya for mailtriage when none is found or the one found is untested, `--himalaya-binary PATH` when `himalaya` is not on the agent's `PATH`, and `--himalaya-config PATH` when the file is not in Himalaya's default location. Setup stores the Himalaya binary, a private one included, and the config file as absolute paths.
-   - The key, preferably from a key store or a key command, so no process needs it in its environment:
+   - For OpenRouter or a Kev server off this machine, the key, preferably from a key store or a key command, so no process needs it in its environment:
      - `--key-store keychain`, `secret-service` or `pass` with `--key-stored`: a person has already stored the key with that store's command (see [Key stores](../guide/setup.md#key-stores)). Setup records the read command and checks that it prints a key.
      - `--key-command 'COMMAND'`: a shell command that prints the key. Setup runs it once to check it.
      - `--key-store env`, with `--key-env NAME` when the variable is not `OPENROUTER_API_KEY`: mailtriage reads the key from the variable in its own environment.
    - `--service install` also installs `watch` as a launchd agent or systemd user unit (see [Background service](../guide/service.md)). The default is `skip`. Setup installs no service when `doctor` reports a not-ready `state` item.
    - Optional: `--account`, `--identity`, `--timezone`, `--brief`, `--mailbox` (repeat for several folders), `--filing off|dry-run`, `--interval-seconds`, `--limit`, `--updates auto|notify|off` (what `watch` does about new releases; see [Updates](../guide/updates.md)).
-   - To change an existing config, add `--update`. A classifier flag such as `--model` keeps where the key comes from; only a key flag (`--key-store`, `--key-command`, `--key-env`, `--key-stored`) changes it. Key flags with `--provider fake` exit 2.
+   - To change an existing config, add `--update`. A classifier flag such as `--model` keeps where the key comes from; only a key flag (`--key-store`, `--key-command`, `--key-env`, `--key-stored`) changes it. Key flags with `--provider fake` or local/loopback Kev exit 2. On Apple Silicon, `--provider kev --yes` authorizes the local model download; use it only after the user has approved that download. Use `--kev-url URL` for a Kev server you run. See [local Kev](../guide/local-kev.md) and [server setup](../guide/provider.md#run-your-own-kev-server).
    - To write the configuration by hand instead, follow [Manual setup](../guide/manual-setup.md). Use absolute paths in `engine.binary` and `engine.config`: the agent's `PATH` may not contain Himalaya, and `~` is not expanded.
 
    Setup prints one result object on stdout (see [Output](../guide/setup.md#output)) and exits 0, even when `doctor` items are not ready. Read `setup.doctor.ready` and each item's `fix`.
@@ -48,7 +48,7 @@ The agent calls `mailtriage` as an ordinary process. It needs no SDK and no dire
 
    | Code | Cause | What to do |
    | --- | --- | --- |
-   | 2 | A required flag is missing, a value is invalid, key flags conflict or are given with `--provider fake`, a key tool needs a terminal, or the private Himalaya cannot be installed because pimalaya has no build for this platform. | Add or correct the flag named in the message, then run setup again. Do not repeat the same call. For the platform, report the message to the user: a person installs a tested Himalaya, then setup runs with `--himalaya-binary`. |
+   | 2 | A required flag is missing, a value is invalid, key flags conflict or are given with `--provider fake`, local Kev or a loopback Kev server, a local Kev download was not approved, a key tool needs a terminal, or the private Himalaya cannot be installed because pimalaya has no build for this platform. | Add or correct the flag named in the message, then run setup again. Do not repeat the same call. For the platform, report the message to the user: a person installs a tested Himalaya, then setup runs with `--himalaya-binary`. |
    | 3 | Himalaya is missing or not a tested version and `--himalaya-install` was not given (see [Himalaya versions](../guide/himalaya.md)), installing the private Himalaya failed on a supported platform, `himalaya account check` failed, the folders could not be listed, a key tool or key command failed, or `launchctl`/`systemctl` failed. | Report the message to the user. It names the command that shows the cause; fixing it needs a person (credentials, Himalaya, the key store). |
    | 5 | The config already exists, the account is bound to another mailbox (`step 3 (account): account NAME is bound to its previous mailbox …`; nothing was written), or a service file exists that mailtriage did not write. | For the config, add `--update` if the user wants it changed. For a bound account, keep its identity, Himalaya account and IMAP server, or ask the user before setting the mailbox up under a new name with `--account NEW`. For a service file, report the path to the user. |
 
@@ -57,7 +57,7 @@ The agent calls `mailtriage` as an ordinary process. It needs no SDK and no dire
    That user also needs read access to the Himalaya configuration and whatever its password command reads.
 4. Prefer a key store or a key command (`provider.api_key_command`): mailtriage then runs the command itself, and nothing needs to be set in the agent's environment. Only with `--key-store env` must the variable named by `provider.api_key_env` reach the mailtriage process, which inherits its environment from the agent. mailtriage does not read a `.env` file or any other key file.
 
-   `sync`, `watch`, `classify` and `reclassify` need the key; `list`, `read`, `correct`, `done`, `reopen` and the `filing` commands do not. A pass with nothing to classify does not run the key command.
+   `sync`, `watch`, `classify` and `reclassify` need a key only for OpenRouter or a Kev server off this machine; `list`, `read`, `correct`, `done`, `reopen` and the `filing` commands do not. A pass with nothing to classify does not run the key command.
 
    When there is mail to classify and the key is unavailable, they classify nothing and use no retry attempt: the result carries `"classification": {"skipped": true, "reason": "..."}` with the key error (as in `doctor`'s `provider.key_error`) and exits 4, and the mail stays queued until a pass has the key.
 5. Check the setup from the agent's own environment:
@@ -68,7 +68,7 @@ The agent calls `mailtriage` as an ordinary process. It needs no SDK and no dire
 
    `doctor` exits 0 whether or not the account is ready. Require `ready: true`, `transport.configured: true` and `provider.key_present: true`. When the key is missing, `provider.key_error` says why, and `provider.key_source` says where it should come from (`command` or `env`).
 
-   `doctor` makes no provider request and does not log in to IMAP unless filing is on, so the first `sync` is the first full test. Run `doctor` again after a Himalaya upgrade.
+   For OpenRouter and `fake`, `doctor` makes no provider request. For Kev it may check `GET /v1/models` without starting local Kev. It does not log in to IMAP unless filing is on, so the first `sync` is the first full test. Run `doctor` again after a Himalaya upgrade.
 6. Run one worker per account: the background service, another supervised `watch`, or `sync` on a schedule, never two of them.
 
    `sync`, `classify`, `reclassify` and each `watch` pass take a per-account lock. A second worker exits 5 with `an account worker is already running`, and for `watch` that ends the process.
@@ -204,7 +204,7 @@ Exit code 5 messages:
 Change categories only when the user asks. Export, edit, check, then apply with the digest from the export:
 
 1. `categories export --account work --json`; keep `digest`.
-2. `categories validate --file FILE --account work --json`. Exit 2 means the file breaks a rule; the message names it. Read `changes`, and tell the user before applying when `changes.reclassifies` is `true`: all open mail is classified again, which uses their OpenRouter key.
+2. `categories validate --file FILE --account work --json`. Exit 2 means the file breaks a rule; the message names it. Read `changes`, and tell the user before applying when `changes.reclassifies` is `true`: all open mail is classified again using the configured provider. OpenRouter uses an API request; local Kev runs inference locally.
 3. Only when the user asks, and once per export: `categories apply --account work --file FILE --expect-digest DIGEST --json`. Exit 5 with reason `categories_changed` means someone else changed the categories since your export: export again and redo the edit; do not loop.
 
 ## What is safe to repeat

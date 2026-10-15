@@ -340,6 +340,7 @@ fn an_existing_config_needs_update_and_keeps_other_accounts() {
     let mut c = f.config();
     c["accounts"]["work"]["categories"][0]["description"] = json!("People I write with");
     c["accounts"]["work"]["filing"]["mode"] = json!("live");
+    c["accounts"]["work"]["choice_mode"] = json!("strict");
     fs::write(f.config_path(), serde_json::to_vec_pretty(&c).unwrap()).unwrap();
     let before = f.config();
 
@@ -386,6 +387,7 @@ fn an_existing_config_needs_update_and_keeps_other_accounts() {
     let work = &f.config()["accounts"]["work"];
     assert_eq!(work["brief"], "Runs a bakery");
     assert_eq!(work["filing"]["mode"], "live");
+    assert_eq!(work["choice_mode"], "strict");
     assert_eq!(work["categories"][0]["description"], "People I write with");
 }
 
@@ -1691,7 +1693,8 @@ fn setup_writes_updates_and_every_path_keeps_an_existing_value() {
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert_eq!(v["setup"]["updates"], "auto");
     assert_eq!(f.config()["updates"], "auto");
-    assert_eq!(f.config()["schema_version"], 3);
+    assert_eq!(f.config()["schema_version"], 5);
+    assert_eq!(f.config()["policy"]["choice_mode"], "best_guess");
 
     let (out, v) = f.run(
         &[
@@ -2252,7 +2255,7 @@ fn a_kept_local_kev_is_installed_with_its_own_checkpoint() {
     c["provider"] = json!({
         "kind": "kev", "model": "kev-latest",
         "endpoint": format!("http://127.0.0.1:{}/v1/systemone", kev.port),
-        "timeout_seconds": 60, "managed": {"checkpoint": "test/kev-9b@v1.0"}
+        "timeout_seconds": 60, "managed": {"checkpoint": "test/kev-9b@v1.0", "idle_seconds": 1200}
     });
     fs::write(f.config_path(), serde_json::to_vec_pretty(&c).unwrap()).unwrap();
     let (out, v) = f.run_kev(
@@ -2262,6 +2265,7 @@ fn a_kept_local_kev_is_installed_with_its_own_checkpoint() {
     assert_eq!(out.status.code(), Some(0), "{v} {}", stderr(&out));
     assert_eq!(v["setup"]["kev"]["action"], "installed", "{v}");
     assert_eq!(v["setup"]["kev"]["checkpoint"], "test/kev-9b@v1.0");
+    assert_eq!(f.config()["provider"]["managed"]["idle_seconds"], 1200);
     let runs = kev.lines("uv.log", "run ");
     assert!(runs[0].contains("--run test/kev-9b@v1.0 "), "{}", runs[0]);
     assert_eq!(

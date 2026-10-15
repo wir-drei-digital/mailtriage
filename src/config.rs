@@ -28,7 +28,7 @@ pub fn default_config() -> AppConfig {
                 Category {
                     id: "correspondence".into(),
                     name: "Correspondence".into(),
-                    description: "Direct conversations with people".into(),
+                    description: "Direct personal or work conversations: questions, replies, collaboration, scheduling, and support exchanges. Includes informational conversations that need no reply. Excludes automated notifications and unsolicited sales outreach.".into(),
                     examples: vec![],
                     catch_all: false,
                     folder: None,
@@ -36,7 +36,7 @@ pub fn default_config() -> AppConfig {
                 Category {
                     id: "transactions".into(),
                     name: "Transactions".into(),
-                    description: "Receipts, orders and account activity".into(),
+                    description: "Confirmations and records of purchases or financial activity: orders, receipts, invoices, payments, refunds, subscriptions billed or renewed, account funding, and delivery updates for an order. Excludes login, verification, and security notifications.".into(),
                     examples: vec![],
                     catch_all: false,
                     folder: None,
@@ -44,7 +44,7 @@ pub fn default_config() -> AppConfig {
                 Category {
                     id: "updates".into(),
                     name: "Updates".into(),
-                    description: "Status and service updates".into(),
+                    description: "Automated notifications about an account, service, or system: verification codes, login links, activation, password resets, security alerts, usage limits, workflow results, outages, and status changes. Includes factual product changes affecting an existing service. Excludes purchase records and marketing offers.".into(),
                     examples: vec![],
                     catch_all: false,
                     folder: None,
@@ -52,7 +52,7 @@ pub fn default_config() -> AppConfig {
                 Category {
                     id: "newsletters".into(),
                     name: "Newsletters".into(),
-                    description: "Editorial mail and subscriptions".into(),
+                    description: "Editorial publications and recurring informational digests: articles, analysis, community news, and curated reading. Their main purpose is informing or educating. Excludes operational notifications and messages mainly promoting a purchase, upgrade, or offer.".into(),
                     examples: vec![],
                     catch_all: false,
                     folder: None,
@@ -60,7 +60,7 @@ pub fn default_config() -> AppConfig {
                 Category {
                     id: "promotions".into(),
                     name: "Promotions".into(),
-                    description: "Offers and marketing".into(),
+                    description: "Marketing and sales messages: offers, discounts, product pitches, upgrade invitations, promotional events, and unsolicited sales outreach. Includes personalized sales emails and subscribed marketing. Excludes ordinary conversations and factual notices about an existing account.".into(),
                     examples: vec![],
                     catch_all: false,
                     folder: None,
@@ -68,19 +68,20 @@ pub fn default_config() -> AppConfig {
                 Category {
                     id: "other".into(),
                     name: "Other".into(),
-                    description: "Mail outside the other categories".into(),
+                    description: "Mail whose main purpose fits none of the other categories. Use only when no defined category fits; verification, login, activation, and service notifications belong in Updates.".into(),
                     examples: vec![],
                     catch_all: true,
                     folder: None,
                 },
             ],
             himalaya: None,
+            choice_mode: None,
             engine: None,
             filing: FilingConfig::default(),
         },
     );
     AppConfig {
-        schema_version: 3,
+        schema_version: 5,
         updates: UpdateMode::Auto,
         state_dir: "./mailtriage-state".into(),
         provider: ProviderConfig {
@@ -93,6 +94,9 @@ pub fn default_config() -> AppConfig {
             managed: None,
         },
         policy: PolicyConfig {
+            choice_mode: crate::domain::ChoiceMode::BestGuess,
+            best_guess_confidence_min: 0.25,
+            best_guess_margin_min: 0.05,
             choice_confidence_min: 0.75,
             action_yes_min: 0.8,
             action_no_max: 0.2,
@@ -109,13 +113,22 @@ pub fn default_config() -> AppConfig {
 /// before it accept only 1 and 2, so they refuse a schema 3 file instead of
 /// rewriting it without `updates`. Schema 4 adds `filing.reply_queue` and is
 /// written only by a config that turns it on (see `written_schema`).
-pub const SCHEMA_VERSION: u32 = 4;
+/// Schema 5 protects choice-selection and Kev idle settings from older binaries.
+pub const SCHEMA_VERSION: u32 = 5;
 
-/// The schema a config write produces: 4 when any account turns the reply
-/// queue on, so binaries without it refuse the file instead of rewriting it
-/// without `reply_queue`; otherwise 3, which those binaries still read.
+/// Write schema 5 for choice or Kev idle settings, otherwise 4 for the reply queue or 3.
+/// Older binaries must refuse a file whose behavior they cannot preserve.
 pub fn written_schema(config: &AppConfig) -> u32 {
-    if config.accounts.values().any(|a| a.filing.reply_queue) {
+    if config.policy.has_choice_settings()
+        || config.accounts.values().any(|a| a.choice_mode.is_some())
+        || config
+            .provider
+            .managed
+            .as_ref()
+            .is_some_and(|m| m.idle_seconds.is_some())
+    {
+        5
+    } else if config.accounts.values().any(|a| a.filing.reply_queue) {
         4
     } else {
         3
@@ -182,6 +195,8 @@ pub fn validate(config: &AppConfig) -> Result<()> {
     let p = &config.policy;
     for (name, value) in [
         ("choice_confidence_min", p.choice_confidence_min),
+        ("best_guess_confidence_min", p.best_guess_confidence_min),
+        ("best_guess_margin_min", p.best_guess_margin_min),
         ("action_yes_min", p.action_yes_min),
         ("action_no_max", p.action_no_max),
     ] {

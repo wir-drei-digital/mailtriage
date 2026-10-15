@@ -43,6 +43,39 @@ release was published. No Valea application code was changed.
 
 :::
 
+## Local Kev (2026-10-15)
+
+Live checks used an Apple Silicon Mac with 48 GiB of memory, Kev tag `kev-1.0`, checkpoint `jaredpalmer/kev-4b@v1.0`, and model name `kev-latest`. The user ran the terminal checks with an isolated scratch configuration, filing off, review mode on, automatic updates off, and no scratch background service. Private addresses, subjects, message bodies, and credentials are omitted from this record.
+
+These observations cover an unreleased working tree. Initial and warm timings were recorded before the later idle-lifecycle changes; the 11.15-second restart timing used the final runtime after automatic idle shutdown. All timings include the whole CLI request and are not isolated model-load benchmarks.
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| Guided local setup | Pass | Installed uv, the pinned Kev checkout, Python environment, and model; setup reported provider, key, Kev, and mail ready. |
+| First post-setup classification | Pass | Fresh reply-request example returned `classified`, model `kev-latest`, and action required; elapsed time 7.81 seconds. |
+| Warm classifications | Pass | Receipt returned Transactions with no action required in 0.79 seconds; resolved-incident FYI returned no action required in 0.74 seconds. |
+| Real mailbox pass | Pass | 20 discovered, fetched, and classified; zero failures and scan errors; filing off. The bounded pass did not claim complete inbox coverage. |
+| Best-guess retest | Pass | The same 23 messages (20 mailbox messages and 3 examples) reclassified with zero failures or pending jobs. |
+| Refined category descriptions | Pass | The same 23 reclassified with zero failures. All 9 previous Other choices became Updates; 3 previously unassigned categories gained a choice; one account-security notification changed from Transactions to Updates. Seven urgency decisions remained withheld. |
+| Offline inference | Pass | With network access disconnected, a fresh synthetic input returned `classified`, not `cached`, with model `kev-latest`. This preceded the final idle-lifecycle changes. |
+| Controlled shutdown | Pass | A normal stop request ended the old supervisor and its owned process group; shutdown ownership was confirmed. This does not establish automatic idle shutdown. |
+| Configurable idle setting | Automated checks pass | Default 300 seconds, custom timeout, range validation, setup preservation, unchanged classification hashes, delayed loading, and in-flight request protection covered by fixtures. Setting the scratch timeout to 300 seconds left all message states unchanged. |
+| Automatic 5-minute idle shutdown and fresh restart | Pass | The final runtime logged `stopping Kev after 300 seconds without a request`, completed application shutdown, and exited with expected SIGTERM status 143. A fresh input then returned `classified`, model `kev-latest`, in 11.15 seconds. |
+| Actual model memory and download duration | Not recorded | No measured RSS or download-duration claim. |
+
+After category refinement, the 23-message sample contained 16 Updates, 4 Promotions, 2 Transactions, and 1 Correspondence choice, with no unassigned categories. This is a small local usability check, not a labeled accuracy benchmark or evidence for disabling review mode. It does not establish live-filing safety on a real mail provider.
+
+Final local automated verification after the configurable-idle changes:
+
+| Command | Result |
+| --- | --- |
+| `cargo fmt --all --check` | Pass |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | Pass |
+| `cargo test --workspace --locked --offline` | 902 passed, 7 ignored, zero failures |
+| `cargo build --release --locked --offline -p mailtriage` | Pass, macOS arm64 CLI |
+
+The ignored tests are not counted as executed live checks. Release-candidate installation, publication, cross-platform release verification, and the post-release install check remain separate steps in [Releases](./releases.md). No release was published as part of these checks.
+
 ## Live gates
 
 1. In a test config, set `provider` to `kind` `openrouter`, model

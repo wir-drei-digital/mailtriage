@@ -20,11 +20,13 @@ A failed check fails the classification like a failed request: the message is ma
 
 Startup and installation share an installation guard. The hidden `mailtriage kev mutate` helper owns it while git, uv or brew changes the shared directory. Normal startup rereads the installed receipt after it gets the guard. `doctor` checks installation activity and ownership proof without starting Kev. Unconfirmed ownership blocks replacement until the operator verifies no live process remains and preserves the private directory as a backup.
 
-The new Kev fixtures need no Python, uv, network or model. A stand-in `uv` (`tests/kev_support`) logs its calls and, for `uv run`, executes the test binary's ignored `kev_standin_server` test. Control files can make it exit or answer late. Stand-in `git` and `brew` cover setup. `MAILTRIAGE_TEST_KEV` (debug builds only) describes `apple_silicon`, `free_gb`, `memory_gb`, `port`, `start_seconds` and `download_seconds`. Existing non-Kev setup fixtures still invoke Python.
+Managed Kev holds a shared activity lock through startup and each classification response. Idle shutdown takes the exclusive activity lock, confirms group termination and ownership, releases the supervisor lock, and then releases activity so a waiting caller can restart it. The optional `provider.managed.idle_seconds` setting defaults to 300, applies on the next start, and is excluded from the classification-generation hash.
+
+The Kev fixtures need no Python, uv, external network or model. A stand-in `uv` (`tests/kev_support`) logs its calls and, for `uv run`, executes the test binary's ignored `kev_standin_server` test. Control files can make it exit or answer late. Stand-in `git` and `brew` cover setup. `MAILTRIAGE_TEST_KEV` (debug builds only) describes `apple_silicon`, `free_gb`, `memory_gb`, `port`, `start_seconds` and `download_seconds`. Existing non-Kev setup fixtures still invoke Python.
 
 ## Contract evidence
 
-Verified against public upstream documentation and Himalaya v2.1.0 source on 2026-09-23. No private credentials or live mailbox were used.
+The contract review on 2026-09-23 used public upstream documentation and Himalaya v2.1.0 source, without private credentials or a live mailbox. Later live Kev checks are recorded separately in [Verification](./verification.md#local-kev-2026-10-15).
 
 ### OpenRouter Decisions
 
@@ -40,7 +42,7 @@ A loopback HTTP fixture verifies the actual method, path, body, and response dec
 
 Verified on 2026-10-11 against Kev's source at tag `kev-1.0` (`kev/serve.py`, `kev/api.py`) and its [README](https://github.com/jaredpalmer/kev/blob/kev-1.0/README.md). `POST /v1/systemone` takes `{state, model, questions}` with `choice` and `noul` questions. It answers with typed `answers` in the Decisions shape, echoes `model` and rounds probabilities to four decimals. `GET /v1/models` lists `{name, run, ...}` per served name (`kev-latest`, `jev-latest`), with `run` matching `--run`. `KEV_API_KEY` makes the server require `Authorization: Bearer <key>` on `/v1/*`. `python -m kev.serve --run --host --port` starts it; weights go to `HF_HOME`.
 
-Loopback HTTP fixtures in `tests/provider_contract.rs` check the pinned OpenRouter request body with `"model":"kev-latest"` at `/v1/systemone`, the decoder, and Bearer transmission at the shared transport boundary. A Kev loopback endpoint receives no key even if one is supplied. A real install and example-message classification on Apple Silicon remain a pending human release gate; no timing, accuracy or memory result from that gate is claimed here.
+Loopback HTTP fixtures in `tests/provider_contract.rs` check the pinned OpenRouter request body with `"model":"kev-latest"` at `/v1/systemone`, the decoder, and Bearer transmission at the shared transport boundary. A Kev loopback endpoint receives no key even if one is supplied. A real install, example classifications, a 20-message mailbox pass, and offline inference were completed on Apple Silicon on 2026-10-15; see the [dated live-check record](./verification.md#local-kev-2026-10-15) for the measured timings, category retests, and limitations. Automatic shutdown with the configurable 5-minute default and a fresh restart also passed; the fresh classification took 11.15 seconds. Memory was not measured.
 
 ### Himalaya v2.1.0 IMAP
 
@@ -60,4 +62,4 @@ The release binary's `imap status --help`, `imap fetch --help`, and `message rea
 
 The adapter checks UIDVALIDITY before and after discovery and raw fetch. The service must bind stored locators to the account identity, mailbox, and UIDVALIDITY, and must persist discovered jobs before advancing a checkpoint.
 
-A test IMAP server is still required to verify Seen preservation and epoch transitions against a real binary/server pair.
+The [Dovecot end-to-end workflow](./verification.md#dovecot-end-to-end) exercises Seen preservation and UID transitions with a real Himalaya binary and test server. A provider-specific [live filing check](./mail-provider-check.md) is still required before relying on those behaviors on a real mailbox provider.

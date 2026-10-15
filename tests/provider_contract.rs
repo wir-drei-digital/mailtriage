@@ -531,6 +531,7 @@ fn managed_is_only_for_kev_and_serialized_only_when_set() {
     assert!(written.get("managed").is_none(), "{written}");
     let managed = ManagedKev {
         checkpoint: "jaredpalmer/kev-4b@v1.0".into(),
+        idle_seconds: None,
     };
     config.managed = Some(managed.clone());
     assert_eq!(
@@ -803,6 +804,7 @@ fn kev_endpoints_follow_the_url_rule() {
     let mut blank = adapter.new_config();
     blank.managed = Some(ManagedKev {
         checkpoint: " ".into(),
+        idle_seconds: None,
     });
     assert_eq!(
         check(&blank).as_deref(),
